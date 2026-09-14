@@ -2068,3 +2068,49 @@ sequence with one U+FFFD. Valid input is byte-identical.
 
 Guard: `EVERY JSON string escaper survives bytes that are not valid UTF-8`
 (server.zig), one invariant over all four.
+
+
+## Constrained JSON routing and buffer lifetimes
+
+A reasoning marker inside schema-valid JSON is data. The generator publishes the
+first payload token and byte offset; `reasoning_protocol.Delivery` is shared by
+streaming and batch HTTP responses and never reparses bytes after that boundary.
+This also applies with thinking disabled and to apparent tool-call markup.
+
+Keep both normalization and delivery buffers alive until the response is serialized.
+Assigning `final_text` from a router inside Anthropic's thinking-block scope and
+deinitializing that router at the closing brace caused invalid UTF-8 in the later
+text block. The live marker regression caught it even though the protocol tests
+passed. Guards: `tests/test_json_schema_protocol_routing.py` (all three APIs,
+streaming and non-streaming), the constrained JSON format-corpus invariant, and
+the split/UTF-8/stop tests in `src/reasoning_protocol.zig`.
+## Qwen3-Embedding sub-batches shared one KV cache (2026-09-10)
+
+A `/v1/embeddings` request splits into sub-batches once rows x longest input passes
+`EMBED_TOKEN_BUDGET` (64 x 512): 64 inputs with one over 512 tokens is enough. BERT and the
+EmbeddingGemma encoder hold no KV state, but Qwen3-Embedding runs the ordinary decoder forward,
+which appends to `xfm.cache`, and the cache was reset once per REQUEST (`runEmbedRequest`), not
+per sub-batch as issue #116 asked. Sub-batch 2 wrote its keys after sub-batch 1's, so its rows
+attended causally to sub-batch 1's rows of the same index at shifted RoPE positions. Where the
+cache write could carry those rows into the new shape (typically a second sub-batch no larger
+than the first) the request answered 200 with wrong vectors; otherwise it failed with
+`broadcast_shapes` and a 500, and the model's next embeddings request crashed in `freeKVEntry`
+(a separate `updateDense` defect). Fix: the reset moved from `runEmbedRequest` into
+`computeEmbeddingsBatch`, before every sub-batch. Guard: `tests/test_embeddings.sh` [4c] (the
+later of two equal sub-batches matches the same inputs sent alone, a second sub-batch with more
+rows answers 200, the server still answers afterwards).
+
+
+## A grammar-masked model idled on whitespace until the loop guard cut it (2026-09-12)
+
+Qwen3.8-27B, thinking on, a schema whose enum value spells reasoning markers: on a
+hot-cache hit greedy diverged a little from the cold run and, once the JSON grammar
+was armed, the model's real argmax was off-schema. The only admitted token it liked
+was `\n`, the grammar accepted free whitespace without bound, and thirty of them
+tripped the exact-cycle loop guard: `finish_reason "length"`, empty content, valid
+JSON never produced. Cold requests were fine, and main and PR #407 behaved the same.
+
+Fix: `json_grammar` counts consecutive free-whitespace bytes (`ws_run`, carried by
+snapshots) and rejects past `MAX_FREE_WS` (16) between tokens and after the root, so
+the mask forces the next structural byte. Content is never constrained by it, only
+formatting. Guard: `free whitespace is capped so a masked model cannot idle forever`.
