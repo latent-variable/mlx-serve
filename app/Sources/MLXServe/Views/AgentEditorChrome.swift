@@ -75,8 +75,8 @@ struct AgentSection<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AgentEditorMetrics.labelSpacing) {
-            Text(title)
-                .font(.title3.weight(.semibold))
+            Text(L10n.text(title))
+                .font(.app(.title3).weight(.semibold))
                 .foregroundStyle(.primary)
             content()
         }
@@ -117,8 +117,8 @@ struct AgentLabeledField<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AgentEditorMetrics.labelSpacing) {
-            Text(label)
-                .font(.headline)
+            Text(L10n.text(label))
+                .font(.app(.headline))
                 .foregroundStyle(.secondary)
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -153,15 +153,15 @@ struct AgentEditorRow<Trailing: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: alignment, spacing: 12) {
-                Text(title)
-                    .font(.headline)
+                Text(L10n.text(title))
+                    .font(.app(.headline))
                     .foregroundStyle(.primary)
                 Spacer(minLength: 8)
                 trailing()
             }
             if let caption {
-                Text(caption)
-                    .font(.subheadline)
+                Text(L10n.text(caption))
+                    .font(.app(.subheadline))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -187,9 +187,9 @@ struct AgentPillButton: View {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: systemImage)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.app(.subheadline, weight: .semibold))
                 }
-                Text(title).font(.callout)
+                Text(L10n.text(title)).font(.app(.callout))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)

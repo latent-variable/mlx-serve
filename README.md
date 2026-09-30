@@ -13,7 +13,9 @@
 [![Zig](https://img.shields.io/badge/built%20with-Zig-f7a41d?style=flat-square&logo=zig)](https://ziglang.org)
 [![ddalcu%2Fmlx-serve | Trendshift](https://trendshift.io/api/badge/repositories/43025)](https://trendshift.io/repositories/43025)
 
-**[mlxserve.com](https://mlxserve.com/)** · [Download MLX Core.app](https://github.com/ddalcu/mlx-serve/releases/latest) · [Docs](#docs) · [Changelog](CHANGELOG.md)
+[English](README.md) · [简体中文](README.zh-CN.md)
+
+**[mlxserve.com](https://mlxserve.com/)** · [Download MLX-Serve.app](https://github.com/ddalcu/mlx-serve/releases/latest) · [Docs](#docs) · [Changelog](CHANGELOG.md)
 
 mlx-serve is a native Zig server that runs **any LLM on Apple Silicon** — MLX-format models *and* every GGUF on HuggingFace (Qwen, Llama, Mistral, Gemma, DeepSeek V4 Flash, thousands more). It exposes **OpenAI-compatible** *and* **Anthropic-compatible** HTTP APIs out of the box, so the same `http://localhost:11234` works with Claude Code, the OpenAI SDK, Continue, Cursor, Open WebUI, and anything else that speaks one of those wires. Beyond text, the same server generates **images, video, music, speech (with voice cloning), and 3D models** — all natively on MLX. Ships with **MLX Core**, a macOS menu-bar app with chat, agent mode, MCP tool calling, and model management.
 
@@ -23,9 +25,9 @@ Needs macOS 26.2+ on Apple Silicon.
 
 ### Use the app (recommended)
 
-**MLX Core** is a signed, notarized macOS menu-bar app that bundles the server. Browse and download models with a progress UI, chat, run agent mode with MCP tools, generate images / video / music / speech / 3D, and tune every server flag from a Settings window. No terminal, nothing to configure. The server underneath is the same binary the CLI runs, on the same `http://localhost:11234`, so Claude Code and any OpenAI or Anthropic client can point at it while the app is running.
+**MLX-Serve** is a signed, notarized macOS menu-bar app that bundles the server. Browse and download models with a progress UI, chat, run agent mode with MCP tools, generate images / video / music / speech / 3D, and tune every server flag from a Settings window. No terminal, nothing to configure. The server underneath is the same binary the CLI runs, on the same `http://localhost:11234`, so Claude Code and any OpenAI or Anthropic client can point at it while the app is running.
 
-[<img src="website/appiconb.png" width="48" align="center">](https://github.com/ddalcu/mlx-serve/releases/latest) **[Download MLX Core.app](https://github.com/ddalcu/mlx-serve/releases/latest)** — latest release for macOS (Apple Silicon)
+[<img src="website/appiconb.png" width="48" align="center">](https://github.com/ddalcu/mlx-serve/releases/latest) **[Download MLX-Serve.app](https://github.com/ddalcu/mlx-serve/releases/latest)** — latest release for macOS (Apple Silicon)
 
 ### Install via Homebrew
 
@@ -52,11 +54,10 @@ And because mlx-serve **speaks the Ollama API** (`/api/chat`, `/api/generate`, `
 
 ### Build from source
 
-Needs Xcode 26.2+ with the Metal Toolchain component (if `xcrun -sdk macosx metal --version` fails, run `xcodebuild -downloadComponent MetalToolchain`):
+Needs Xcode 26.2+ and [Homebrew](https://brew.sh). The script downloads the Metal Toolchain component and installs the `Brewfile` (cmake + webp) when they are missing:
 
 ```bash
 git clone --recurse-submodules https://github.com/ddalcu/mlx-serve && cd mlx-serve
-brew bundle install --file=Brewfile   # cmake + webp
 ./app/build.sh                        # app + server, ad-hoc signed
 ```
 
@@ -77,6 +78,7 @@ If you're already on LM Studio, Ollama, or `mlx-lm` and wondering whether to swi
 | `run <model>` CLI with auto-download + REPL | ✅ | ❌ | ✅ | ❌ |
 | OpenAI Responses API + WebSockets | ✅ | 🟡 partial² | ❌ | ❌ |
 | DeepSeek V4 Flash (284B) | ✅ via ds4 | ❌ | ❌ | ❌ |
+| Typed decisions (Laya, Kev, `POST /v1/decisions`) | ✅ | ❌ | ❌ | ❌ |
 | Speculative decoding (PLD + drafter + native MTP) | ✅ | ❌ | partial | drafter only |
 | Decode speed (geomean vs LM Studio, identical weights) | **+26%** (MLX, shipping defaults) | baseline | ~−15% (GGUF, est.¹) | +11% (MLX) |
 | KV-cache quantization (4/8-bit) | ✅ | ❌ | partial | ✅ |
@@ -141,7 +143,7 @@ The full feature list is in [docs/app.md](docs/app.md).
 
 ## Supported models
 
-Native MLX dispatch for Gemma 3/4, DiffusionGemma, Qwen 3 / 3.5 / 3.6 / 3.8 / 3-Next, Meta's Muse-Glimmer-30B, inclusionAI Ling 3.0, DeepSeek V4 Flash (284B), Tencent Hunyuan 3 (295B), Thinking Machines Inkling Small (276B), poolside Laguna, Llama 3.x, Mistral, Nemotron-H, LFM2/2.5 (including the VL vision builds), plus embedding models (BERT, EmbeddingGemma, Qwen3-Embedding). Anything else runs as GGUF through the embedded llama.cpp, auto-routed by format. The full table with `model_type`s, chat formats and vision support is in [docs/models.md](docs/models.md).
+Native MLX dispatch for Gemma 3/4, DiffusionGemma, Qwen 3 / 3.5 / 3.6 / 3.8 / 3-Next, Meta's Muse-Glimmer-30B, inclusionAI Ling 3.0, DeepSeek V4 Flash (284B), Tencent Hunyuan 3 (295B), Thinking Machines Inkling Small (276B), poolside Laguna, Llama 3.x, Mistral, Nemotron-H, LFM2/2.5 (including the VL vision builds), plus embedding models (BERT, EmbeddingGemma, Qwen3-Embedding) and Laya typed-decision models (`POST /v1/decisions`). Anything else runs as GGUF through the embedded llama.cpp, auto-routed by format. The full table with `model_type`s, chat formats and vision support is in [docs/models.md](docs/models.md).
 
 ## Performance
 
@@ -207,7 +209,7 @@ mlx-serve is built on a 16 GB M4 Mac mini and a 128 GB M4 Max, and lately the ma
 
 So there's a fund for a Mac Studio Ultra. If mlx-serve replaced an API bill for you and you feel like chipping in, the button is [here](https://github.com/sponsors/ddalcu) (or [Buy Me a Coffee](https://buymeacoffee.com/ddalcu)). Nothing gets paywalled either way: MIT now, MIT after.
 
-**Progress:** ▱▱▱▱▱▱▱▱▱▱ 1%
+**Progress:** ▱▱▱▱▱▱▱▱▱▱ 2%
 
 ### Thanks to
 
@@ -215,6 +217,11 @@ So there's a fund for a Mac Studio Ultra. If mlx-serve replaced an API bill for 
 @skudinov
 @davidfekke
 @lojza3d
+@cpko
+@d-b
+@alinselea
+Johnny Dang
+@R0xr1te
 
 Everyone who chips in gets a line here, with a link if they want one, or stays anonymous. (msg me) Thank you in advance.
 
@@ -235,4 +242,4 @@ mlx-serve bundles third-party code that stays under its own license, including s
 
 ---
 
-★ **Found this useful? [Star the repo](https://github.com/ddalcu/mlx-serve/stargazers), [subscribe on YouTube](https://www.youtube.com/@DavidDalcu), [follow on X](https://x.com/ddalcu). It really does help others discover it.**
+★ **Found this useful? [Star the repo](https://github.com/ddalcu/mlx-serve/), [subscribe on YouTube](https://www.youtube.com/@DavidDalcu), [follow on X](https://x.com/ddalcu). It really does help others discover it.**

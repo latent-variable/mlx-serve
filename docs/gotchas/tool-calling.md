@@ -46,7 +46,7 @@ pi on Qwen3.8-Flash-Next, "make me a counter strike like 3d shooter": the model 
 pi on Qwen3.8-Flash-Next, same shooter session as the exact-cycle story above, one turn later: the model started a tool call rewriting `maps.js` with five 24x19 tile maps of `0`/`1`. On a per-digit tokenizer that window has six distinct tokens and sixteen possible interior 4-grams, so the near-repeat tier's three ratios all read "loop" by construction and it cut at exactly window fill, 1024 tokens into the call. Loop-stop suppresses tool parsing and unparsed markup never ships, so pi received `finish_reason "stop"` with no text and no call and ended the turn; the session log holds only the thinking block. A first fix added a fourth measure (8-gram novelty, which a two-symbol alphabet cannot saturate) and it passed a random-grid fixture; live on the 27B it failed in both directions: the model's maps are rows of `100000000000000000000001` nearly throughout, zero novelty at any gram length, and two of three seeds were then cut by the LONG exact tier instead (ten identical rows = a 28-token cycle at 10 reps). No content measure separates that file from a loop. What the file does, and a loop never does, is end: the near-repeat tier now convicts only past a 4096-token degenerate span (`near_repeat_min_span`, measured by the trim walk-back) and the long exact tier past 1024 (`degenerate_loop_long_min_span`: 37 identical map rows, or a 58-token sentence 18 times). Cost: a real restatement loop runs ~50 s and a sentence loop ~13 s before the cut, against destroying a finished file. Live: 5/5 seeds on the 27B now deliver the full tool call (2.8-3k tokens), 0 loop-stops; `tests/test_loop_stop_signal.sh` 15/15. Guard: `degenerateTail acquits a low-entropy STRUCTURED file that ends inside the span bar` (generate.zig: random bit grid, the lazy map, a hex dump). Left alone: a loop cut inside a buffered tool call still delivers nothing, by the #327 design.
 
 ### Claude Code's SessionStart hook output is a mid-list `system` message
-Same server log: a Claude Code request on `/v1/messages` (3 msgs, tool_msgs=0) logged `jinja render failed … System message must be at the beginning` and fell back to the generic format. Claude Code puts the top-level `system` first and then a `system`-ROLE message inside `messages` for hook output; we appended it in sequence, Qwen's template raises on any system turn past `loop.first`. Fix: `chat.foldSystemMessages` after the Anthropic parse joins every later system message into the leading one (`\n\n`), or creates it at index 0. The chat-completions surface is untouched: a mid-list system message there is the client's own choice. Guard: the `foldSystemMessages` test in chat.zig.
+Same server log: a Claude Code request on `/v1/messages` (3 msgs, tool_msgs=0) logged `jinja render failed … System message must be at the beginning` and fell back to the generic format. Claude Code puts the top-level `system` first and then a `system`-ROLE message inside `messages` for hook output; we appended it in sequence, Qwen's template raises on any system turn past `loop.first`. Fix: `chat.foldSystemMessages` joins every later system message into the leading one (`\n\n`), or creates it at index 0, at BOTH native-template parse sites — the Anthropic parse and the Responses input parser. Codex on `/v1/responses` carries a non-leading system the same way, and there the silent fallback is worse than a lost stop token: it re-bills the tool schema once per system, doubling the prompt. The chat-completions surface is untouched: a mid-list system message there is the client's own choice. Guards: the `foldSystemMessages` test in chat.zig, `parseInput folds a non-leading system into the leading one` in responses.zig.
 
 ### Tool-arg types must come from the SCHEMA, never from the value's spelling (strict-client rejection class)
 The tag tool formats carry no type information — `<parameter=replace_all>False</parameter>`, Gemma's `key:false` — so the parsers inferred the JSON type from the value's BYTES (`chat.isJsonLiteral`, used by `parseHermesToolCall` + `convertGemma4Value`; `parseXmlElementToolCall` was worse and typed *everything* as a string). That guess is wrong in **both** directions, and strict clients (Claude Code, pi, opencode) reject both:
@@ -812,3 +812,39 @@ the document only when both agree. An identical repeat carries no ambiguity; a
 conflicting one stays a string rather than picking a value. A failed container
 coercion now logs at debug. Guard: the identical-vs-conflicting duplicate test
 beside `coerceToolArgsToSchema`.
+
+## Thinking loops at long context were the model re-reading its own reasoning (2026-09-22)
+
+A pi session on Qwen3.8 hit `[loop-stop] near_repeat` on every long turn past
+~100k tokens ("OK I'm going in circles"), on every quant and on the 27B.
+Spec decode, the prefix cache and the sampler were each ruled out by replaying
+the captured request with them off.
+
+Cause: pi round-trips `reasoning_content` for every assistant turn, and the
+Qwen3.8 template renders `<think>` for ALL of them when `preserve_thinking` is
+undefined. Half the rendered prompt was prior reasoning, including the
+previous turn's loop.
+
+Fix: `serializeExtraContext` passes `preserve_thinking:false` to any template
+that reads it, so only turns after the last user query keep their reasoning.
+Qwen's default is deliberate (3.6+ is trained to reuse prior thinking), so the
+model's `chat_template_kwargs` in `model-settings.json`, or the request's own,
+can turn it back on. Precedence: request, model settings, generation_config, arch.
+Guard: the `preserve_thinking` test beside `serializeExtraContext`,
+`resolveChatThinking` in `server.zig`.
+
+## A no-tools reply was scrubbed to nothing, but only when not streaming (LFM2.5, 2026-09-24)
+
+A system prompt that listed a tool in LFM's own format, with no `tools` field,
+made LFM2.5 answer `<|tool_call_start|>[get_weather(city='Paris')]<|tool_call_end|>`.
+Streaming sent it raw; non-stream returned `content: ""` with `finish_reason: stop`
+on chat, messages and responses.
+
+Cause: `splitThinkBlock` runs `trimLeakedToolMarkup` on every non-stream reply,
+and `"<|tool_call"` is a prefix of LFM's opener. The stream gate only runs with
+tools. vLLM, SGLang, llama.cpp and Ollama parse tool calls only when the request
+has tools and otherwise pass the text through.
+
+Fix: the non-stream split keeps markup when the request has no tools (chat,
+messages, responses), matching the stream and the other engines.
+Guard: `tests/test_no_tools_markup_passthrough.sh`.

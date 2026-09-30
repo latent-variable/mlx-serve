@@ -13,8 +13,8 @@ import SwiftUI
 /// a message. And it clears itself — `AppState.localModels` is `@Published`
 /// and the card refreshes it when the transfer lands.
 ///
-/// Cancel CLOSES the window. Dismissing to the dead composer underneath is the
-/// state this sheet exists to replace.
+/// Cancel ends the sheet and keeps the window open, so the app can be explored
+/// before any download; the sheet returns when the window next opens.
 struct ChatModelGateSheet: View {
     let pick: RecommendedModelPick
     let onCancel: () -> Void
@@ -37,10 +37,10 @@ struct ChatModelGateSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(headline)
-                    .font(.title3.weight(.semibold))
-                Text(subhead)
-                    .font(.callout)
+                Text(L10n.text(headline))
+                    .font(.app(.title3).weight(.semibold))
+                Text(L10n.text(subhead))
+                    .font(.app(.callout))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -49,7 +49,8 @@ struct ChatModelGateSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", action: onCancel)
+                Button(action: onCancel, label: { Text(L10n.text(state.dismissLabel))
+                    .font(.app(.body)) })
                     .keyboardShortcut(.cancelAction)
             }
         }
@@ -69,7 +70,7 @@ struct ChatModelGateSheet: View {
         case .downloading:
             return "Chat opens as soon as this finishes — you can leave it running."
         default:
-            return "MLX Core runs models on your own Mac, so there's a one-time download first."
+            return "MLX-Serve runs models on your own Mac, so there's a one-time download first."
         }
     }
 }

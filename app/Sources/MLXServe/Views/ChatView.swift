@@ -65,26 +65,26 @@ struct ToolApprovalSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
                 Image(systemName: "shield.lefthalf.filled")
-                    .font(.title2)
+                    .font(.app(.title2))
                     .foregroundStyle(.orange)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Allow this tool call?")
-                        .font(.headline)
-                    Text(headline)
-                        .font(.subheadline)
+                    Text(L10n.text("Allow this tool call?"))
+                        .font(.app(.headline))
+                    Text(L10n.text(headline))
+                        .font(.app(.subheadline))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Tool: \(request.toolName)")
-                    .font(.caption.weight(.semibold))
+                Text(L10n.format("Tool: %@", request.toolName))
+                    .font(.app(.caption).weight(.semibold))
                     .foregroundStyle(.secondary)
                 if argPairs.isEmpty && !request.rawArguments.isEmpty {
                     ScrollView {
-                        Text(request.rawArguments)
-                            .font(.system(size: 11, design: .monospaced))
+                        Text(L10n.text(request.rawArguments))
+                            .font(.app(.subheadline, design: .monospaced))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(8)
@@ -94,18 +94,18 @@ struct ToolApprovalSheet: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 } else if argPairs.isEmpty {
                     Text("(no arguments)")
-                        .font(.caption.italic())
+                        .font(.app(.caption).italic())
                         .foregroundStyle(.tertiary)
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 4) {
                             ForEach(argPairs, id: \.0) { (k, v) in
                                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                    Text(k)
-                                        .font(.system(size: 11, design: .monospaced).weight(.semibold))
+                                    Text(L10n.text(k))
+                                        .font(.app(.subheadline, design: .monospaced).weight(.semibold))
                                         .foregroundStyle(.secondary)
-                                    Text(v)
-                                        .font(.system(size: 11, design: .monospaced))
+                                    Text(L10n.text(v))
+                                        .font(.app(.subheadline, design: .monospaced))
                                         .textSelection(.enabled)
                                         .lineLimit(8)
                                         .fixedSize(horizontal: false, vertical: true)
@@ -125,7 +125,7 @@ struct ToolApprovalSheet: View {
                 Button(role: .destructive) {
                     onDeny()
                 } label: {
-                    Text("Deny").frame(minWidth: 70)
+                    Text("Deny").font(.app(.body)).frame(minWidth: 70)
                 }
                 .keyboardShortcut(.cancelAction)
 
@@ -134,13 +134,13 @@ struct ToolApprovalSheet: View {
                 Button {
                     onAllowAll()
                 } label: {
-                    Text("Allow all tools this session").frame(minWidth: 180)
+                    Text("Allow all tools this session").font(.app(.body)).frame(minWidth: 180)
                 }
 
                 Button {
                     onAllow()
                 } label: {
-                    Text("Allow").frame(minWidth: 70)
+                    Text("Allow").font(.app(.body)).frame(minWidth: 70)
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
@@ -166,16 +166,19 @@ private struct AttachmentPreviewRow: View {
                 ForEach(Array(images.enumerated()), id: \.offset) { idx, pending in
                     imageChip(idx: idx, img: pending.image)
                 }
+                // Each `detail` is localized by its producer, not by `fileChip`:
+                // a format key has to be completed BEFORE the catalog lookup, or
+                // the lookup keys on the finished sentence and can never match.
                 ForEach(Array(pdfs.enumerated()), id: \.offset) { idx, pdf in
-                    fileChip(idx: idx, name: pdf.name, detail: "PDF · \(pdf.text.count) chars",
+                    fileChip(idx: idx, name: pdf.name, detail: L10n.format("PDF · %lld chars", pdf.text.count),
                              icon: "doc.text.fill", tint: .red) { pdfs.remove(at: idx) }
                 }
                 ForEach(Array(videos.enumerated()), id: \.offset) { idx, vid in
-                    fileChip(idx: idx, name: vid.name, detail: "Video · \(vid.frameCount) frames",
+                    fileChip(idx: idx, name: vid.name, detail: L10n.format("Video · %lld frames", vid.frameCount),
                              icon: "video.fill", tint: .orange) { videos.remove(at: idx) }
                 }
                 ForEach(Array(audio.enumerated()), id: \.offset) { idx, clip in
-                    fileChip(idx: idx, name: clip.name, detail: String(format: "Audio · %.1fs", clip.durationSeconds),
+                    fileChip(idx: idx, name: clip.name, detail: L10n.format("Audio · %.1fs", clip.durationSeconds),
                              icon: "waveform", tint: .purple) { audio.remove(at: idx) }
                 }
             }
@@ -187,7 +190,7 @@ private struct AttachmentPreviewRow: View {
     private func removeButton(_ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: "xmark.circle.fill")
-                .font(.system(size: 14))
+                .font(.app(.body))
                 .foregroundStyle(.white)
                 .background(Circle().fill(.black.opacity(0.5)))
         }
@@ -212,18 +215,20 @@ private struct AttachmentPreviewRow: View {
         ZStack(alignment: .topTrailing) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 18))
+                    .font(.app(.title2))
                     .foregroundStyle(.white)
                     .frame(width: 32, height: 32)
                     .background(tint.opacity(0.85))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(name)
-                        .font(.caption.weight(.medium))
+                        .font(.app(.caption).weight(.medium))
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    // Verbatim: every caller hands in text its producer already
+                    // localized, so a lookup here would re-key the sentence.
                     Text(detail)
-                        .font(.caption2)
+                        .font(.app(.caption2))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -247,18 +252,18 @@ private struct DocumentFolderChip: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: iconName)
-                .font(.system(size: 18))
+                .font(.app(.title2))
                 .foregroundStyle(.white)
                 .frame(width: 32, height: 32)
                 .background(tint.opacity(0.85))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 1) {
-                Text(index.folderName)
-                    .font(.caption.weight(.medium))
+                Text(L10n.text(index.folderName))
+                    .font(.app(.caption).weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(statusText)
-                    .font(.caption2)
+                Text(L10n.text(statusText))
+                    .font(.app(.caption2))
                     .foregroundStyle(.secondary)
             }
             if case .indexing(let done, let total) = index.state {
@@ -268,7 +273,7 @@ private struct DocumentFolderChip: View {
             }
             Button(action: onRemove) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 14))
+                    .font(.app(.body))
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -316,10 +321,10 @@ private struct MicButton: View {
         Button(action: toggle) {
             HStack(spacing: 4) {
                 Image(systemName: recorder.isRecording ? "stop.fill" : "mic.fill")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.app(.callout, weight: .medium))
                 if recorder.isRecording {
                     Text(timeString(recorder.duration))
-                        .font(.caption2.monospacedDigit().weight(.medium))
+                        .font(.app(.caption2).monospacedDigit().weight(.medium))
                 }
             }
             .foregroundStyle(recorder.isRecording ? Color.white : Color.secondary)
@@ -373,7 +378,6 @@ enum PasteFileKind: String, Equatable {
 struct ChatView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var server: ServerManager
-    @Environment(\.dismissWindow) private var dismissWindow
     /// The two-column (chat) split's visibility.
     @State private var columnVisibility = NavigationSplitViewVisibility.automatic
     /// The three-column (Tasks / Agents) split's visibility. `.all` is the only
@@ -559,9 +563,10 @@ struct ChatView: View {
     /// are required and the order is load-bearing — a window with an attached
     /// sheet can't be closed, and dismissing to the composer underneath is the
     /// dead end this gate exists to replace.
+    /// Ends the sheet and leaves the window open to look around; it comes back
+    /// the next time the chat window opens with nothing to chat with.
     private func cancelGate() {
         gateCancelled = true
-        DispatchQueue.main.async { dismissWindow(id: "chat") }
     }
 }
 
@@ -598,6 +603,22 @@ struct SidebarReorder: ViewModifier {
             return true
         }
         func dropExited(info: DropInfo) {}
+    }
+}
+
+/// A group heading (or the Sessions one, nil) as a drop target: the dragged
+/// row joins it as the drag enters, the same live idiom as `SidebarReorder`.
+struct SidebarGroupDrop: DropDelegate {
+    @Binding var dragging: UUID?
+    let assign: (UUID) -> Void
+
+    func dropEntered(info: DropInfo) {
+        if let id = dragging { assign(id) }
+    }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+    func performDrop(info: DropInfo) -> Bool {
+        dragging = nil
+        return true
     }
 }
 
@@ -741,8 +762,10 @@ enum SidebarDeleteConfirm {
     }
 
     /// The count is the thing to check before agreeing, so it is in the title.
+    /// The dialog renders this verbatim, so the format runs here.
     static func title(count: Int) -> String {
-        count == 1 ? "Delete this chat?" : "Delete \(count) chats?"
+        count == 1 ? L10n.text("Delete this chat?")
+                   : L10n.format("Delete %lld chats?", Int64(count))
     }
 }
 
@@ -841,6 +864,18 @@ struct SidebarClearBandBottomKey: PreferenceKey {
 }
 
 struct ChatSidebar: View {
+    private enum GroupSheet: Identifiable {
+        case create(Set<UUID>)
+        case rename(UUID, String)
+
+        var id: String {
+            switch self {
+            case .create: return "create"
+            case .rename(let id, _): return id.uuidString
+            }
+        }
+    }
+
     /// The one coordinate space the three band measurements share.
     ///
     /// Load-bearing that it is the COLUMN's own space and not `.global`: a
@@ -862,10 +897,15 @@ struct ChatSidebar: View {
     @EnvironmentObject var terminals: TerminalSessionStore
     @Environment(\.openWindow) private var openWindow
     @State private var hoveredSessionId: UUID?
+    /// Mirror of `ChatTurnEngine.activity`, received explicitly for the same
+    /// reason `downloads` is: AppState does not forward the engine's changes.
+    @State private var activity = SidebarActivity()
     /// The row being dragged to a new slot, nil outside a drag.
     @State private var draggingRowId: UUID?
     /// The rename dialog's text.
     @State private var renameDraft = ""
+    /// The group name sheet, nil when closed.
+    @State private var groupSheet: GroupSheet?
     /// Where a shift-click ranges FROM. Moved by every plain / cmd click, left
     /// alone by shift itself so dragging a range up and down keeps re-ranging
     /// from the same origin instead of walking away from it.
@@ -953,24 +993,30 @@ struct ChatSidebar: View {
         }
     }
 
-    /// The panel top to bottom: Agents rows, then Sessions rows (chats and
-    /// terminals interleaved), both in the ONE dragged order. `visible` is
-    /// what the ⌘ numbers and a drop read; `chats` is the conversation subset
-    /// a shift-range runs over — the split is a heading, not a wall.
-    private var panelRows: (agents: [SidebarChatRows.Row], sessions: [SidebarChatRows.Row],
-                            visible: [UUID], chats: [UUID]) {
-        let groups = SidebarSessionGroups.split(appState.visibleChatSessions)
-        let agents = SidebarChatRows.merge(chats: groups.agents, terminals: [],
-                                           order: appState.sidebarOrder)
-        let sessions = SidebarChatRows.merge(chats: groups.chats,
-                                             terminals: terminals.sessions.sessions,
-                                             order: appState.sidebarOrder)
-        let all = agents + sessions
-        let chats = all.compactMap { row -> UUID? in
+    /// The panel top to bottom: ungrouped Agents rows, the user's groups, then
+    /// ungrouped Sessions rows (chats and terminals interleaved), all in the
+    /// ONE dragged order. `visible` is what the ⌘ numbers read (collapsed
+    /// groups hide theirs); `all` is what a drop reorders, so a drag never
+    /// forgets a collapsed row's slot; `chats` is the conversation subset a
+    /// shift-range runs over — the split is a heading, not a wall.
+    private var panelRows: (agents: [SidebarChatRows.Row],
+                            groups: [(group: SidebarGroups.Group, rows: [SidebarChatRows.Row])],
+                            sessions: [SidebarChatRows.Row],
+                            visible: [UUID], all: [UUID], chats: [UUID]) {
+        let agentIds = Set(SidebarSessionGroups.split(appState.visibleChatSessions).agents.map(\.id))
+        let rows = SidebarChatRows.merge(chats: appState.visibleChatSessions,
+                                         terminals: terminals.sessions.sessions,
+                                         order: appState.sidebarOrder)
+        let parts = appState.sidebarGroups.partition(rows)
+        let agents = parts.ungrouped.filter { agentIds.contains($0.id) }
+        let sessions = parts.ungrouped.filter { !agentIds.contains($0.id) }
+        let shown = agents + parts.groups.flatMap { $0.group.collapsed ? [] : $0.rows } + sessions
+        let all = agents + parts.groups.flatMap(\.rows) + sessions
+        let chats = shown.compactMap { row -> UUID? in
             if case .chat(let s) = row { return s.id }
             return nil
         }
-        return (agents, sessions, all.map(\.id), chats)
+        return (agents, parts.groups, sessions, shown.map(\.id), all.map(\.id), chats)
     }
 
     /// Write a selection outcome back. Selection BEFORE `activeChatId`, for the
@@ -1010,33 +1056,27 @@ struct ChatSidebar: View {
             // Conversations and sandbox terminals, one list (`panelRows`).
             // Terminals take no part in multi-select; they do wear ⌘ numbers.
             let rows = panelRows
-            let agentRows = rows.agents, sessionRows = rows.sessions
-            let visible = rows.visible, ordered = rows.chats
             LazyVStack(alignment: .leading, spacing: 2) {
-                if !agentRows.isEmpty {
+                if !rows.agents.isEmpty {
                     sectionHeader("Agents")
-                    ForEach(agentRows) { row in
-                        if case .chat(let session) = row {
-                            sessionRow(session, ordered: ordered)
-                                .modifier(reorderable(session.id, visible: visible))
-                        }
+                    ForEach(rows.agents) { panelRow($0, ordered: rows.chats, all: rows.all) }
+                }
+                ForEach(rows.groups, id: \.group.id) { entry in
+                    groupHeader(entry.group)
+                    if !entry.group.collapsed {
+                        ForEach(entry.rows) { panelRow($0, ordered: rows.chats, all: rows.all) }
                     }
                 }
-                sectionHeader("Sessions") { newSessionMenu }
-                ForEach(sessionRows) { row in
-                    switch row {
-                    case .chat(let session):
-                        sessionRow(session, ordered: ordered)
-                            .modifier(reorderable(session.id, visible: visible))
-                    case .terminal(let t):
-                        terminalRow(t)
-                            .modifier(reorderable(t.id, visible: visible))
-                    }
-                }
+                sectionHeader("Sessions") { newSessionMenu() }
+                    .onDrop(of: [.text], delegate: groupDrop(nil))
+                ForEach(rows.sessions) { panelRow($0, ordered: rows.chats, all: rows.all) }
             }
             .padding(.horizontal, ChatMetrics.sidebarGutter)
             .padding(.bottom, 8)
         }
+        .onReceive(appState.chatEngine.$activity) { activity = $0; clearSeenActivity(in: $0) }
+        .onChange(of: appState.sidebarSelection) { _, _ in clearSeenActivity(in: activity) }
+        .onChange(of: appState.chatWorkspace) { _, _ in clearSeenActivity(in: activity) }
         .onAppear {
             // The rows READ the selection to decide their highlight, so it has
             // to be primed: `activeChatId` is usually set long before this panel
@@ -1101,25 +1141,39 @@ struct ChatSidebar: View {
                                  set: { if !$0 { appState.pendingChatDeletion = nil } }),
             presenting: appState.pendingChatDeletion
         ) { ids in
-            Button("Delete", role: .destructive) {
+            Button(role: .destructive) {
                 deleteChats(ids)
                 appState.pendingChatDeletion = nil
-            }
+            } label: { Text("Delete")
+                .font(.app(.body)) }
             // Return deletes. The dialog is the second time you have said so
             // (a menu command or a row's Delete raised it), and reaching for
             // the trackpad to confirm a decision already made is the whole
             // reason this asked to be a keyboard app. Escape still cancels —
             // AppKit gives the `.cancel` role that for free.
             .keyboardShortcut(.defaultAction)
-            Button("Cancel", role: .cancel) { appState.pendingChatDeletion = nil }
+            Button(role: .cancel) { appState.pendingChatDeletion = nil } label: { Text("Cancel")
+                .font(.app(.body)) }
         } message: { _ in
-            Text("This can't be undone.")
+            Text(L10n.text("This can't be undone.")).font(.app(.body))
         }
         // ⌘1…⌘9. In the sidebar rather than the window's `.commands` because
         // they address THIS view's conversation list; hidden in a background so
         // they cost no layout.
         .background(quickSwitchShortcuts)
         .background(renameDialog)
+        .sheet(item: $groupSheet) { sheet in
+            switch sheet {
+            case .create(let ids):
+                SidebarGroupSheet(title: "New Group", action: "Create", name: "") {
+                    appState.sidebarGroups.create($0, with: ids)
+                }
+            case .rename(let id, let name):
+                SidebarGroupSheet(title: "Rename Group", action: "Rename", name: name) {
+                    appState.sidebarGroups.rename(id, to: $0)
+                }
+            }
+        }
         // The platform's own scroll-edge effect at BOTH ends: rows pass under
         // the window's top edge and under the New Chat row (a `safeAreaInset`,
         // so content scrolls beneath it), and a soft edge is how macOS frosts
@@ -1269,6 +1323,51 @@ struct ChatSidebar: View {
             sessionId: active, activeChatId: active, workspace: appState.chatWorkspace)
     }
 
+    /// A finished mark on a selected, lit row has been seen. Deferred one
+    /// turn: this runs from the engine's own publisher.
+    private func clearSeenActivity(in activity: SidebarActivity) {
+        guard conversationsAreLit else { return }
+        let seen = activity.unseen.intersection(appState.sidebarSelection)
+        guard !seen.isEmpty else { return }
+        Task { @MainActor in
+            for id in seen { appState.chatEngine.markActivitySeen(id) }
+        }
+    }
+
+    /// The row's turn mark: green pulsing disc generating, blue spinning
+    /// dashed disc running tools; once a turn ended in a chat that was not
+    /// open, a grey check, or an orange mark when it ended on an error card.
+    /// Three separate views, not one image swapping symbols: a symbol effect
+    /// deactivated on a shared view finishes its cycle, so the grey check
+    /// would still make one turn.
+    @ViewBuilder
+    private func activityDot(for dot: SidebarActivity.Dot) -> some View {
+        switch dot {
+        case .generating:
+            Image(systemName: "inset.filled.circle")
+                .font(.app(.subheadline))
+                .foregroundStyle(.green)
+                .symbolEffect(.pulse.byLayer, options: .repeat(.continuous))
+                .help("Generating")
+        case .tool:
+            Image(systemName: "inset.filled.circle.dashed")
+                .font(.app(.subheadline))
+                .foregroundStyle(.blue)
+                .symbolEffect(.rotate.clockwise.byLayer, options: .repeat(.continuous))
+                .help("Running a tool")
+        case .finished:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.app(.subheadline))
+                .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                .help("Finished")
+        case .attention:
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.app(.subheadline))
+                .foregroundStyle(.orange)
+                .help("Stopped with an error")
+        }
+    }
+
     /// One click on a conversation row. The modifier maths is pure and lives in
     /// `SidebarMultiSelect`; this is only the wiring — read the flags off the
     /// event AppKit is currently dispatching (a SwiftUI Button action has no
@@ -1322,6 +1421,77 @@ struct ChatSidebar: View {
         appState.deleteSessions(ids)
     }
 
+    @ViewBuilder
+    private func panelRow(_ row: SidebarChatRows.Row, ordered: [UUID], all: [UUID]) -> some View {
+        switch row {
+        case .chat(let session):
+            sessionRow(session, ordered: ordered)
+                .modifier(reorderable(session.id, visible: all))
+        case .terminal(let t):
+            terminalRow(t)
+                .modifier(reorderable(t.id, visible: all))
+        }
+    }
+
+    /// A user group's heading: the label folds it, the + adds a chat or
+    /// terminal straight into it, a row dropped on it joins it, right-click
+    /// renames or deletes it (its rows go back to their sections).
+    private func groupHeader(_ group: SidebarGroups.Group) -> some View {
+        HStack(spacing: 4) {
+            Button {
+                withAnimation { appState.sidebarGroups.toggleCollapsed(group.id) }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: group.collapsed ? "chevron.right" : "chevron.down")
+                        .frame(width: 10)
+                    Image(systemName: "folder")
+                    Text(verbatim: group.name)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .font(.app(.caption).weight(.semibold))
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            newSessionMenu(group: group.id)
+        }
+        .padding(.horizontal, ChatMetrics.sidebarRowInset)
+        .padding(.top, 10)
+        .padding(.bottom, 2)
+        .onDrop(of: [.text], delegate: groupDrop(group.id))
+        .contextMenu {
+            Button { groupSheet = .rename(group.id, group.name) } label: { Text("Rename Group…")
+                .font(.app(.body)) }
+            Button(role: .destructive) { appState.sidebarGroups.delete(group.id) } label: { Text("Delete Group")
+                .font(.app(.body)) }
+        }
+    }
+
+    private func groupDrop(_ group: UUID?) -> SidebarGroupDrop {
+        SidebarGroupDrop(dragging: $draggingRowId) { appState.sidebarGroups.assign([$0], to: group) }
+    }
+
+    /// "Move to Group" for a row, or for the multi-selection it sits in.
+    @ViewBuilder
+    private func groupMenu(for ids: Set<UUID>, current: UUID?) -> some View {
+        Menu("Move to Group") {
+            ForEach(appState.sidebarGroups.groups) { group in
+                Button { appState.sidebarGroups.assign(ids, to: group.id) } label: { Text(group.name)
+                    .font(.app(.body)) }
+                    .disabled(ids.count == 1 && group.id == current)
+            }
+            if !appState.sidebarGroups.groups.isEmpty { Divider() }
+            Button { groupSheet = .create(ids) } label: { Text("New Group…")
+                .font(.app(.body)) }
+        }
+        if current != nil {
+            Button { appState.sidebarGroups.assign(ids, to: nil) } label: { Text("Remove from Group")
+                .font(.app(.body)) }
+        }
+        Divider()
+    }
+
     /// A section heading, sitting on the same left edge as the rows under it.
     private func sectionHeader(_ title: String) -> some View {
         sectionHeader(title) { EmptyView() }
@@ -1331,8 +1501,8 @@ struct ChatSidebar: View {
     private func sectionHeader<T: View>(_ title: String,
                                         @ViewBuilder trailing: () -> T) -> some View {
         HStack(spacing: 4) {
-            Text(title)
-                .font(.caption.weight(.semibold))
+        Text(L10n.text(title))
+                .font(.app(.caption).weight(.semibold))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             trailing()
@@ -1344,16 +1514,17 @@ struct ChatSidebar: View {
         .padding(.bottom, 2)
     }
 
-    /// The + beside Sessions: a new chat first, then the coding CLIs (the
-    /// tray's own list, shared, so the two cannot drift; DMG-only — the App
-    /// Store build can't detect or launch other apps' CLIs).
-    private var newSessionMenu: some View {
+    /// The + beside Sessions and each group: a new chat first, then the coding
+    /// CLIs (the tray's own list, shared, so the two cannot drift; DMG-only —
+    /// the App Store build can't detect or launch other apps' CLIs). A group's
+    /// + files the new row under it.
+    private func newSessionMenu(group: UUID? = nil) -> some View {
         Menu {
             Button {
                 appState.showConversation()
-                _ = appState.newChatSession()
+                appState.sidebarGroups.assign([appState.newChatSession()], to: group)
             } label: {
-                Label("New Chat", systemImage: "square.and.pencil")
+                Label("New Chat", systemImage: "square.and.pencil").font(.app(.body))
             }
             if BuildFeatures.current.cliLauncher {
                 Divider()
@@ -1363,12 +1534,12 @@ struct ChatSidebar: View {
                     servedModelId: appState.server.chatModelId ?? "mlx-serve",
                     serverContextLength: appState.server.chatModelInfo?.contextLength,
                     models: appState.server.allModels,
-                    openSandboxAgent: { appState.startTerminal(agentId: $0) },
-                    openHostCLI: { appState.startTerminal(hostCLI: $0) })
+                    openSandboxAgent: { appState.startTerminal(agentId: $0, group: group) },
+                    openHostCLI: { appState.startTerminal(hostCLI: $0, group: group) })
             }
         } label: {
             Image(systemName: "plus")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.app(.headline, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
@@ -1408,26 +1579,30 @@ struct ChatSidebar: View {
                 HStack(spacing: 4) {
                     if session.isExternalBridge {
                         Image(systemName: "paperplane.fill")
-                            .font(.system(size: 9))
+                            .font(.app(.caption2))
                             .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.accentColor)
                             .help("Telegram conversation (view only)")
                     }
                     if let agent {
                         Image(systemName: agent.symbol)
-                            .font(.system(size: 10))
+                            .font(.app(.caption2))
                             .foregroundStyle(Color.accentColor)
                     } else if !session.isExternalBridge {
                         // Every row in this column carries a glyph saying what
                         // it is — a terminal, an agent, a plain conversation.
                         Image(systemName: "bubble.left")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.app(.subheadline, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
-                    Text(ChatSessionTitle.display(title: session.title,
-                                                  agentName: agent?.name))
-                        .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                    let displayTitle = ChatSessionTitle.display(title: session.title,
+                                                                agentName: agent?.name)
+                    Text(displayTitle == "New Chat" ? L10n.text(displayTitle) : displayTitle)
+                        .font(.app(.rowTitle))
                         .lineLimit(1)
                         .foregroundStyle(.primary)
+                    if let dot = activity.dot(for: session.id, isSelected: isSelected) {
+                        activityDot(for: dot)
+                    }
                 }
                 // What this particular conversation is about, displaced from
                 // the title line by the agent's name. It is also the only
@@ -1437,8 +1612,8 @@ struct ChatSidebar: View {
                 // one is a single line exactly like a destination row.
                 if let subject = ChatSessionTitle.subject(title: session.title,
                                                           agentName: agent?.name) {
-                    Text(subject)
-                        .font(.caption2)
+                    Text(L10n.text(subject))
+                        .font(.app(.caption2))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .foregroundStyle(.secondary)
@@ -1493,7 +1668,7 @@ struct ChatSidebar: View {
                     requestDeleteChats([session.id], keyboard: false)
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 14))
+                        .font(.app(.body))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(.secondary)
                 }
@@ -1506,18 +1681,24 @@ struct ChatSidebar: View {
             hoveredSessionId = isHovered ? session.id : nil
         }
         .contextMenu {
-            Button("Rename…") { beginRename(session.id, current: session.title) }
             // Right-clicking INSIDE a multi-selection acts on all of it, and
-            // says how many; right-clicking outside one is a single delete.
-            if appState.sidebarSelection.count > 1,
-               appState.sidebarSelection.contains(session.id) {
-                Button("Delete \(appState.sidebarSelection.count) Chats", role: .destructive) {
+            // says how many; right-clicking outside one acts on the row.
+            let inSelection = appState.sidebarSelection.count > 1
+                && appState.sidebarSelection.contains(session.id)
+            Button { beginRename(session.id, current: session.title) } label: { Text("Rename…")
+                .font(.app(.body)) }
+            groupMenu(for: inSelection ? appState.sidebarSelection : [session.id],
+                      current: appState.sidebarGroups.group(of: session.id))
+            if inSelection {
+                Button(role: .destructive) {
                     requestDeleteChats(appState.sidebarSelection, keyboard: false)
-                }
+                } label: { Text(L10n.format("Delete %lld Chats", Int64(appState.sidebarSelection.count)))
+                    .font(.app(.body)) }
             } else {
-                Button("Delete", role: .destructive) {
+                Button(role: .destructive) {
                     requestDeleteChats([session.id], keyboard: false)
-                }
+                } label: { Text("Delete")
+                    .font(.app(.body)) }
             }
         }
     }
@@ -1533,15 +1714,15 @@ struct ChatSidebar: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: t.isInOwnWindow ? "macwindow" : "terminal")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.app(.subheadline, weight: .medium))
                     .foregroundStyle(terminalTint(t.phase))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(t.displayName)
-                        .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                    Text(L10n.text(t.displayName))
+                        .font(.app(.rowTitle))
                         .lineLimit(1)
                         .foregroundStyle(.primary)
                     Text((t.workspace as NSString).lastPathComponent)
-                        .font(.caption2)
+                        .font(.app(.caption2))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .foregroundStyle(.secondary)
@@ -1569,7 +1750,7 @@ struct ChatSidebar: View {
                     requestCloseTerminal(t.id)
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 14))
+                        .font(.app(.body))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(.secondary)
                 }
@@ -1582,11 +1763,15 @@ struct ChatSidebar: View {
             hoveredSessionId = isHovered ? t.id : nil
         }
         .contextMenu {
-            Button("Rename…") { beginRename(t.id, current: t.displayName) }
+            Button { beginRename(t.id, current: t.displayName) } label: { Text("Rename…")
+                .font(.app(.body)) }
+            groupMenu(for: [t.id], current: appState.sidebarGroups.group(of: t.id))
             if t.isInOwnWindow {
-                Button("Show Window") { showTerminal(t.id) }
+                Button { showTerminal(t.id) } label: { Text("Show Window")
+                    .font(.app(.body)) }
             } else {
-                Button("Move Tab to New Window") { moveToNewWindow(t.id) }
+                Button { moveToNewWindow(t.id) } label: { Text("Move Tab to New Window")
+                    .font(.app(.body)) }
             }
             Menu("Theme") {
                 Toggle("App Default", isOn: Binding(
@@ -1599,9 +1784,10 @@ struct ChatSidebar: View {
                         set: { _ in terminals.setTheme(t.id, themeId: theme.id) }))
                 }
             }
-            Button(t.isActive ? "End Session" : "Close", role: .destructive) {
+            Button(role: .destructive) {
                 requestCloseTerminal(t.id)
-            }
+            } label: { Text(L10n.text(t.isActive ? "End Session" : "Close"))
+                .font(.app(.body)) }
         }
         // Per row, so only the row asked presents; a live session's ✕ is a
         // small target and a misclick must not kill a TUI.
@@ -1610,11 +1796,13 @@ struct ChatSidebar: View {
             isPresented: Binding(get: { appState.pendingTerminalClose == t.id },
                                  set: { if !$0 { appState.pendingTerminalClose = nil } })
         ) {
-            Button("End Session", role: .destructive) { appState.closeTerminal(t.id) }
+            Button(role: .destructive) { appState.closeTerminal(t.id) } label: { Text("End Session")
+                .font(.app(.body)) }
                 .keyboardShortcut(.defaultAction)
-            Button("Cancel", role: .cancel) { appState.pendingTerminalClose = nil }
+            Button(role: .cancel) { appState.pendingTerminalClose = nil } label: { Text("Cancel")
+                .font(.app(.body)) }
         } message: {
-            Text("The session running inside the sandbox will be terminated. Files it wrote are kept.")
+            Text(L10n.text("The session running inside the sandbox will be terminated. Files it wrote are kept."))
         }
     }
 
@@ -1652,7 +1840,7 @@ struct ChatSidebar: View {
                                               numbering: numberedRows) else { return nil }
         return AnyView(
             Text("\(slot)")
-                .font(.caption2.weight(.semibold).monospacedDigit())
+                .font(.app(.caption2).weight(.semibold).monospacedDigit())
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
@@ -1684,14 +1872,16 @@ struct ChatSidebar: View {
                                         set: { if !$0 { appState.pendingRename = nil } }),
                    presenting: appState.pendingRename) { id in
                 TextField("Name", text: $renameDraft)
-                Button("Rename") {
+                Button {
                     appState.renameSession(id, to: renameDraft)
                     appState.pendingRename = nil
-                }
+                } label: { Text("Rename")
+                    .font(.app(.body)) }
                 .keyboardShortcut(.defaultAction)
-                Button("Cancel", role: .cancel) { appState.pendingRename = nil }
+                Button(role: .cancel) { appState.pendingRename = nil } label: { Text("Cancel")
+                    .font(.app(.body)) }
             } message: { _ in
-                Text("Leave it empty to go back to the automatic name.")
+                Text("Leave it empty to go back to the automatic name.").font(.app(.body))
             }
     }
 
@@ -1715,6 +1905,7 @@ struct ChatSidebar: View {
         switch phase {
         case .preparing: return .orange
         case .live: return .green
+        case .suspended: return .secondary
         case .exited: return .secondary
         case .failed: return .red
         }
@@ -1745,13 +1936,16 @@ struct ChatSidebar: View {
                                   badge: Int = 0) -> some View {
         HStack(spacing: 7) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
+                .font(.app(.rowTitle, weight: .medium))
                 .frame(width: 16)
-            Text(title).font(.subheadline.weight(.medium))
+            // `rowTitle`, regular weight like a native sidebar; the selected
+            // row is marked by its background, not its weight.
+            Text(L10n.text(title))
+                .font(.app(.rowTitle))
             Spacer(minLength: 4)
             if badge > 0 {
                 Text("\(badge)")
-                    .font(.caption2.monospacedDigit())
+                    .font(.app(.caption2).monospacedDigit())
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(.quaternary, in: Capsule())
@@ -1899,7 +2093,7 @@ struct ChatDetailView: View {
     /// Skills answering the half-typed command, or none when the menu is
     /// closed. Guarded by `SlashCommands.query` FIRST: the skills folder is
     /// stat-ed on read, and this property is evaluated on every body pass
-    /// (including ~20 Hz while a reply streams).
+    /// (including ~10 Hz while a reply streams).
     private var slashMatches: [SkillSummary] {
         guard !slashDismissed, let q = SlashCommands.query(in: inputText) else { return [] }
         return SlashCommands.matches(query: q, in: AgentPrompt.skillManager.summaries)
@@ -2001,10 +2195,10 @@ struct ChatDetailView: View {
                     if control == .starting {
                         ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 10, height: 10)
                     } else {
-                        Image(systemName: "play.fill").font(.system(size: 9, weight: .bold))
+                        Image(systemName: "play.fill").font(.app(.caption2, weight: .bold))
                     }
-                    Text(control.title)
-                        .font(.caption.weight(.semibold))
+                    Text(L10n.text(control.title))
+                        .font(.app(.caption).weight(.semibold))
                 }
                 .foregroundStyle(control.isRed ? Color.white : Color.secondary)
                 .padding(.horizontal, 8)
@@ -2035,7 +2229,7 @@ struct ChatDetailView: View {
             Button {
                 pickAttachment()
             } label: {
-                Label(attachmentMenuLabel, systemImage: "photo.on.rectangle")
+                Label(L10n.text(attachmentMenuLabel), systemImage: "photo.on.rectangle")
             }
             Button {
                 pickDocumentFolder()
@@ -2044,7 +2238,7 @@ struct ChatDetailView: View {
             }
         } label: {
             Image(systemName: "paperclip")
-                .font(.system(size: 13, weight: .medium))
+                .font(.app(.body, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: ChatMetrics.composerIconSize, height: ChatMetrics.composerIconSize)
                 .background(Color.secondary.opacity(0.15))
@@ -2073,7 +2267,7 @@ struct ChatDetailView: View {
     private func modeIcon(_ icon: String, isOn: Bool, onColor: Color,
                           lockedBy: String? = nil) -> some View {
         Image(systemName: icon)
-            .font(.system(size: 13, weight: .medium))
+            .font(.app(.body, weight: .medium))
             .foregroundStyle(isOn ? onColor : Color.secondary)
             .frame(width: ChatMetrics.composerIconSize, height: ChatMetrics.composerIconSize)
             .background(isOn ? onColor.opacity(0.20) : Color.secondary.opacity(0.15))
@@ -2103,16 +2297,17 @@ struct ChatDetailView: View {
         if agentName == AppleFoundationChat.displayName {
             // Not an agent, and nothing to edit: the on-device model simply
             // does not have these.
-            Text("Not available on \(AppleFoundationChat.displayName)")
+            Text(L10n.format("Not available on %@", AppleFoundationChat.displayName))
         } else {
-            Text("Set by \(agentName)")
-            Button("Edit Agent…") {
+            Text(L10n.format("Set by %@", agentName))
+            Button {
                 // ON that agent — the window otherwise opens on whoever sorts
                 // first, which is the wrong one every time you got here from a
                 // card that just named a different name.
                 guard let id = activeAgent?.id else { return }
                 appState.openAgentSettings(id, using: openWindow)
-            }
+            } label: { Text("Edit Agent…")
+                .font(.app(.body)) }
         }
     }
 
@@ -2158,10 +2353,10 @@ struct ChatDetailView: View {
     @ViewBuilder private var reasoningEffortMenu: some View {
         Picker("Reasoning", selection: $reasoningEffort) {
             ForEach(ReasoningEffort.allCases) { effort in
-                Text(effort.label).tag(effort)
+                Text(L10n.text(effort.label)).font(.app(.body)).tag(effort)
             }
         }
-        .pickerStyle(.inline)
+        .pickerStyle(.inline).font(.app(.body))
     }
 
     /// One wrench: CLICK flips the tool loop, secondary-click opens the per-tool
@@ -2256,27 +2451,28 @@ struct ChatDetailView: View {
     @ViewBuilder
     private var toolMenuContent: some View {
         if appState.useAppleModel {
-            Text("\(AppleFoundationChat.displayName): browse and search only — its \(AppleFoundationChat.contextTokens)-token window has no room for the rest.")
+            Text("\(AppleFoundationChat.displayName): browse and search only — its \(AppleFoundationChat.contextTokens)-token window has no room for the rest.").font(.app(.body))
         }
         ForEach(AgentToolGroup.allCases, id: \.self) { group in
             let tools = group.tools.filter { !appState.useAppleModel || AppleFoundationChat.allowedTools.contains($0) }
             if !tools.isEmpty {
-            Section(group.title) {
+            Section(L10n.text(group.title)) {
                 ForEach(tools, id: \.self) { tool in
                     let allowed = agentAllowedTools.contains(tool)
                     Button {
                         setTool(tool, enabled: !isToolEnabled(tool))
                     } label: {
                         if isToolEnabled(tool) {
-                            Label(tool.displayName, systemImage: "checkmark")
+                            Label(L10n.text(tool.displayName), systemImage: "checkmark")
                         } else if allowed {
-                            Text(tool.displayName)
+                            Text(L10n.text(tool.displayName))
                         } else {
                             // The agent forbids it — say so rather than showing
                             // an off switch the user can't turn on.
                             Text("\(tool.displayName) — not in \(activeAgent?.name ?? "agent")'s capabilities")
                         }
                     }
+                    .font(.app(.callout))
                     .disabled(!allowed || isExternalBridgeSession)
                 }
             }
@@ -2284,13 +2480,14 @@ struct ChatDetailView: View {
         }
 
         Divider()
-        Button("Workspace…") {
+        Button {
             if let picked = WorkspacePicker.pickDirectory() {
                 workingDirectoryBinding.wrappedValue = picked
             }
-        }
+        } label: { Text("Workspace…")
+            .font(.app(.body)) }
         .disabled(isExternalBridgeSession)
-        Text(session?.workingDirectory ?? "No workspace set")
+        Text(L10n.text(session?.workingDirectory ?? "No workspace set")).font(.app(.body))
     }
 
     /// Flip MCP for this chat — the Telegram bridge writes the shared config it
@@ -2334,7 +2531,8 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private var mcpMenuContent: some View {
-        Button("MCP Marketplace…") { showMCPMarketplace = true }
+        Button { showMCPMarketplace = true } label: { Text("MCP Marketplace…")
+            .font(.app(.body)) }
     }
 
     /// A conversation with nothing in it yet. Rendered instead of an empty
@@ -2389,12 +2587,12 @@ struct ChatDetailView: View {
             // inversion the sidebar rows had). Under it, what the agent is
             // FOR, which is what tells you what to ask it.
             Text(ChatGreeting.heading(agentName: activeAgent?.name))
-                .font(.system(size: 30, weight: .semibold))
+                .font(.app(.largeTitle, weight: .semibold))
                 .foregroundStyle(.primary)
             if let subtitle = ChatGreeting.subtitle(agentBrief: activeAgent?.brief,
                                                     serverRunning: canAnswer) {
-                Text(subtitle)
-                    .font(.callout)
+                Text(L10n.text(subtitle))
+                    .font(.app(.callout))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
@@ -2510,6 +2708,7 @@ struct ChatDetailView: View {
                                     onWillResize: { applyScroll(.rowWillResize) },
                                     onDidResize: { applyScroll(.rowDidResize) },
                                     foldStore: foldStore)
+                                .equatable()
                                 .id(m.id)
                             case .toolCall(let call, let results, let calls, let owned):
                                 ToolCallRow(call: call, results: results, calls: calls,
@@ -2547,7 +2746,7 @@ struct ChatDetailView: View {
                     .padding(.horizontal, ChatMetrics.gutter)
                     .padding(.vertical, 20)
                 }
-                .sheet(item: $modelSettings) { ModelSettingsSheet(request: $0).environmentObject(appState).environmentObject(server) }
+                .sheet(item: $modelSettings) { ModelSettingsSheet(request: $0).environmentObject(appState).environmentObject(server).environmentObject(appState.downloads) }
                 // Transcript text used to run straight into the floating model
                 // picker. The toolbar band's own full-width background stays
                 // hidden (the cluster carries its own material — that's what
@@ -2622,7 +2821,7 @@ struct ChatDetailView: View {
                     Image(systemName: "paperplane.fill")
                         .foregroundStyle(.secondary)
                     Text("Telegram conversation — view only. Reply from your phone.")
-                        .font(.caption)
+                        .font(.app(.caption))
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -2654,6 +2853,12 @@ struct ChatDetailView: View {
                 // conversation and duplicated the composer's own toggles).
                 // Renders nothing while voice is off.
                 VoiceOrbView(controller: appState.voice, sessionId: sessionId)
+
+                // The note waiting for the agent's next step, where the user
+                // is looking during a long run.
+                if let note = steeringNote {
+                    SteeringNoteRow(note: note, onPause: { pauseSteeringNote() })
+                }
 
                 // One rounded container, two rows: the input on top with the
                 // full width of the column, its controls beneath — inside the
@@ -2745,17 +2950,18 @@ struct ChatDetailView: View {
                         }
                     }
                 } else if videoSupported, provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
-                    // Decode inside the closure — the temp URL is only valid here.
+                    // The temp URL is only valid inside the closure and frame
+                    // extraction is async, so decode from a copy we own.
                     provider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, _ in
                         guard let url = url else { return }
-                        let name = url.lastPathComponent
-                        let frames = VideoPreprocessor.extractFrames(url: url)
+                        let copy = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("\(UUID().uuidString)-\(url.lastPathComponent)")
+                        guard (try? FileManager.default.copyItem(at: url, to: copy)) != nil else {
+                            DispatchQueue.main.async { showVideoError(url.lastPathComponent) }
+                            return
+                        }
                         DispatchQueue.main.async {
-                            if let frames, !frames.isEmpty {
-                                pendingVideos.append(ChatVideo(name: name, frames: frames))
-                            } else {
-                                showVideoError(name)
-                            }
+                            addVideoAttachment(copy, name: url.lastPathComponent, removeAfter: true)
                         }
                     }
                 } else if let imageType = provider.registeredTypeIdentifiers.first(where: {
@@ -2840,6 +3046,7 @@ struct ChatDetailView: View {
             inputFocused = true
             syncTogglesFromSession()
             restoreAttachedFolderIfNeeded()
+            recoverSteeringNoteIfIdle()
             applyScroll(.transcriptShown)
             // Cmd+V into the focused chat input: if the clipboard holds an image,
             // PDF, or folder, attach it (same as the attach button / drag-drop)
@@ -2881,16 +3088,18 @@ struct ChatDetailView: View {
             // suppresses the suggestion for the rest of the chat, which is
             // not something to hand to a reflex.
             .keyboardShortcut(.defaultAction)
-            Button("Send Anyway") {
+            Button {
                 intentSuppress.suppress(prompt, for: sessionId)
                 pendingIntentPrompt = nil
                 proceedSend()
-            }
-            Button("Cancel", role: .cancel) { pendingIntentPrompt = nil }
+            } label: { Text("Send Anyway")
+                .font(.app(.body)) }
+            Button(role: .cancel) { pendingIntentPrompt = nil } label: { Text("Cancel")
+                .font(.app(.body)) }
         } message: { prompt in
             Text(prompt == .mcp
                  ? "This looks like it needs one of your MCP servers, but MCP mode is off. Enable it so those tools are available?"
-                 : "This looks like a task for the agent (creating files, running commands, browsing the web…), but Tools is off. Turn it on so the model can use them?")
+                 : "This looks like a task for the agent (creating files, running commands, browsing the web…), but Tools is off. Turn it on so the model can use them?").font(.app(.body))
         }
         // Persist the toolbar toggles back onto the visible session so each tab
         // remembers its own Think/Agent/MCP choice. Telegram sessions write the
@@ -2916,7 +3125,12 @@ struct ChatDetailView: View {
             appState.chatSessions[idx].useMCP = newValue
         }
         .onChange(of: composerState) { _, state in
-            if state == .idle { inputFocused = true }
+            if state == .idle {
+                // A turn that ended without reaching a step (Stop, an error)
+                // leaves its note nowhere to go: back into the composer.
+                pauseSteeringNote()
+                inputFocused = true
+            }
         }
         // The keyboard arriving in the composer collapses the sidebar selection
         // to this chat. Keyed on the focus MIRROR rather than on the click, so
@@ -2945,6 +3159,7 @@ struct ChatDetailView: View {
             // switches (a session re-arms only when its Agent toggle goes off).
             syncTogglesFromSession()
             restoreAttachedFolderIfNeeded()
+            recoverSteeringNoteIfIdle()
             // Scroll state is per-view, and the view is reused across tabs — so
             // without this, leaving one chat scrolled up opened the next one
             // unpinned at whatever offset the previous conversation's content
@@ -2978,13 +3193,18 @@ struct ChatDetailView: View {
     /// The input field. No background or border of its own — the composer
     /// container draws those around both rows. NSTextView-backed so a big paste
     /// stays smooth and the mouse wheel scrolls once it grows past the cap.
-    private var composerPlaceholder: String { "Ask me anything…" }
+    /// While this chat answers, the field takes a steering note: Return hands
+    /// it to the agent at its next step instead of sending a second turn.
+    private var composerPlaceholder: String {
+        composerState == .generatingHere ? "Type a note; Return sends it at the next step" : "Ask me anything…"
+    }
 
     private var composerField: some View {
         GrowingTextEditor(text: $inputText,
                           isFocused: $inputFocused,
                           measuredHeight: $composerHeight,
                           isIdle: composerState == .idle,
+                          canSteer: true,
                           onSend: { sendMessage() },
                           // Escape stops the reply being written. Handled here
                           // rather than as a hidden `.cancelAction` button so
@@ -3015,8 +3235,8 @@ struct ChatDetailView: View {
             }
             .overlay(alignment: .topLeading) {
                 if inputText.isEmpty {
-                    Text(composerPlaceholder)
-                        .font(.body)
+                    Text(L10n.text(composerPlaceholder))
+                        .font(.app(.body))
                         .foregroundStyle(.secondary)
                         .padding(.leading, ComposerTextMetrics.placeholderLeading)
                         .padding(.top, ComposerTextMetrics.placeholderTop)
@@ -3271,19 +3491,20 @@ struct ChatDetailView: View {
 
     private func showAudioError(_ name: String) {
         let alert = NSAlert()
-        alert.messageText = "Couldn't read audio"
-        alert.informativeText = "\(name) couldn't be decoded. Supported: wav, mp3, m4a, aiff, caf, flac."
+        alert.messageText = L10n.text("Couldn't read audio")
+        alert.informativeText = L10n.format("%@ couldn't be decoded. Supported: wav, mp3, m4a, aiff, caf, flac.", name)
         alert.alertStyle = .warning
         alert.runModal()
     }
 
     /// Extract frames from a video file (off the main thread — AVFoundation
     /// decode can be slow) and add it as a pending attachment.
-    private func addVideoAttachment(_ url: URL) {
-        let name = url.lastPathComponent
-        DispatchQueue.global(qos: .userInitiated).async {
-            let frames = VideoPreprocessor.extractFrames(url: url)
-            DispatchQueue.main.async {
+    private func addVideoAttachment(_ url: URL, name: String? = nil, removeAfter: Bool = false) {
+        let name = name ?? url.lastPathComponent
+        Task.detached(priority: .userInitiated) {
+            let frames = await VideoPreprocessor.extractFrames(url: url)
+            if removeAfter { try? FileManager.default.removeItem(at: url) }
+            await MainActor.run {
                 if let frames, !frames.isEmpty {
                     pendingVideos.append(ChatVideo(name: name, frames: frames))
                 } else {
@@ -3295,8 +3516,8 @@ struct ChatDetailView: View {
 
     private func showVideoError(_ name: String) {
         let alert = NSAlert()
-        alert.messageText = "Couldn't read video"
-        alert.informativeText = "\(name) couldn't be decoded."
+        alert.messageText = L10n.text("Couldn't read video")
+        alert.informativeText = L10n.format("%@ couldn't be decoded.", name)
         alert.alertStyle = .warning
         alert.runModal()
     }
@@ -3352,8 +3573,8 @@ struct ChatDetailView: View {
 
     private func showMicPermissionError() {
         let alert = NSAlert()
-        alert.messageText = "Microphone access needed"
-        alert.informativeText = "Enable microphone access for MLX Core in System Settings → Privacy & Security → Microphone, then try again."
+        alert.messageText = L10n.text("Microphone access needed")
+        alert.informativeText = L10n.text("Enable microphone access for MLX-Serve in System Settings → Privacy & Security → Microphone, then try again.")
         alert.alertStyle = .warning
         alert.runModal()
     }
@@ -3371,8 +3592,8 @@ struct ChatDetailView: View {
 
     private func showPDFError(_ name: String) {
         let alert = NSAlert()
-        alert.messageText = "Couldn't read PDF"
-        alert.informativeText = "\(name) is empty, encrypted, or contains only scanned images (no extractable text)."
+        alert.messageText = L10n.text("Couldn't read PDF")
+        alert.informativeText = L10n.format("%@ is empty, encrypted, or contains only scanned images (no extractable text).", name)
         alert.alertStyle = .warning
         alert.runModal()
     }
@@ -3478,7 +3699,7 @@ struct ChatDetailView: View {
                     Text("Show earlier messages")
                 }
             }
-            .font(.caption.weight(.medium))
+            .font(.app(.caption).weight(.medium))
             .foregroundStyle(.secondary)
             .frame(height: 22)
             .padding(.horizontal, 12)
@@ -3529,7 +3750,7 @@ struct ChatDetailView: View {
     private var jumpToLatestButton: some View {
         Button { applyScroll(.jumpTapped) } label: {
             Image(systemName: "arrow.down")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.app(.callout, weight: .semibold))
                 .foregroundStyle(.primary)
                 .frame(width: 28, height: 28)
                 .background(.regularMaterial, in: Circle())
@@ -3675,11 +3896,19 @@ struct ChatDetailView: View {
         // this is belt-and-suspenders for any other trigger path).
         if session?.isExternalBridge == true { return }
 
+        // A busy chat takes the text as a steering note for the agent's next
+        // step (`SteeringNotes`); the row above the composer shows it until
+        // it fires.
+        if composerState == .generatingHere {
+            queueSteeringNote()
+            return
+        }
+
         // Pre-send nudge: if the message looks like it needs a mode that's off,
         // confirm first (unless this chat already declined that suggestion). The
         // dialog's buttons call proceedSend(); nothing is consumed until then.
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if composerState != .generatingHere, canAnswer, !trimmed.isEmpty,
+        if canAnswer, !trimmed.isEmpty,
            let prompt = detectIntentPrompt(for: trimmed) {
             pendingIntentPrompt = prompt
             return
@@ -3689,6 +3918,34 @@ struct ChatDetailView: View {
         // wherever the last one left off rather than from what was just sent.
         composerWalk = .idle
         proceedSend()
+    }
+
+    // MARK: - Steering notes
+
+    private var steeringNote: String? { chatEngine.steering.note(for: sessionId) }
+
+    private func queueSteeringNote() {
+        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        chatEngine.setSteeringNote(text, for: sessionId)
+        inputText = ""
+        composerWalk = .idle
+    }
+
+    /// Pausing takes the note back into the composer, ahead of whatever is
+    /// typed there, so nothing fires while it is being rewritten; Return
+    /// queues it again.
+    private func pauseSteeringNote() {
+        guard let note = steeringNote else { return }
+        chatEngine.clearSteeringNote(for: sessionId)
+        inputText = SteeringNotes.joined(note, inputText)
+        inputFocused = true
+    }
+
+    /// A note whose turn ended while this chat was in another tab: nobody
+    /// watched the state flip, so it is recovered on the way in.
+    private func recoverSteeringNoteIfIdle() {
+        if composerState == .idle { pauseSteeringNote() }
     }
 
     /// Names of MCP servers the user currently has enabled (disabled != true).
@@ -3812,6 +4069,13 @@ struct ChatDetailView: View {
     /// caret inside a draft.
     private func recallHistory(_ direction: ComposerHistory.Direction,
                                caretAtStart: Bool, caretAtEnd: Bool) -> Bool {
+        // A waiting steering note is the newest thing said and not yet sent:
+        // ↑ on an empty draft takes it back first, exactly as Pause does.
+        if direction == .up, steeringNote != nil,
+           inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pauseSteeringNote()
+            return true
+        }
         let entries = ComposerHistory.entries(session?.messages ?? [])
         let action = direction == .up
             ? ComposerHistory.up(draft: inputText, caretAtStart: caretAtStart,
@@ -3914,56 +4178,35 @@ struct GeneratingIndicator: View {
     @State private var startDate = Date()
 
     var body: some View {
-        TimelineView(.animation) { context in
-            let elapsed = context.date.timeIntervalSince(startDate)
-            let outerAngle = elapsed * 120  // degrees per second
-            let innerAngle = -elapsed * 168 // counter-rotate, slightly faster
-
-            HStack(spacing: 8) {
-                // Spinning arcs — continuous, no reset
-                ZStack {
-                    // Outer arc — GPU usage mapped to arc length
-                    Circle()
-                        .trim(from: 0, to: max(0.1, Double(gpuPercent) / 100.0))
-                        .stroke(gpuColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                        .frame(width: 18, height: 18)
-                        .rotationEffect(.degrees(outerAngle))
-
-                    // Inner arc — memory
-                    Circle()
-                        .trim(from: 0, to: max(0.1, Double(memPercent) / 100.0))
-                        .stroke(memColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                        .frame(width: 10, height: 10)
-                        .rotationEffect(.degrees(innerAngle))
-
-                    // Center dot pulses with GPU activity
-                    Circle()
-                        .fill(gpuColor)
-                        .frame(width: 3, height: 3)
-                        .scaleEffect(1.0 + 0.3 * sin(elapsed * 4))
-                }
+        // The rings spin in Core Animation, not a per-frame SwiftUI timeline:
+        // a timeline re-renders this window's whole hosting view every frame.
+        HStack(spacing: 8) {
+            ActivityRings(outer: max(0.1, Double(gpuPercent) / 100.0),
+                          inner: max(0.1, Double(memPercent) / 100.0),
+                          outerColor: gpuNSColor, innerColor: memNSColor)
                 .frame(width: 20, height: 20)
 
-                // Stats + whimsy
-                Text("GPU \(gpuPercent)%")
-                    .foregroundStyle(gpuColor)
-                Text("·")
-                    .foregroundStyle(.tertiary)
-                Text("Mem \(memPercent)%")
-                    .foregroundStyle(memColor)
-                Text("·")
-                    .foregroundStyle(.tertiary)
-                Text(whimsy)
-                    .foregroundStyle(.secondary)
-                    .transition(.opacity)
-                Text("·")
-                    .foregroundStyle(.tertiary)
-                Text(Self.formatElapsed(elapsed))
+            // Stats + whimsy
+            Text(L10n.format("GPU %lld%%", gpuPercent))
+                .foregroundStyle(gpuColor)
+            Text("·")
+                .foregroundStyle(.tertiary)
+            Text(L10n.format("Mem %lld%%", memPercent))
+                .foregroundStyle(memColor)
+            Text("·")
+                .foregroundStyle(.tertiary)
+            Text(L10n.text(whimsy))
+                .foregroundStyle(.secondary)
+                .transition(.opacity)
+            Text("·")
+                .foregroundStyle(.tertiary)
+            TimelineView(.periodic(from: startDate, by: 1)) { context in
+                Text(Self.formatElapsed(context.date.timeIntervalSince(startDate)))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
         }
+        .font(.app(.caption2, weight: .medium, design: .monospaced))
         .onAppear {
             startDate = Date()
             pollMetrics()
@@ -3977,16 +4220,19 @@ struct GeneratingIndicator: View {
         }
     }
 
-    private var gpuColor: Color {
-        if gpuPercent > 80 { return .orange }
-        if gpuPercent > 50 { return .green }
-        return .blue
+    private var gpuColor: Color { Color(nsColor: gpuNSColor) }
+    private var memColor: Color { Color(nsColor: memNSColor) }
+
+    private var gpuNSColor: NSColor {
+        if gpuPercent > 80 { return .systemOrange }
+        if gpuPercent > 50 { return .systemGreen }
+        return .systemBlue
     }
 
-    private var memColor: Color {
-        if memPercent > 85 { return .red }
-        if memPercent > 70 { return .orange }
-        return .secondary
+    private var memNSColor: NSColor {
+        if memPercent > 85 { return .systemRed }
+        if memPercent > 70 { return .systemOrange }
+        return .secondaryLabelColor
     }
 
     private func pollMetrics() {
@@ -4000,7 +4246,9 @@ struct GeneratingIndicator: View {
         }
     }
 
-    private static let whimsies = [
+    /// The "Thinking…" line's word, looked up at the render site. Internal so
+    /// the coverage test can hold every one of them to a catalog entry.
+    static let whimsies = [
         "marinating", "boondoggling", "razzle-dazzling", "percolating",
         "simmering", "noodling", "cogitating", "ruminating",
         "brainstorming", "daydreaming", "scheming", "concocting",
@@ -4031,6 +4279,89 @@ struct GeneratingIndicator: View {
     }
 }
 
+/// Two counter-rotating arcs and a pulsing dot, animated by the render server.
+private struct ActivityRings: NSViewRepresentable {
+    let outer: Double
+    let inner: Double
+    let outerColor: NSColor
+    let innerColor: NSColor
+
+    func makeNSView(context: Context) -> RingsView { RingsView() }
+
+    func updateNSView(_ view: RingsView, context: Context) {
+        view.set(outer: outer, inner: inner, outerColor: outerColor, innerColor: innerColor)
+    }
+
+    final class RingsView: NSView {
+        private let outerRing = CAShapeLayer()
+        private let innerRing = CAShapeLayer()
+        private let dot = CALayer()
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            for ring in [outerRing, innerRing] {
+                ring.fillColor = nil
+                ring.lineWidth = 2
+                ring.lineCap = .round
+                layer?.addSublayer(ring)
+            }
+            dot.cornerRadius = 1.5
+            layer?.addSublayer(dot)
+        }
+
+        required init?(coder: NSCoder) { fatalError("not used") }
+
+        func set(outer: Double, inner: Double, outerColor: NSColor, innerColor: NSColor) {
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                outerRing.strokeColor = outerColor.cgColor
+                innerRing.strokeColor = innerColor.cgColor
+                dot.backgroundColor = outerColor.cgColor
+            }
+            outerRing.strokeEnd = outer
+            innerRing.strokeEnd = inner
+        }
+
+        override func layout() {
+            super.layout()
+            place(outerRing, diameter: 18)
+            place(innerRing, diameter: 10)
+            dot.bounds = CGRect(x: 0, y: 0, width: 3, height: 3)
+            dot.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        }
+
+        private func place(_ ring: CAShapeLayer, diameter: CGFloat) {
+            ring.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
+            ring.position = CGPoint(x: bounds.midX, y: bounds.midY)
+            ring.path = CGPath(ellipseIn: ring.bounds, transform: nil)
+        }
+
+        /// A layer drops its animations when it leaves a window.
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil else { return }
+            spin(outerRing, degreesPerSecond: -120)
+            spin(innerRing, degreesPerSecond: 168)
+            let pulse = CABasicAnimation(keyPath: "transform.scale")
+            pulse.fromValue = 0.7
+            pulse.toValue = 1.3
+            pulse.duration = 0.8
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            dot.add(pulse, forKey: "pulse")
+        }
+
+        private func spin(_ ring: CALayer, degreesPerSecond: Double) {
+            let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+            spin.fromValue = 0
+            spin.toValue = 2 * Double.pi * (degreesPerSecond < 0 ? -1 : 1)
+            spin.duration = 360 / abs(degreesPerSecond)
+            spin.repeatCount = .infinity
+            ring.add(spin, forKey: "spin")
+        }
+    }
+}
+
 // `SystemMetrics` (GPU utilization, memory pressure, and the libproc/Mach
 // replacements for lsof/ps/vm_stat) lives in Services/SystemMetrics.swift.
 
@@ -4053,6 +4384,31 @@ private struct DoubleClickToEdit: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+/// A growing text as its lines, so a view per line leaves all but the last
+/// untouched by a streamed batch. A blank line keeps its height as a space.
+enum StreamingLines {
+    static func split(_ text: String) -> [String] {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.isEmpty ? " " : String($0) }
+    }
+}
+
+/// A streamed batch rebuilds the transcript; a row whose inputs did not change
+/// skips its body. The callbacks are compared by PRESENCE: each one only
+/// routes to the session by id, and which ones a row carries is what changes
+/// what it draws.
+extension MessageBubble: Equatable {
+    static func == (a: MessageBubble, b: MessageBubble) -> Bool {
+        a.message == b.message && a.sources == b.sources
+            && (a.onDelete == nil) == (b.onDelete == nil)
+            && (a.onEdit == nil) == (b.onEdit == nil)
+            && (a.onRegenerate == nil) == (b.onRegenerate == nil)
+            && (a.onContinue == nil) == (b.onContinue == nil)
+            && (a.onSelectRevision == nil) == (b.onSelectRevision == nil)
+            && (a.onFork == nil) == (b.onFork == nil)
     }
 }
 
@@ -4146,23 +4502,37 @@ struct MessageBubble: View {
                     HStack(spacing: 6) {
                         Image(systemName: "brain")
                             .symbolEffect(.pulse, isActive: isThinkingNow)
-                        Text(ThinkingDuration.label(seconds: isThinkingNow ? nil : message.thinkingSeconds))
+                        Text(L10n.text(ThinkingDuration.label(seconds: isThinkingNow ? nil : message.thinkingSeconds)))
                         Spacer(minLength: 8)
                         Image(systemName: "chevron.right")
                             .rotationEffect(.degrees(thinkingExpanded ? 90 : 0))
                     }
-                    .font(.caption2.weight(.medium))
+                    .font(.app(.caption2).weight(.medium))
                     .foregroundStyle(.secondary)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
 
                 if thinkingExpanded {
-                    Text(reasoning)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    // Model text is never localized. While the thought grows it
+                    // is one Text per LINE: a single Text is re-measured whole,
+                    // several times per streamed batch, by the window's size
+                    // pass. Selection waits until it has stopped growing.
+                    Group {
+                        if isThinkingNow {
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(Array(StreamingLines.split(reasoning).enumerated()),
+                                        id: \.offset) { _, line in
+                                    Text(verbatim: line)
+                                }
+                            }
+                        } else {
+                            Text(verbatim: reasoning).textSelection(.enabled)
+                        }
+                    }
+                    .font(.app(.caption))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             // Collapsed = one line of type at the column edge, no container.
@@ -4199,7 +4569,7 @@ struct MessageBubble: View {
                             // leave a hole where a picture was.
                             if img.data.isEmpty {
                                 Label("attachment no longer on disk", systemImage: "questionmark.folder")
-                                    .font(.caption)
+                                    .font(.app(.caption))
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 8)
@@ -4239,7 +4609,7 @@ struct MessageBubble: View {
                     ForEach(clips) { clip in
                         if clip.pcm.isEmpty {
                             Label("\(clip.name) · file no longer on disk", systemImage: "questionmark.folder")
-                                .font(.caption)
+                                .font(.app(.caption))
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 8)
@@ -4247,7 +4617,7 @@ struct MessageBubble: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                         } else {
                             Label(String(format: "%@ · %.1fs", clip.name, clip.durationSeconds), systemImage: "waveform")
-                                .font(.caption.weight(.medium))
+                                .font(.app(.caption).weight(.medium))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
                                 .background(Color.purple.opacity(0.18))
@@ -4269,7 +4639,7 @@ struct MessageBubble: View {
                     VStack(alignment: .leading, spacing: 4) {
                         if message.isAgentSummary {
                             Label("Tool Call", systemImage: "wrench.and.screwdriver")
-                                .font(.caption2.weight(.medium))
+                                .font(.app(.caption2).weight(.medium))
                                 .foregroundStyle(.secondary)
                         }
                         if message.role == .assistant {
@@ -4303,9 +4673,10 @@ struct MessageBubble: View {
                                             .controlSize(.mini)
                                             .colorScheme(.dark)
                                     } else {
-                                        Button(isFolded ? "Show more" : "Show less") { toggleLongTurn() }
+                                        Button { toggleLongTurn() } label: { Text(L10n.text(isFolded ? "Show more" : "Show less"))
+                                            .font(.app(.body)) }
                                             .buttonStyle(.plain)
-                                            .font(.caption.weight(.medium))
+                                            .font(.app(.caption).weight(.medium))
                                             .foregroundStyle(.white.opacity(0.8))
                                     }
                                 }
@@ -4352,8 +4723,8 @@ struct MessageBubble: View {
                 // under the bubble — never appended into content, which rides
                 // back to the model as history.
                 if let notice = message.truncationNotice, !message.isStreaming {
-                    Text(notice.text)
-                        .font(.callout)
+                    Text(L10n.text(notice.text))
+                        .font(.app(.callout))
                         .italic()
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
@@ -4386,7 +4757,8 @@ struct MessageBubble: View {
         .onHover { isHovered = $0 }
         .contextMenu {
             if !message.content.isEmpty {
-                Button("Copy Message") { copyMessage() }
+                Button { copyMessage() } label: { Text("Copy Message")
+                    .font(.app(.body)) }
             }
             if onEdit != nil, !message.content.isEmpty {
                 // Named for what it DOES: editing your own message re-asks the
@@ -4394,13 +4766,15 @@ struct MessageBubble: View {
                 Button(message.role == .user ? "Edit & Resend" : "Edit Reply") { startEditing() }
             }
             if onRegenerate != nil {
-                Button("Regenerate") { onRegenerate?() }
+                Button { onRegenerate?() } label: { Text("Regenerate")
+                    .font(.app(.body)) }
             }
             if let onFork {
                 // Between the two destructive answers and Delete: a fork keeps
                 // BOTH branches, so it belongs next to the ones that don't.
                 Divider()
-                Button("Branch Chat From Here", action: onFork)
+                Button(action: onFork, label: { Text("Branch Chat From Here")
+                    .font(.app(.body)) })
             }
             if onDelete != nil {
                 // A reply takes the model's whole turn with it (`ChatTurn`).
@@ -4441,16 +4815,18 @@ struct MessageBubble: View {
                 .shadow(color: Color.black.opacity(0.25), radius: 6, x: 0, y: 3) // Depth
 
             HStack(spacing: 8) {
-                Button("Cancel") { cancelEdit() }
+                Button { cancelEdit() } label: { Text("Cancel")
+                    .font(.app(.body)) }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .keyboardShortcut(.cancelAction)
 
-                Button("Save") { commitEdit() }
+                Button { commitEdit() } label: { Text("Save")
+                    .font(.app(.body)) }
                     .buttonStyle(.borderedProminent)
                     .disabled(!ComposerKey.editCanSubmit(editDraft))
             }
-            .font(.caption)
+            .font(.app(.caption))
         }
         .padding(4)
         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -4588,9 +4964,11 @@ struct MessageBubble: View {
                                                                 count: message.revisions.count))
                     }
                     .disabled(!MessageRevisions.canGoBack(index: message.activeRevision))
-                    Text(MessageRevisions.label(index: message.activeRevision,
-                                                count: message.revisions.count))
-                        .font(.caption2.monospacedDigit())
+                    Text(
+                                                MessageRevisions.label(index: message.activeRevision,
+                                                count: message.revisions.count)
+)
+                        .font(.app(.caption2).monospacedDigit())
                         .foregroundStyle(.tertiary)
                     footerButton("chevron.right", help: "Next version of this reply") {
                         onSelectRevision?(MessageRevisions.step(index: message.activeRevision,
@@ -4637,10 +5015,14 @@ struct MessageBubble: View {
             }
 
             if let tps = message.tokensPerSecond, tps > 0 {
-                StatPill(text: "\(Int(tps)) tok/sec",
+                // The format moves to the producer: `StatPill` renders its
+                // strings verbatim, so a lookup of an already-built `"42 tok/sec"`
+                // could never match a `%lld` key. Same shape as `ComposerTip`.
+                let speed = L10n.format("%lld tok/sec", Int(tps))
+                StatPill(text: speed,
                          expanded: message.completionTokens.map {
-                             "\(Int(tps)) tok/sec (\($0) tokens)"
-                         } ?? "\(Int(tps)) tok/sec")
+                             L10n.format("%lld tok/sec (%lld tokens)", Int(tps), $0)
+                         } ?? speed)
             }
 
             Spacer(minLength: 0)
@@ -4700,14 +5082,14 @@ private struct FooterIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 11))
+                .font(.app(.subheadline))
                 .scaleEffect(y: flipped ? -1 : 1)
                 .foregroundStyle(.secondary)
                 .frame(width: 20, height: 18)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(help)
+        .help(L10n.text(help))
     }
 }
 
@@ -4738,44 +5120,27 @@ private struct TurnEndFooter: View {
     }
 }
 
-/// Short at rest, full value floating over the pointer on hover. Floating
-/// rather than growing in place, so the buttons beside it never move.
+/// Short at rest, full value floating over the pointer on hover.
 private struct StatPill: View {
     let text: String
     let expanded: String
 
-    @State private var pointer: CGPoint?
-
     var body: some View {
         label(text)
-            // Continuous, not `onHover`: the position is the point of it.
-            .onContinuousHover { phase in
-                switch phase {
-                case .active(let location): pointer = location
-                case .ended: pointer = nil
-                }
+            .hoverReveal {
+                label(expanded)
+                    .background(Color(nsColor: .textBackgroundColor), in: Capsule())
+                    .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
+                    .fixedSize()
             }
-            .overlay(alignment: .topLeading) {
-                if let pointer {
-                    label(expanded)
-                        .background(Color(nsColor: .textBackgroundColor), in: Capsule())
-                        .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
-                        .fixedSize()
-                        // Above the pointer and slightly left of it, so the
-                        // cursor never sits on top of the text it revealed.
-                        .offset(x: pointer.x - 10, y: -24)
-                        .allowsHitTesting(false)
-                        .transition(.opacity)
-                }
-            }
-            // Later siblings draw over earlier ones, so without this the
-            // buttons paint on top of the pill that just opened.
-            .zIndex(pointer == nil ? 0 : 1)
     }
 
     private func label(_ string: String) -> some View {
+        // Verbatim: both callers hand in finished text — timestamps already
+        // formatted by Foundation, and the tok/sec sentence localized by the
+        // producer — so a catalog lookup here would re-key the result.
         Text(string)
-            .font(.caption2.monospacedDigit())
+            .font(.app(.caption2).monospacedDigit())
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .padding(.horizontal, 6)
@@ -5022,7 +5387,7 @@ private struct ToolCallRow: View {
         HStack(spacing: 6) {
             Image(systemName: "wrench.and.screwdriver")
                 .symbolEffect(.pulse, isActive: isRunning)
-                .font(.caption2.weight(.medium))
+                .font(.app(.caption2).weight(.medium))
                 .foregroundStyle(Color.accentColor.opacity(0.7))
             if calls.count > 1 {
                 multiToolTitle
@@ -5040,7 +5405,7 @@ private struct ToolCallRow: View {
             }
             Image(systemName: "chevron.right")
                 .rotationEffect(.degrees(expanded ? 90 : 0))
-                .font(.caption2.weight(.medium))
+                .font(.app(.caption2).weight(.medium))
                 .foregroundStyle(Color.accentColor.opacity(0.7))
         }
         .contentShape(Rectangle())
@@ -5055,12 +5420,12 @@ private struct ToolCallRow: View {
     /// The one place a tool's name is drawn, so `server__tool` reads as a path
     /// everywhere. `variant` is the behaviour-choosing argument (`browse:click`).
     @ViewBuilder private func toolLabel(name: String, variant: String?) -> some View {
-        Text(ToolCallDisplay.displayName(name))
-            .font(.caption.monospaced())
+        Text(L10n.text(ToolCallDisplay.displayName(name)))
+            .font(.app(.caption).monospaced())
             .foregroundStyle(Color.accentColor.opacity(0.7))
         if let variant {
             Text(":" + variant)
-                .font(.caption)
+                .font(.app(.caption))
                 .foregroundStyle(.secondary)
                 .padding(.leading, -4)
         }
@@ -5073,7 +5438,7 @@ private struct ToolCallRow: View {
                   } ?? nil)
         if let headline {
             Text("· " + headline)
-                .font(.caption)
+                .font(.app(.caption))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 // Keep a path's filename.
@@ -5081,7 +5446,7 @@ private struct ToolCallRow: View {
         }
         if let resultHeadline {
             Text("· " + resultHeadline)
-                .font(.caption)
+                .font(.app(.caption))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .layoutPriority(1)
@@ -5100,8 +5465,8 @@ private struct ToolCallRow: View {
         }
         if hidden > 0 {
             middot
-            Text("+\(hidden) other tool\(hidden == 1 ? "" : "s")")
-                .font(.caption)
+            Text(L10n.format(hidden == 1 ? "+%lld other tool" : "+%lld other tools", Int64(hidden)))
+                .font(.app(.caption))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -5109,7 +5474,7 @@ private struct ToolCallRow: View {
 
     private var middot: some View {
         Text("·")
-            .font(.caption)
+            .font(.app(.caption))
             .foregroundStyle(.secondary)
     }
 
@@ -5154,12 +5519,12 @@ private struct ToolCallRow: View {
                 }
                 GridRow {
                     Text("result")
-                        .font(.caption.monospaced())
+                        .font(.app(.caption).monospaced())
                         .foregroundStyle(.secondary)
                         .gridColumnAlignment(.leading)
                         .fixedSize(horizontal: true, vertical: false)
-                    Text(result)
-                        .font(.caption)
+                    Text(verbatim: result)
+                        .font(.app(.caption))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -5171,12 +5536,12 @@ private struct ToolCallRow: View {
     @ViewBuilder private func gridRow(name: String, value: String) -> some View {
         GridRow {
             Text(name)
-                .font(.caption.monospaced())
+                .font(.app(.caption).monospaced())
                 .foregroundStyle(.secondary)
                 .gridColumnAlignment(.leading)
                 .fixedSize(horizontal: true, vertical: false)
             Text(value)
-                .font(.caption)
+                .font(.app(.caption))
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -5209,7 +5574,7 @@ private struct RunningIndicator: View {
                 .accessibilityHidden(true)
 
             Text("running")
-                .font(.caption.weight(.bold))
+                .font(.app(.caption).weight(.bold))
                 .foregroundStyle(ink)
         }
         .padding(.horizontal, 8)
@@ -5234,8 +5599,8 @@ private struct StopProcessButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Stop background process \(handle)")
-        .accessibilityLabel("Stop background process \(handle)")
+        .help(L10n.format("Stop background process %@", handle))
+        .accessibilityLabel(L10n.format("Stop background process %@", handle))
     }
 }
 
@@ -5316,10 +5681,11 @@ struct MarkdownText: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
-            Button("Copy All") {
+            Button {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(source, forType: .string)
-            }
+            } label: { Text("Copy All")
+                .font(.app(.body)) }
         }
     }
 
@@ -5808,7 +6174,7 @@ struct MarkdownText: View {
                 p.firstLineHeadIndent = 8
                 p.headIndent = 8
                 let attrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                    .font: AppType.monospaced(.subheadline),
                     .foregroundColor: NSColor.systemPurple,
                     .backgroundColor: NSColor.systemPurple.withAlphaComponent(0.10),
                     .paragraphStyle: p,
@@ -5958,11 +6324,33 @@ struct MarkdownText: View {
         let latex: String
         let raw: String
     }
+    /// A streaming reply rebuilds its whole string per flush while only its
+    /// last block changed; every earlier block's inline render is a hit here.
+    private static let inlineRenderCache: NSCache<NSString, NSAttributedString> = {
+        let c = NSCache<NSString, NSAttributedString>()
+        c.countLimit = 4096
+        return c
+    }()
+
     static func renderInline(
         _ text: String,
         theme: LaTeXTheme,
         weight: NSFont.Weight = .regular,
         fontSize: CGFloat = ChatMetrics.transcriptFontSize
+    ) -> NSAttributedString {
+        let key = "\(theme.rawValue)\u{0}\(weight.rawValue)\u{0}\(fontSize)\u{0}\(text)" as NSString
+        if let hit = inlineRenderCache.object(forKey: key) { return hit }
+        let built = NSAttributedString(attributedString:
+            buildInline(text, theme: theme, weight: weight, fontSize: fontSize))
+        inlineRenderCache.setObject(built, forKey: key)
+        return built
+    }
+
+    private static func buildInline(
+        _ text: String,
+        theme: LaTeXTheme,
+        weight: NSFont.Weight,
+        fontSize: CGFloat
     ) -> NSAttributedString {
         let bodyFont = NSFont.systemFont(ofSize: fontSize, weight: weight)
         let prepared = inlineMathPlaceholders(in: text)
@@ -6178,10 +6566,11 @@ fileprivate struct DisplayLaTeXView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contextMenu {
-                Button("Copy Equation") {
+                Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(raw, forType: .string)
-                }
+                } label: { Text("Copy Equation")
+                    .font(.app(.body)) }
             }
         } else {
             SelectableMarkdownNSText(attributed: NSAttributedString(
@@ -6410,7 +6799,9 @@ enum ComposerLayout {
 /// What a Return keypress does in the composer. Mirrors the prior `.onKeyPress`
 /// contract: Shift+Return is always a newline; a bare Return sends only when
 /// idle, and is otherwise swallowed (never a stray newline mid-generation).
-enum ComposerReturnAction: Equatable { case send, newline, ignore }
+/// `.steer`: the chat is generating, so the text becomes a note for the
+/// agent's next step rather than a second send.
+enum ComposerReturnAction: Equatable { case send, steer, newline, ignore }
 
 /// What an Escape keypress does in the composer. `.pass` hands the key back to
 /// AppKit rather than swallowing it — with no turn to stop, Escape still has
@@ -6421,9 +6812,13 @@ enum ComposerEscapeAction: Equatable { case stop, pass }
 enum ComposerKeyCommand { case up, down, accept, cancel }
 
 enum ComposerKey {
-    static func onReturn(shift: Bool, isIdle: Bool) -> ComposerReturnAction {
+    /// `canSteer`: a busy chat takes the text as a steering note (the main
+    /// composer); the edit bubble leaves it false, so a blank draft's Return
+    /// is still swallowed.
+    static func onReturn(shift: Bool, isIdle: Bool, canSteer: Bool = false) -> ComposerReturnAction {
         if shift { return .newline }
-        return isIdle ? .send : .ignore
+        if isIdle { return .send }
+        return canSteer ? .steer : .ignore
     }
 
     /// Escape stops the reply being written, and does nothing otherwise.
@@ -6461,6 +6856,7 @@ fileprivate struct GrowingTextEditor: NSViewRepresentable {
     var minLines: Int = 1
     var maxLines: Int = 15
     var isIdle: Bool
+    var canSteer: Bool = false
     var onSend: () -> Void
     /// Escape, from the responder chain. Defaults to nothing so a field that
     /// has no use for the key leaves it to AppKit.
@@ -6615,11 +7011,13 @@ fileprivate struct GrowingTextEditor: NSViewRepresentable {
             // it must not send a half-typed "/mus".
             if parent.onKeyCommand(.accept) { return true }
             let shift = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
-            switch ComposerKey.onReturn(shift: shift, isIdle: parent.isIdle) {
+            switch ComposerKey.onReturn(shift: shift, isIdle: parent.isIdle, canSteer: parent.canSteer) {
             case .newline:
                 textView.insertNewlineIgnoringFieldEditor(self)
                 return true
-            case .send:
+            case .send, .steer:
+                // `onSend` reads the composer state itself and queues a
+                // steering note while the chat generates.
                 parent.onSend()
                 return true
             case .ignore:

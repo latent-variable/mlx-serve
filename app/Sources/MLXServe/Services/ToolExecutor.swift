@@ -40,21 +40,21 @@ struct FileToolSandboxGate: Sendable {
     /// Read at execution time — the setting changes between calls. Injectable
     /// (same seam as `ShellHandler.sandboxEnabled`) so gate tests never depend
     /// on the build flavor (MAS forces the sandbox on).
-    var sandboxEnabled: () -> Bool = { AgentSandbox.shared.isEnabled }
+    var sandboxEnabled: @Sendable () -> Bool = { AgentSandbox.shared.isEnabled }
     /// The live pinned guest's shared root + CLI-session label. (nil, nil)
     /// when no live pinned guest exists — then shell would remount silently,
     /// so file tools must not block either.
-    var pinnedWorkspace: () -> (root: String?, label: String?) = { AgentSandbox.shared.pinnedWorkspace }
+    var pinnedWorkspace: @Sendable () -> (root: String?, label: String?) = { AgentSandbox.shared.pinnedWorkspace }
     /// Test seam: force a rejection so each file tool's gate wiring stays
     /// provable now that production never blocks on the pin (hot-mount shares
     /// any folder). Nil in production.
-    var forcedRejection: ((String?) -> String?)? = nil
+    var forcedRejection: (@Sendable (String?) -> String?)? = nil
     /// Every file tool hits this chokepoint, so it's where a host-side file op
     /// ensures its folder is hot-mounted into a LIVE guest — otherwise a session
     /// that only ever writes/reads files (never `shell`) never appears in the
     /// VM at /projects/<slug>. Fire-and-forget; injectable so tests don't touch
     /// the shared guest.
-    var ensureMounted: (String?) -> Void = { AgentSandbox.shared.ensureProjectMountedAsync(workingDirectory: $0) }
+    var ensureMounted: @Sendable (String?) -> Void = { AgentSandbox.shared.ensureProjectMountedAsync(workingDirectory: $0) }
 
     func check(workingDirectory: String?) throws {
         if let forced = forcedRejection, let reason = forced(workingDirectory) {
@@ -111,7 +111,7 @@ struct ShellHandler: ToolHandler {
     /// because the MAS build forces the sandbox on (`AgentSandbox.resolveEnabled`)
     /// — without the seam, host-behavior tests in the MAS test binary would
     /// route into a guest that xctest can never boot.
-    var sandboxEnabled: () -> Bool = { AgentSandbox.shared.isEnabled }
+    var sandboxEnabled: @Sendable () -> Bool = { AgentSandbox.shared.isEnabled }
 
     func execute(parameters: [String: String], workingDirectory: String?) async throws -> String {
         guard let command = parameters["command"] else {
@@ -478,6 +478,8 @@ final class ManagedAtomicFlag: @unchecked Sendable {
 
 struct ReadFileHandler: ToolHandler {
     var gate = FileToolSandboxGate()
+    /// Read-only roots outside the workspace: skill folders the model loads on demand.
+    var readableRoots: [String] = [SkillManager.defaultSkillsDir]
 
     func execute(parameters: [String: String], workingDirectory: String?) async throws -> String {
         try gate.check(workingDirectory: workingDirectory)
@@ -485,7 +487,7 @@ struct ReadFileHandler: ToolHandler {
             throw ToolError.missingParameter("path")
         }
 
-        let fullPath = try resolveAndConfine(path, workingDirectory: workingDirectory)
+        let fullPath = try resolveAndConfine(path, workingDirectory: workingDirectory, readableRoots: readableRoots)
         guard let data = FileManager.default.contents(atPath: fullPath),
               let content = String(data: data, encoding: .utf8) else {
             throw ToolError.executionFailed("Cannot read file: \(fullPath)")
@@ -918,7 +920,7 @@ let workspaceRequiredMessage = "no working folder is set for this session — th
 /// Resolve a path and verify it stays within the working directory.
 /// Returns the resolved absolute path, or throws if it escapes the workspace
 /// — or when no workspace is set at all (never unconfined).
-private func resolveAndConfine(_ path: String, workingDirectory: String?) throws -> String {
+private func resolveAndConfine(_ path: String, workingDirectory: String?, readableRoots: [String] = []) throws -> String {
     guard let wd = workingDirectory else {
         throw ToolError.executionFailed(workspaceRequiredMessage)
     }
@@ -933,7 +935,8 @@ private func resolveAndConfine(_ path: String, workingDirectory: String?) throws
     let normalizedResolved = (resolved as NSString).standardizingPath
     let normalizedWd = (wd as NSString).standardizingPath
 
-    guard normalizedResolved == normalizedWd || normalizedResolved.hasPrefix(normalizedWd + "/") else {
+    let within = { (root: String) in normalizedResolved == root || normalizedResolved.hasPrefix(root + "/") }
+    guard within(normalizedWd) || readableRoots.contains(where: { within(($0 as NSString).standardizingPath) }) else {
         throw ToolError.executionFailed("Access denied: path '\(path)' resolves to '\(normalizedResolved)' which is outside the workspace '\(normalizedWd)'")
     }
 

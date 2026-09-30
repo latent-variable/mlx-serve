@@ -15,16 +15,16 @@ struct ChatErrorCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.circle")
-                .font(.system(size: 15, weight: .medium))
+                .font(.app(.title3, weight: .medium))
                 .foregroundStyle(.red)
                 .padding(.top, 1)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(notice.headline)
-                    .font(.callout.weight(.semibold))
+                Text(L10n.text(notice.headline))
+                    .font(.app(.callout).weight(.semibold))
                     .foregroundStyle(.red)
-                Text(notice.detail)
-                    .font(.callout)
+                Text(L10n.text(notice.detail))
+                    .font(.app(.callout))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
@@ -33,9 +33,9 @@ struct ChatErrorCard: View {
                     Button(action: onIncreaseContext) {
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.up.forward.square")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.app(.subheadline, weight: .medium))
                             Text("Increase Context Size")
-                                .font(.callout.weight(.medium))
+                                .font(.app(.callout).weight(.medium))
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
@@ -59,10 +59,11 @@ struct ChatErrorCard: View {
                 .stroke(Color.red.opacity(0.25), lineWidth: 1)
         )
         .contextMenu {
-            Button("Copy Error") {
+            Button {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(notice.message, forType: .string)
-            }
+            } label: { Text("Copy Error")
+                .font(.app(.body)) }
         }
     }
 }

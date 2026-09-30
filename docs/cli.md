@@ -1,3 +1,5 @@
+[English](cli.md) · [简体中文](zh-CN/cli.md)
+
 # CLI & server flags
 
 ## Ollama-style commands
@@ -60,8 +62,9 @@ mlx-serve --model /path/to/model --prompt "What is 2+2?"
 | `--drafter DIR` | none | Speculative-decoding drafter checkpoint: a Gemma 4 assistant or a DFlash draft companion. Models that ship a `drafter/` subdir (Muse-Glimmer builds) load theirs automatically |
 | `--no-drafter` | off | Never load a drafter, including one shipped inside the checkpoint |
 | `--draft-block-size N` | auto | Drafts per round for the drafter (auto-sized to what this Mac's verify path can use) |
-| `--no-mtp` / `--mtp` | on when sidecar present | Disable / force the native MTP head (MoE trunks default off) |
+| `--no-mtp` / `--mtp` | on when a head is loaded | Disable the native MTP head; `--mtp` is a no-op kept for old launch lines (dense and MoE both default on) |
 | `--mtp-depth N` | `3` | Max tokens drafted per MTP round (adaptive controller tunes within `[1, N]`) |
+| `--mtp-greedy-tail` | off | Sampled requests draft only the first MTP token by sampling, later ones by argmax; pairs with `--mtp-typical`. A model's `mtp_greedy_tail` in `model-settings.json` outranks it |
 | `--mtp-history-window N` | `0` (full) | Prompts past 16K tokens only build MTP head history for the last N tokens (windowing costs acceptance on stock Qwen heads) |
 | `--dspark` | off | DeepSeek V4's own block-parallel draft stages (~11 GB on top of the model) |
 | `--ssd-streaming` | off | ds4 / DeepSeek-V4-Flash GGUF only: stream expert weights from SSD instead of holding the whole model in RAM |
@@ -73,8 +76,9 @@ mlx-serve --model /path/to/model --prompt "What is 2+2?"
 | `--llama-cache-entries N` | `4` | Multi-session LRU for llama.cpp (warm multi-doc agents) |
 | `--tokenize-cache-entries N` | `4` | Chat-template + tokenize cache size |
 | `--max-concurrent N` | `1` | Continuous-batch decode parallelism |
+| `--prefill-decode-share S` | `0` | Wall-time fraction (0..0.9) decoding streams keep during another request's prefill; the prefill runs 1024-token chunks meanwhile. Env `MLX_SERVE_PREFILL_DECODE_SHARE` |
 | `--prefix-cache-entries N` | auto | Shared-prefix KV cache entry cap |
-| `--prefix-cache-mem N{KB,MB,GB}` | `2 GB` | Shared-prefix KV cache memory cap |
+| `--prefix-cache-mem N{KB,MB,GB}` | `2 GB`, or one session at the working context on qwen4_exp when larger | Shared-prefix KV cache memory cap |
 | `--prefix-cache-disk N{MB,GB}` | off | SSD tier: prefixes survive restarts (11K-token restart TTFT 5.9 s → 0.7 s) |
 | `--metrics` | off | Prometheus `/metrics` + live dashboard panel on `/` |
 | `--api-key KEY` | none | Require a key for non-localhost requests (localhost stays open) |

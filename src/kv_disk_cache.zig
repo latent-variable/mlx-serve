@@ -47,6 +47,7 @@
 //! (`Load::eval_gpu` is Not Implemented — the lora.zig/model.zig precedent).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const mlx = @import("mlx.zig");
 const kv_quant = @import("kv_quant.zig");
 const transformer_mod = @import("transformer.zig");
@@ -114,7 +115,25 @@ const DarwinStatfs = extern struct {
     f_ffree: u64,
     tail: [4096]u8,
 };
-extern "c" fn statfs(path: [*:0]const u8, buf: *DarwinStatfs) c_int;
+
+/// Linux glibc `struct statfs` (LP64: __fsword_t = long, fsblkcnt_t = unsigned long).
+const LinuxStatfs = extern struct {
+    f_type: i64,
+    f_bsize: i64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_fsid: extern struct { val: [2]i32 },
+    f_namelen: i64,
+    f_frsize: i64,
+    f_flags: i64,
+    f_spare: [4]i64,
+};
+
+const StatfsBuf = if (builtin.os.tag.isDarwin()) DarwinStatfs else LinuxStatfs;
+extern "c" fn statfs(path: [*:0]const u8, buf: *StatfsBuf) c_int;
 extern fn msv_volume_free_for_use(path: [*:0]const u8) u64;
 
 pub const VolumeSpace = struct { free: u64, total: u64 };
@@ -126,9 +145,9 @@ pub fn volumeSpace(path: []const u8) ?VolumeSpace {
     if (path.len >= buf.len) return null;
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
-    var st: DarwinStatfs = undefined;
+    var st: StatfsBuf = undefined;
     if (statfs(buf[0..path.len :0].ptr, &st) != 0) return null;
-    const bsize: u64 = st.f_bsize;
+    const bsize: u64 = @intCast(@max(st.f_bsize, 0));
     if (bsize < 512 or bsize > (1 << 20) or !std.math.isPowerOfTwo(bsize)) return null;
     if (st.f_blocks == 0 or st.f_bavail > st.f_blocks) return null;
     const total = bsize *| st.f_blocks;
@@ -706,6 +725,9 @@ pub const DiskTier = struct {
     /// diverged-prefix "hit" that would otherwise read every stored chunk to
     /// serve a few hundred tokens — slower than a cold prefill).
     pub fn restorePrefixInto(self: *DiskTier, cache: *KVCache, idx: usize, limit: u32, s: mlx.mlx_stream) !void {
+        // Callers swallow a restore failure and prefill cold; the latch it raised must not fail that prefill.
+        const had_error = mlx.errorPending();
+        errdefer mlx.dropLatchedErrorUnless(had_error);
         // This entry's staged chunks must be on disk before the readback.
         self.drainEntry(self.entries.items[idx].id);
         const e = &self.entries.items[idx];
@@ -730,6 +752,8 @@ pub const DiskTier = struct {
         cp_pos: u32,
         s: mlx.mlx_stream,
     ) !u32 {
+        const had_error = mlx.errorPending();
+        errdefer mlx.dropLatchedErrorUnless(had_error);
         self.drainEntry(self.entries.items[idx].id);
         const e = &self.entries.items[idx];
         if (cp_pos == 0 or cp_pos > e.kv_len) return error.DiskCacheNoCheckpoint;
@@ -853,6 +877,10 @@ pub const DiskTier = struct {
             var meta_map = mlx.mlx_map_string_to_string_new();
             defer _ = mlx.mlx_map_string_to_string_free(meta_map);
             try mlx.check(mlx.mlx_load_safetensors(&tensor_map, &meta_map, @ptrCast(path.ptr), cpu));
+            // A lazy load holds its file open until eval, so each chunk is evaluated before the
+            // next opens; one eval at the end needed a descriptor per chunk.
+            const chunk_arrays = mlx.mlx_vector_array_new();
+            defer _ = mlx.mlx_vector_array_free(chunk_arrays);
 
             for (0..n_layers) |li| {
                 for (kinds, 0..) |kind, ki| {
@@ -889,9 +917,11 @@ pub const DiskTier = struct {
                         arr = sliced;
                     }
                     _ = mlx.mlx_vector_array_append_value(vecs[li * kinds.len + ki], arr);
+                    _ = mlx.mlx_vector_array_append_value(chunk_arrays, arr);
                     _ = mlx.mlx_array_free(arr);
                 }
             }
+            try mlx.check(mlx.mlx_eval(chunk_arrays));
         }
 
         // Install per-layer concatenations as the cache's storage buffers.
@@ -1327,7 +1357,7 @@ pub const DiskTier = struct {
         else
             kv_len;
         if (inherited_qsa) inherited_qsa_rows = @min(inherited_qsa_rows, prefix_rows);
-        const qsa_res = try self.persistQsaHistory(dir_rel, ssm_checkpoints, inherited_qsa, inherited_qsa_rows, prefix_rows, s);
+        const qsa_res = try self.persistQsaHistory(dir_rel, ssm_checkpoints, inherited_qsa, inherited_qsa_rows, inherited_qsa_bytes, prefix_rows, s);
         const complete = chunk_complete and ssm_res.complete;
 
         // v4 spec snapshots — one sidecar file, REPLACED wholesale by every
@@ -1495,17 +1525,16 @@ pub const DiskTier = struct {
         const dir_rel = try std.fmt.allocPrint(self.allocator, "{s}/e{d}", .{ self.root, self.entries.items[idx].id });
         defer self.allocator.free(dir_rel);
         const e = &self.entries.items[idx];
+        // Chunks and the token record are untouched here, so the bill moves by the non-chunk files.
+        const old_non_chunk = nonChunkBytes(e);
         var written_bytes: u64 = 0;
         // Write-ahead bound: the token record, not the flushed kv_len — a
         // checkpoint beyond the current chunks is position-keyed and becomes
         // restorable when a later extend raises kv_len past it.
         var ssm_res = try self.persistSsmCheckpoints(e.id, dir_rel, @intCast(e.tokens.len), e.ssm_positions, e.ssm_bytes, ssm_checkpoints, &written_bytes, s, self.max_flush_bytes);
         errdefer ssm_res.deinit(self.allocator);
-        const qsa_res = try self.persistQsaHistory(dir_rel, ssm_checkpoints, e.inherited_qsa, e.qsa_history_rows, e.kv_len, s);
+        const qsa_res = try self.persistQsaHistory(dir_rel, ssm_checkpoints, e.inherited_qsa, e.qsa_history_rows, e.qsa_history_bytes, e.kv_len, s);
 
-        // Captured before the sidecar write overwrites it: this path bills a delta.
-        const old_spec_bytes: u64 = e.spec_bytes;
-        const old_qsa_billed: u64 = if (e.inherited_qsa) 0 else e.qsa_history_bytes;
         if (specWorkPending(e, dflash_snap, mtp_snap)) {
             const spec_res: SpecSidecarResult = self.writeSpecSidecar(dir_rel, dflash_snap, mtp_snap, s) catch |err| blk: {
                 log.warn("  [disk-cache] spec persist failed: {s} — entry keeps its old spec\n", .{@errorName(err)});
@@ -1515,15 +1544,6 @@ pub const DiskTier = struct {
             e.spec_dflash = spec_res.dflash;
             e.spec_mtp = spec_res.mtp;
         }
-
-        // Recompute total bytes: chunks + token record are unchanged; only the
-        // ssm/spec contributions changed.
-        // Delta-based like the extend path; both non-chunk terms are in the delta.
-        var delta: i64 = @as(i64, @intCast(e.spec_bytes)) - @as(i64, @intCast(old_spec_bytes));
-        for (ssm_res.bytes) |b| delta += @as(i64, @intCast(b));
-        for (e.ssm_bytes) |b| delta -= @as(i64, @intCast(b));
-        const new_qsa_billed: u64 = if (qsa_res.inherited) 0 else qsa_res.bytes;
-        delta += @as(i64, @intCast(new_qsa_billed)) - @as(i64, @intCast(old_qsa_billed));
 
         self.allocator.free(e.ssm_positions);
         self.allocator.free(e.ssm_bytes);
@@ -1536,6 +1556,7 @@ pub const DiskTier = struct {
             e.qsa_history_rows = qsa_res.rows;
             e.inherited_qsa = false;
         }
+        const delta: i64 = @as(i64, @intCast(nonChunkBytes(e))) - @as(i64, @intCast(old_non_chunk));
         e.bytes = clampAdd(e.bytes, delta);
         self.total_bytes = clampAdd(self.total_bytes, delta);
         e.last_used = self.bump();
@@ -2476,14 +2497,14 @@ pub const DiskTier = struct {
         cps_opt: ?[]const transformer_mod.SSMCheckpoint,
         inherited: bool,
         inherited_rows: u32,
+        held_bytes: u64,
         prefix_rows: u32,
         s: mlx.mlx_stream,
     ) !QsaHistoryResult {
-        const cps = cps_opt orelse return .{ .inherited = inherited, .rows = inherited_rows, .bytes = 0 };
-        const src = DiskTier.newestQsaCheckpoint(cps) orelse {
-            if (inherited) return .{ .inherited = true, .rows = inherited_rows, .bytes = 0 };
-            return .{};
-        };
+        // A commit with no QSA checkpoint leaves the entry's own file on disk, so it keeps its bill.
+        const kept: QsaHistoryResult = .{ .inherited = inherited, .rows = inherited_rows, .bytes = if (inherited) 0 else held_bytes };
+        const cps = cps_opt orelse return kept;
+        const src = DiskTier.newestQsaCheckpoint(cps) orelse return kept;
         const rows: u32 = @intCast(DiskTier.qsaHistoryRowsOf(src));
         if (inherited and rows > 0 and rows <= inherited_rows and rows <= prefix_rows) {
             return .{ .inherited = true, .rows = @min(inherited_rows, prefix_rows), .bytes = 0 };
@@ -3281,7 +3302,22 @@ fn deleteTreeAbsolute(io: std.Io, dir_abs: []const u8) void {
     pd.deleteTree(io, name) catch {};
 }
 
+/// Historical fingerprint for the default cache layout. Kept as a wrapper so
+/// existing callers and existing SSD roots remain stable.
 pub fn modelFingerprint(allocator: std.mem.Allocator, io: std.Io, model_dir: []const u8) ![]u8 {
+    return modelFingerprintWithLayout(allocator, io, model_dir, null);
+}
+
+/// Fingerprint a model plus an optional cache-layout namespace
+/// (`ModelConfig.cacheLayoutNamespace`). A layout that changes what the stored
+/// K/V mean gets a versioned marker, so an old SSD root is never restored into
+/// it; null keeps the historical fingerprint.
+pub fn modelFingerprintWithLayout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    model_dir: []const u8,
+    layout_namespace: ?[]const u8,
+) ![]u8 {
     if (model_dir.len == 0 or !std.fs.path.isAbsolute(model_dir)) return error.BadModelDir;
     var h = std.hash.XxHash64.init(0x6b76_6361_6368_6531);
     h.update(model_dir);
@@ -3293,6 +3329,10 @@ pub fn modelFingerprint(allocator: std.mem.Allocator, io: std.Io, model_dir: []c
         h.update(std.mem.asBytes(&mt));
     }
     if (model.getConfigOverrides()) |raw| h.update(raw);
+    if (layout_namespace) |layout| {
+        h.update("\x00mlx-serve-kv-layout\x00");
+        h.update(layout);
+    }
     return std.fmt.allocPrint(allocator, "{x:0>16}", .{h.final()});
 }
 
@@ -5269,6 +5309,38 @@ test "modelFingerprint: stable per path, rolls with config.json changes" {
     try testing.expectError(error.BadModelDir, modelFingerprint(testing.allocator, io, "rel/path"));
 }
 
+// Bar: a Nemotron-H SSD root written before its keys became NoPE is never
+// restored, and every other arch keeps its existing root.
+test "modelFingerprint: the Nemotron-H NoPE layout gets its own SSD root" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var buf: [512]u8 = undefined;
+    const base = try tmpRoot(&tmp, io, &buf);
+    try tmp.dir.createDirPath(io, "m");
+    try tmp.dir.writeFile(io, .{ .sub_path = "m/config.json", .data = "{}" });
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/m", .{base});
+    defer testing.allocator.free(dir);
+
+    const nemo = try model.parseConfigFromJson(testing.allocator,
+        \\{"model_type": "nemotron_h", "hidden_size": 64, "num_hidden_layers": 2,
+        \\ "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 32,
+        \\ "vocab_size": 16, "layers_block_type": ["mamba", "attention"]}
+    );
+    const qwen = try model.parseConfigFromJson(testing.allocator,
+        \\{"model_type": "qwen3", "hidden_size": 64, "num_hidden_layers": 2,
+        \\ "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 32, "vocab_size": 16}
+    );
+    const old = try modelFingerprint(testing.allocator, io, dir);
+    defer testing.allocator.free(old);
+    const fp_nemo = try modelFingerprintWithLayout(testing.allocator, io, dir, nemo.cacheLayoutNamespace());
+    defer testing.allocator.free(fp_nemo);
+    const fp_qwen = try modelFingerprintWithLayout(testing.allocator, io, dir, qwen.cacheLayoutNamespace());
+    defer testing.allocator.free(fp_qwen);
+    try testing.expect(!std.mem.eql(u8, old, fp_nemo));
+    try testing.expectEqualStrings(old, fp_qwen);
+}
+
 test "modelFingerprint: rolls with --config-overrides" {
     defer model.setConfigOverrides(null);
     const io = std.testing.io;
@@ -6138,13 +6210,15 @@ test "volumeSpace: the live probe is plausible or null (statfs ABI guard)" {
 
 test "volumeSpace: free is what the OS grants, never less than statfs' f_bavail" {
     // Purgeable space is not in f_bavail; the tier used to refuse a volume with 117 GB usable.
-    var st: DarwinStatfs = undefined;
+    // Three separate live probes: other writers move free space between them, hence the slack.
+    const slack: u64 = 1 << 30;
+    var st: StatfsBuf = undefined;
     try testing.expect(statfs("/", &st) == 0);
     const vs = volumeSpace("/") orelse return error.VolumeSpaceProbeFailed;
     const granted = msv_volume_free_for_use("/");
     try testing.expect(granted > 0);
-    try testing.expect(vs.free >= @as(u64, st.f_bsize) * st.f_bavail);
-    if (granted <= vs.total) try testing.expectEqual(granted, vs.free);
+    try testing.expect(vs.free + slack >= @as(u64, st.f_bsize) * st.f_bavail);
+    if (granted <= vs.total) try testing.expect(@max(granted, vs.free) - @min(granted, vs.free) < slack);
 }
 
 test "DiskTier: SSD-first declines to store when the VOLUME is short, and says so" {
@@ -7283,3 +7357,152 @@ test "DiskTier: a fresh tier over the same root ranks by the HIGHEST restorable 
     try testing.expectEqual(@as(u32, N * 128), cold.usable);
 }
 
+test "DiskTier: a restore wider than the fd limit closes each chunk as it goes" {
+    // Bar: restoring more chunk files than the soft RLIMIT_NOFILE allows open at once succeeds.
+    mlx.installErrorHandler();
+    const io = std.testing.io;
+    const s = mlx.gpuStream();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var buf: [512]u8 = undefined;
+    const base = try tmpRoot(&tmp, io, &buf);
+
+    // 600 tokens at 8 per chunk = 75 chunk files.
+    var tier = try DiskTier.init(testing.allocator, io, base, "fp-fdlimit", 0, 8);
+    defer tier.deinit();
+    var cache = try KVCache.init(testing.allocator, 3);
+    defer cache.deinit();
+    try fillCache(&cache, s, 3, 600, 8, 0.0, .float32);
+    var tokens: [600]u32 = undefined;
+    for (&tokens, 0..) |*t, i| t.* = @intCast(i + 11);
+    _ = try tier.appendCommit(cache.entries, cache.step, cache.config, &tokens, false, null, s);
+    const m = tier.bestMatch(&tokens, false, kv_quant.KVQuantConfig.dense).?;
+    tier.drainEntry(tier.entries.items[m.idx].id);
+
+    const saved = try std.posix.getrlimit(.NOFILE);
+    defer std.posix.setrlimit(.NOFILE, saved) catch {};
+    var top: usize = 0;
+    for (0..@min(saved.cur, 4096)) |fd| {
+        if (std.c.fcntl(@intCast(fd), std.c.F.GETFD) != -1) top = fd;
+    }
+    try std.posix.setrlimit(.NOFILE, .{ .cur = top + 1 + 16, .max = saved.max });
+
+    var cache2 = try KVCache.init(testing.allocator, 3);
+    defer cache2.deinit();
+    const restored = tier.restoreInto(&cache2, m.idx, s);
+    std.posix.setrlimit(.NOFILE, saved) catch {};
+    try testing.expectEqual(@as(u32, 600), try restored);
+    for ([_]u32{ 0, 7, 8, 333, 599 }) |pos| {
+        try testing.expectEqual(try cacheValueAt(&cache, 2, pos, 5, s), try cacheValueAt(&cache2, 2, pos, 5, s));
+    }
+}
+
+test "DiskTier: a failed restore drops the latch it raised and keeps a foreign one" {
+    // Bar: the caller's cold-prefill fallback must not inherit this restore's MLX error.
+    mlx.installErrorHandler();
+    const io = std.testing.io;
+    const s = mlx.gpuStream();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var buf: [512]u8 = undefined;
+    const base = try tmpRoot(&tmp, io, &buf);
+
+    var tier = try DiskTier.init(testing.allocator, io, base, "fp-restore-latch", 0, 128);
+    defer tier.deinit();
+    var cache = try KVCache.init(testing.allocator, 2);
+    defer cache.deinit();
+    try fillCache(&cache, s, 2, 600, 8, 0.0, .float32);
+    var tokens: [600]u32 = undefined;
+    for (&tokens, 0..) |*t, i| t.* = @intCast(i + 13);
+    _ = try tier.appendCommit(cache.entries, cache.step, cache.config, &tokens, false, null, s);
+    const m = tier.bestMatch(&tokens, false, kv_quant.KVQuantConfig.dense).?;
+    const id = tier.entries.items[m.idx].id;
+    tier.drainEntry(id);
+    var path_buf: [1024]u8 = undefined;
+    const chunk = try std.fmt.bufPrint(&path_buf, "{s}/e{d}/c000002.safetensors", .{ tier.root, id });
+    try std.Io.Dir.deleteFileAbsolute(io, chunk);
+
+    var target = try KVCache.init(testing.allocator, 2);
+    defer target.deinit();
+    try testing.expectError(error.MlxError, tier.restoreInto(&target, m.idx, s));
+    try testing.expect(!mlx.errorPending());
+
+    mlx.latchErrorForTest("foreign pre-existing error");
+    _ = tier.restoreInto(&target, m.idx, s) catch {};
+    var msg: [512]u8 = undefined;
+    try testing.expectEqualStrings("foreign pre-existing error", mlx.takeError(&msg).?);
+}
+
+test "DiskTier: in-place commits keep an entry's bytes equal to the files it owns" {
+    const io = std.testing.io;
+    const s = mlx.gpuStream();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var buf: [512]u8 = undefined;
+    const base = try tmpRoot(&tmp, io, &buf);
+
+    var tier = try DiskTier.init(testing.allocator, io, base, "fp-qsa-bill", 0, 128);
+    defer tier.deinit();
+
+    var cache = try KVCache.init(testing.allocator, 3);
+    defer cache.deinit();
+    try fillCache(&cache, s, 3, 900, 8, 0.0, .float32);
+    var tokens: [900]u32 = undefined;
+    for (&tokens, 0..) |*t, i| t.* = @intCast(i + 7);
+
+    var src = buildHybridEntries(s, 200.0, 600.0);
+    defer freeHybridEntries(&src);
+    const aux_shape = [_]c_int{ 1, 600, 8 };
+    const pooled_shape = [_]c_int{ 1, 150, 8 };
+    src[2].aux_state = makeArange(s, &aux_shape, 700.0);
+    src[2].qsa_pooled = makeArange(s, &pooled_shape, 800.0);
+    src[2].qsa_ratio = 4;
+    var cps = [_]transformer_mod.SSMCheckpoint{
+        try transformer_mod.captureSsmCheckpoint(testing.allocator, &src, 128, s),
+        try transformer_mod.captureSsmCheckpoint(testing.allocator, &src, 256, s),
+        try transformer_mod.captureSsmCheckpoint(testing.allocator, &src, 384, s),
+        try transformer_mod.captureSsmCheckpoint(testing.allocator, &src, 600, s),
+    };
+    defer for (&cps) |*cp| cp.deinit(testing.allocator);
+    try transformer_mod.attachQsaHistoryToLatest(&cps, &src, s);
+    // A fifth checkpoint with no QSA history: the append adds a file and leaves qsa.safetensors alone.
+    var more = [_]transformer_mod.SSMCheckpoint{
+        try transformer_mod.captureSsmCheckpoint(testing.allocator, &src, 64, s),
+    };
+    defer for (&more) |*cp| cp.deinit(testing.allocator);
+
+    const Owned = struct {
+        // Every file in a non-sharing entry's dir is its own; meta.json is the manifest, never billed.
+        fn bytes(t: *DiskTier, e: *const IndexEntry) !u64 {
+            const dir = try std.fmt.allocPrint(testing.allocator, "{s}/e{d}", .{ t.root, e.id });
+            defer testing.allocator.free(dir);
+            var d = try std.Io.Dir.openDirAbsolute(t.io, dir, .{});
+            defer d.close(t.io);
+            const meta = try d.statFile(t.io, "meta.json", .{});
+            return dirBytes(t.io, dir) - meta.size;
+        }
+    };
+
+    // Turn 1: 600 tokens land with four checkpoints and a QSA history file.
+    _ = try tier.appendCommit(cache.entries, 600, cache.config, tokens[0..600], false, &cps, s);
+    try testing.expect(tier.entries.items[0].qsa_history_bytes > 0);
+    try testing.expectEqual(try Owned.bytes(&tier, &tier.entries.items[0]), tier.entries.items[0].bytes);
+
+    // Turn 2: same tokens, an MTP snap and one more checkpoint -> the ssm/spec-only append.
+    var mtp = try KVCache.init(testing.allocator, 1);
+    defer mtp.deinit();
+    try fillCache(&mtp, s, 1, 590, 8, 9.5, .float32);
+    _ = try tier.appendCommitWithSpec(cache.entries, 600, cache.config, tokens[0..600], false, &more, null, .{ .entries = mtp.entries, .step = mtp.step, .config = mtp.config, .base_pos = 0 }, s);
+    try testing.expect(tier.entries.items[0].spec_bytes > 0);
+    try testing.expectEqual(@as(usize, 5), tier.entries.items[0].ssm_positions.len);
+    try testing.expectEqual(try Owned.bytes(&tier, &tier.entries.items[0]), tier.entries.items[0].bytes);
+    try testing.expectEqual(tier.entries.items[0].bytes, tier.total_bytes);
+
+    // Turn 3: the conversation grows to 900 tokens, again with no checkpoints -> extend in place.
+    _ = try tier.appendCommit(cache.entries, 900, cache.config, &tokens, false, null, s);
+    const e = &tier.entries.items[0];
+    try testing.expectEqual(@as(u32, 900), e.kv_len);
+    try testing.expect(e.qsa_history_bytes > 0);
+    try testing.expectEqual(try Owned.bytes(&tier, e), e.bytes);
+    try testing.expectEqual(e.bytes, tier.total_bytes);
+}

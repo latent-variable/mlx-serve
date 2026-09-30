@@ -18,10 +18,10 @@ struct ModelDetailSheet: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(request.title)
-                        .font(.title3.weight(.semibold))
+                        .font(.app(.title3).weight(.semibold))
                         .lineLimit(1)
-                    Text(request.repoId)
-                        .font(.caption)
+                    Text(L10n.text(request.repoId))
+                        .font(.app(.caption))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
@@ -33,7 +33,8 @@ struct ModelDetailSheet: View {
                         Label("Open on Hugging Face", systemImage: "arrow.up.forward.square")
                     }
                 }
-                Button("Close") { dismiss() }
+                Button { dismiss() } label: { Text("Close")
+                    .font(.app(.body)) }
                     .keyboardShortcut(.cancelAction)
             }
             .padding(16)
@@ -53,10 +54,10 @@ struct ModelDetailSheet: View {
         case .failed(let reason):
             VStack(spacing: 8) {
                 Image(systemName: "doc.text.magnifyingglass")
-                    .font(.largeTitle)
+                    .font(.app(.largeTitle))
                     .foregroundStyle(.secondary)
                 Text(reason)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.secondary).font(.app(.body))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .ready(let markdown):

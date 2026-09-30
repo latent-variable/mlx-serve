@@ -18,11 +18,14 @@ const mlx = @import("mlx.zig");
 const flux = @import("flux.zig");
 const krea = @import("krea.zig");
 const mage_flow_mod = @import("mage_flow.zig");
+const qwen_image = @import("qwen_image.zig");
 const lora_mod = @import("lora.zig");
 const tts = @import("tts.zig");
 const acestep = @import("acestep.zig");
 const music3 = @import("music3.zig");
 const kokoro = @import("kokoro.zig");
+const laya = @import("laya.zig");
+const kev = @import("kev.zig");
 const ltx = @import("ltx_video.zig");
 const diffvae_fwd = @import("ltx_diffvae_forward.zig");
 const ltx_audio = @import("ltx_audio.zig");
@@ -53,6 +56,9 @@ pub const Modality = enum {
     audio,
     video,
     mesh,
+    /// Typed decisions (`/v1/decisions`, Laya or Kev): scorers, not generators,
+    /// but they ride the media plumbing (engine slot, inference-thread job).
+    decision,
 
     pub fn capability(self: Modality) []const u8 {
         return switch (self) {
@@ -60,6 +66,7 @@ pub const Modality = enum {
             .audio => "audio",
             .video => "video",
             .mesh => "3d",
+            .decision => "decisions",
         };
     }
 
@@ -72,6 +79,7 @@ pub const Modality = enum {
             .audio => "qwen3_tts",
             .video => "AudioVideo",
             .mesh => "hunyuan3d_2_1",
+            .decision => "laya",
         };
     }
 };
@@ -93,13 +101,15 @@ pub const Modality = enum {
 pub const media_model_types = [_][]const u8{
     "flux2",     "krea",       "mage_flow",      "mageflow",
     "qwen3_tts", "acestep",    "kokoro",         "AudioVideo",
-    "hunyuan3d", "minimax_h3", "minimax_music3",
+    "hunyuan3d", "minimax_h3", "minimax_music3", "qwen_image", "laya",
+    "kev",
 };
 
 pub fn modalityFromType(model_type: []const u8) ?Modality {
     if (std.mem.startsWith(u8, model_type, "flux2")) return .image;
     if (std.mem.startsWith(u8, model_type, "krea")) return .image;
     if (std.mem.startsWith(u8, model_type, "mage_flow") or std.mem.eql(u8, model_type, "mageflow")) return .image;
+    if (std.mem.startsWith(u8, model_type, "qwen_image")) return .image;
     if (std.mem.eql(u8, model_type, "qwen3_tts")) return .audio;
     if (std.mem.eql(u8, model_type, "acestep")) return .audio;
     if (std.mem.eql(u8, model_type, "minimax_music3")) return .audio;
@@ -107,6 +117,7 @@ pub fn modalityFromType(model_type: []const u8) ?Modality {
     if (std.mem.eql(u8, model_type, "AudioVideo")) return .video;
     if (std.mem.eql(u8, model_type, "minimax_h3")) return .video;
     if (std.mem.startsWith(u8, model_type, "hunyuan3d")) return .mesh;
+    if (std.mem.eql(u8, model_type, "laya") or std.mem.eql(u8, model_type, "kev")) return .decision;
     return null;
 }
 
@@ -119,6 +130,7 @@ pub const GenRoute = enum {
     music,
     video,
     mesh,
+    decisions,
 
     pub fn modality(self: GenRoute) Modality {
         return switch (self) {
@@ -126,6 +138,7 @@ pub const GenRoute = enum {
             .speech, .music => .audio,
             .video => .video,
             .mesh => .mesh,
+            .decisions => .decision,
         };
     }
 };
@@ -163,6 +176,8 @@ pub const AudioBackendKind = enum {
 pub fn peekModelType(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) ?[]u8 {
     // Guard the openFileAbsolute assert (ReleaseFast UB on relative/empty paths).
     if (model_dir.len == 0 or !std.fs.path.isAbsolute(model_dir)) return null;
+    // A Kev pack's root config.json is its qwen3_5 base: the marker is checked first (discovery agrees).
+    if (isKevPack(io, model_dir)) return allocator.dupe(u8, "kev") catch null;
     if (readConfigModelType(io, allocator, model_dir)) |mt| return mt;
     // Diffusers-style repos (Mage-Flow) have no root config.json / model_type —
     // the pipeline identity lives in model_index.json's `_class_name`. Synthesize
@@ -173,7 +188,33 @@ pub fn peekModelType(io: std.Io, allocator: std.mem.Allocator, model_dir: []cons
     // the SAME predicate discovery uses — a private copy here is how `list` and
     // the loader end up disagreeing about whether a dir is a model.
     if (isMfluxFlux2Repo(io, allocator, model_dir)) return allocator.dupe(u8, "flux2-klein") catch null;
+    // Laya decision checkpoints carry no root config.json either.
+    if (isLayaRepo(io, model_dir)) return allocator.dupe(u8, "laya") catch null;
+    // An mlx-community-style Qwen-Image-2.1 repo likewise: no root
+    // config.json, model_index.json's `_class_name` the only marker.
+    if (isQwenImage21Repo(io, allocator, model_dir)) return allocator.dupe(u8, "qwen_image21") catch null;
     return null;
+}
+
+fn isKevPack(io: std.Io, model_dir: []const u8) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, model_dir, .{}) catch return false;
+    defer dir.close(io);
+    return discovery.peekKevPack(io, dir);
+}
+
+fn isLayaRepo(io: std.Io, model_dir: []const u8) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, model_dir, .{}) catch return false;
+    defer dir.close(io);
+    return discovery.peekLayaCheckpoint(io, dir);
+}
+
+/// True when `model_dir` is an mlx-community-style Qwen-Image-2.1 repo.
+/// Thin path→Dir wrapper over `model_discovery.peekQwenImage21Index` — the
+/// ONE predicate, so discovery and load can't disagree about a spelling.
+fn isQwenImage21Repo(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, model_dir, .{}) catch return false;
+    defer dir.close(io);
+    return discovery.peekQwenImage21Index(io, allocator, dir);
 }
 
 /// True when `model_dir` holds FLUX.2 DiT weights but no config.json to say so.
@@ -410,7 +451,9 @@ const FluxImpl = struct {
         if (opts.edit_images.len > 0) {
             // Instruction edit: clean in-context references, full noise start.
             const ve = if (self.vae_enc) |*e| e else return error.NoVaeEncoder;
-            if (opts.edit_images.len > MAX_EDIT_IMAGES) return error.TooManyEditImages;
+            // FLUX's own backstop — the HTTP layer rejects earlier with the
+            // backend-aware cap (`editRefCap`).
+            if (opts.edit_images.len > MAX_EDIT_IMAGES_OTHER) return error.TooManyEditImages;
             for (opts.edit_images) |pix| {
                 ref_lats[ref_lat_n] = try ve.encode(pix);
                 ref_lat_n += 1;
@@ -465,12 +508,24 @@ const ImageBackend = union(enum) {
     flux: FluxImpl,
     krea: *krea.Engine,
     mage_flow: *mage_flow_mod.Engine,
+    qwen_image: *qwen_image.Engine,
 };
 
-/// Most reference images an edit request may carry (the primary 'image' plus
-/// extra 'ref_images'). Each ~1MP reference adds ~4096 DiT tokens, so the cap
-/// bounds attention memory; the official sampler tops out around 10.
-pub const MAX_EDIT_IMAGES = 4;
+/// Most reference images one edit may carry (the primary 'image' plus
+/// `ref_images`). Qwen-Image-2.1 accepts 10; FLUX, Krea and Mage-Flow stay at
+/// 4 (`editRefCap` applies that split). Each ~1MP reference adds ~4096 DiT
+/// tokens, so the cap bounds attention memory.
+pub const MAX_EDIT_IMAGES = 10;
+pub const MAX_EDIT_IMAGES_OTHER = 4;
+
+/// Reference cap for one backend. Qwen-Image accepts 10; FLUX, Krea and
+/// Mage-Flow stay at 4.
+pub fn editRefCap(backend: ImageBackend) usize {
+    return switch (backend) {
+        .qwen_image => MAX_EDIT_IMAGES,
+        .flux, .krea, .mage_flow => MAX_EDIT_IMAGES_OTHER,
+    };
+}
 
 /// Ceiling on one video response's raw RGB volume. The whole `frames.rgb`
 /// buffer is base64'd into ONE JSON body and the app decodes it in memory;
@@ -489,27 +544,30 @@ pub fn videoRgbTransportReason(delivered_frames: u32, width: u32, height: u32) ?
     return std.fmt.bufPrint(&S.buf, "{d} frames at {d}x{d} is {d} MB of raw RGB; one response carries at most {d} MB — fewer frames or windows, or a smaller canvas", .{ delivered_frames, width, height, bytes / (1024 * 1024), MAX_VIDEO_RGB_BYTES / (1024 * 1024) }) catch "video too large for one response";
 }
 
-
-/// Per-request image-generation options shared by both backends.
+/// Per-request image-generation options shared by image backends.
 pub const ImageGenOpts = struct {
+    /// Preserve native alpha on Qwen-Image; other backends reject this option.
+    transparent: bool = false,
     /// img2img source pixels [1,3,H,W] f32 [0,1], pre-resized to the target
     /// size (VAE-encoded by the backend).
     init_image: ?mlx.mlx_array = null,
     /// How far to renoise the source (diffusers convention: 1 = ignore it,
     /// low = small change). Only meaningful with `init_image`.
     strength: f32 = 0.6,
-    /// Instruction editing (FLUX.2 only): source pixels [1,3,H,W] f32 [0,1]
+    /// Instruction editing (FLUX.2): source pixels [1,3,H,W] f32 [0,1]
     /// conditioned as CLEAN in-context reference tokens — generation starts
     /// from pure noise and attends to them (`strength` does not apply).
     /// Multiple entries (the edited source first, then extra references) each
     /// ride at their own t offset: "replace the face in image 1 with the face
-    /// from image 2". Empty = not an edit.
+    /// from image 2". Empty = not an edit. Byte-based backends (MageFlow,
+    /// Qwen-Image) use `edit_image_bytes` instead.
     edit_images: []const mlx.mlx_array = &.{},
     /// Raw reference bytes (PNG/JPEG) for backends that do their OWN edit
     /// preprocessing rather than consuming pre-decoded `edit_images` — MageFlow
     /// needs a target-size VAE resize AND a separate 384/smart-resize for its
-    /// vision tower, so it resizes from the source bytes. Primary first. Empty =
-    /// not a MageFlow edit.
+    /// vision tower; Qwen-Image preprocesses for its tower/VAE itself, and raw
+    /// bytes keep e.g. alpha intact to the engine. Primary first. Empty = not
+    /// an edit on those backends.
     edit_image_bytes: []const []const u8 = &.{},
     /// Conditioning rebalance: global gain × per-tapped-layer weights
     /// (FLUX: 3 taps, Krea: 12 taps).
@@ -521,6 +579,10 @@ pub const ImageGenOpts = struct {
     /// into the weights and is never asked to run it.
     guidance_scale: f32 = 1.0,
     negative_prompt: []const u8 = "",
+    /// Qwen-Image edit: reference conditioning resolution — diffusers'
+    /// per-call `output_resolution` knob. [256,1024] at the wire; 1024 is
+    /// the trained regime, lower trades conditioning fidelity for speed.
+    ref_resolution: u32 = 1024,
 };
 
 /// Image modality engine. The slot on `LoadedModel` stays modality-named; the
@@ -549,6 +611,11 @@ pub const ImageEngine = struct {
                 self.backend = .{ .krea = try krea.Engine.load(io, allocator, model_dir) };
                 return self;
             }
+            if (std.mem.startsWith(u8, mt, "qwen_image")) {
+                const staged = qwenImageStagesTextEncoder(estimateResidentBytes(io, model_dir), mlx.maxRecommendedWorkingSet());
+                self.backend = .{ .qwen_image = try qwen_image.Engine.load(io, allocator, model_dir, staged) };
+                return self;
+            }
         }
         self.backend = .{ .flux = try FluxImpl.load(io, allocator, model_dir) };
         return self;
@@ -560,6 +627,7 @@ pub const ImageEngine = struct {
             .flux => |*f| f.deinit(),
             .krea => |k| k.deinit(),
             .mage_flow => |m| m.deinit(),
+            .qwen_image => |q| q.deinit(),
         }
         self.allocator.destroy(self);
     }
@@ -569,6 +637,7 @@ pub const ImageEngine = struct {
             .flux => |*f| f.s,
             .krea => |k| k.s,
             .mage_flow => |m| m.s,
+            .qwen_image => |q| q.s,
         };
     }
 
@@ -578,6 +647,7 @@ pub const ImageEngine = struct {
             .flux => 3,
             .krea => 12,
             .mage_flow => 0, // conditioning-rebalance not wired for MageFlow yet
+            .qwen_image => 0, // one final-norm hidden state, no layer taps
         };
     }
 
@@ -587,32 +657,43 @@ pub const ImageEngine = struct {
             .flux => |*f| f.vae_enc != null,
             .krea => |k| k.vae_enc != null,
             .mage_flow => false, // img2img lands with the MageFlow VAE encoder
+            .qwen_image => true, // the VAE encoder loads on first use
         };
     }
 
     /// True when instruction editing (in-context reference conditioning) is
-    /// available — a trained FLUX.2 capability; Krea has no edit training.
+    /// available — a trained FLUX.2 capability; Krea has no edit training;
+    /// Qwen-Image-2.1 edits when its pack carries the Qwen3-VL tower.
     pub fn supportsEdit(self: *const ImageEngine) bool {
         return switch (self.backend) {
             .flux => |*f| f.vae_enc != null,
             .krea => false,
             .mage_flow => |m| m.supportsEdit(), // Mage-Flow-Edit-Turbo checkpoint
+            .qwen_image => |q| q.supportsEdit(), // tower in the pack's text_encoder/
         };
     }
 
     /// True when the edit backend consumes RAW reference bytes (`edit_image_bytes`)
     /// and does its own resizing, rather than pre-decoded `edit_images`. MageFlow
-    /// needs a target-size VAE resize AND a separate VLM resize per reference.
+    /// needs a target-size VAE resize AND a separate VLM resize per reference;
+    /// Qwen-Image runs its own tower/VAE preprocessing, and raw bytes are the
+    /// only transport that keeps e.g. alpha intact to the engine.
     pub fn editUsesRawBytes(self: *const ImageEngine) bool {
-        return self.backend == .mage_flow;
+        return self.backend == .mage_flow or self.backend == .qwen_image;
     }
 
     /// True when real classifier-free guidance (`guidance_scale`/`negative_prompt`)
-    /// is wired — FLUX only. Distilled klein still accepts the fields (1.0
-    /// is a no-op, matching mflux's basic guider); Krea/Mage-Flow have no
-    /// negative-encode path.
+    /// is wired — FLUX and Qwen-Image. Distilled klein still accepts the
+    /// fields (1.0 is a no-op, matching mflux's basic guider); Krea/Mage-Flow
+    /// have no negative-encode path.
     pub fn supportsGuidance(self: *const ImageEngine) bool {
-        return self.backend == .flux;
+        return self.backend == .flux or self.backend == .qwen_image;
+    }
+
+    /// Steps for a request that names none: the distilled backends' few-step
+    /// default, or an undistilled checkpoint's own recommendation.
+    pub fn defaultSteps(self: *const ImageEngine) u32 {
+        return if (self.backend == .qwen_image) qwen_image.DEFAULT_STEPS else 4;
     }
 
     /// Reconcile the engine's attached LoRA stack with the request: an empty
@@ -639,7 +720,7 @@ pub const ImageEngine = struct {
             const arch: lora_mod.Arch = switch (self.backend) {
                 .flux => .flux2,
                 .krea => .krea2,
-                .mage_flow => .generic,
+                .mage_flow, .qwen_image => .generic,
             };
             const lf = try lora_mod.loadFile(self.allocator, p, arch);
             stack.files[stack.count] = lf;
@@ -651,6 +732,7 @@ pub const ImageEngine = struct {
             .flux => |*f| flux.attachLora(&f.dit, &stack),
             .krea => |k| krea.attachLora(&k.dit, &stack),
             .mage_flow => 0, // MageFlow does not support LoRA (matches mflux)
+            .qwen_image => 0, // no LoRA key mapping yet (matches mflux)
         };
         if (matched == 0) {
             stack.deinit();
@@ -665,7 +747,7 @@ pub const ImageEngine = struct {
         switch (self.backend) {
             .flux => |*f| flux.detachLora(&f.dit),
             .krea => |k| krea.detachLora(&k.dit),
-            .mage_flow => {}, // no LoRA attached
+            .mage_flow, .qwen_image => {}, // no LoRA attached
         }
         if (self.lora_stack) |*st| st.deinit();
         self.lora_stack = null;
@@ -699,6 +781,24 @@ pub const ImageEngine = struct {
                 m.editImage(allocator, prompt, opts.edit_image_bytes, width, height, seed, steps, progress)
             else
                 m.generateImage(allocator, prompt, width, height, seed, steps, progress),
+            .qwen_image => |q| blk: {
+                // Instruction edit (tower pack): raw reference bytes; the engine
+                // preprocesses them itself and takes guidance/negative verbatim.
+                if (opts.edit_image_bytes.len != 0)
+                    break :blk q.editImage(allocator, prompt, opts.edit_image_bytes, width, height, seed, steps, .{
+                        .guidance_scale = opts.guidance_scale,
+                        .negative_prompt = opts.negative_prompt,
+                        .ref_resolution = opts.ref_resolution,
+                    }, progress);
+                if (opts.edit_images.len != 0) break :blk error.EditUnsupported;
+                break :blk q.generateImage(allocator, prompt, width, height, seed, steps, .{
+                    .init_image = opts.init_image,
+                    .start_step = if (opts.init_image != null) img2imgStartStep(steps, opts.strength) else 0,
+                    .guidance_scale = opts.guidance_scale,
+                    .negative_prompt = opts.negative_prompt,
+                    .transparent = opts.transparent,
+                }, progress);
+            },
         };
     }
 
@@ -718,6 +818,8 @@ pub const ImageEngine = struct {
             .krea => .{ .w = clampKreaDim(req_w), .h = clampKreaDim(req_h) },
             // MageFlow is native-resolution, VAE downsample 16 → multiples of 16.
             .mage_flow => .{ .w = clampKreaDim(req_w), .h = clampKreaDim(req_h) },
+            // Qwen-Image-2.1: one latent token per 16x16 tile.
+            .qwen_image => .{ .w = clampKreaDim(req_w), .h = clampKreaDim(req_h) },
         };
     }
 
@@ -728,7 +830,7 @@ pub const ImageEngine = struct {
     pub fn maxDimFor(kind: std.meta.Tag(ImageBackend)) u32 {
         return switch (kind) {
             .flux => 1536,
-            .krea, .mage_flow => 2048,
+            .krea, .mage_flow, .qwen_image => 2048,
         };
     }
 
@@ -807,6 +909,220 @@ pub const AudioEngine = struct {
         self.allocator.destroy(self);
     }
 };
+
+/// Per-request bounds for every decision backend, checked before any forward: one request
+/// holds the inference thread until it is answered.
+pub const DecisionLimits = struct {
+    max_questions: usize = 64,
+    max_input_tokens: usize = 32 * 1024,
+
+    fn fromEnv() DecisionLimits {
+        const d: DecisionLimits = .{};
+        return .{
+            .max_questions = envLimit("MLX_SERVE_LAYA_MAX_QUESTIONS", d.max_questions),
+            .max_input_tokens = envLimit("MLX_SERVE_LAYA_MAX_INPUT_TOKENS", d.max_input_tokens),
+        };
+    }
+
+    fn envLimit(name: [*:0]const u8, default: usize) usize {
+        const raw = std.c.getenv(name) orelse return default;
+        const v = std.fmt.parseInt(usize, std.mem.sliceTo(raw, 0), 10) catch 0;
+        if (v == 0) {
+            log.warn("[decision] ignoring {s}={s} (want a positive integer)\n", .{ name, raw });
+            return default;
+        }
+        return v;
+    }
+
+    /// 400 text for a limit error, naming the limit in force; null for other errors.
+    fn message(self: DecisionLimits, buf: []u8, err: anyerror) ?[]const u8 {
+        return switch (err) {
+            error.TooManyQuestions => std.fmt.bufPrint(buf, "too many questions in one request (limit {d}, MLX_SERVE_LAYA_MAX_QUESTIONS)", .{self.max_questions}) catch null,
+            error.TooManyInputTokens => std.fmt.bufPrint(buf, "the questions total more than {d} input tokens (MLX_SERVE_LAYA_MAX_INPUT_TOKENS); split them over several requests", .{self.max_input_tokens}) catch null,
+            else => null,
+        };
+    }
+};
+
+/// Decision engine over `POST /v1/decisions`: a Laya encoder or a Kev pack, chosen by the model dir.
+pub const DecisionEngine = struct {
+    allocator: std.mem.Allocator,
+    backend: Backend,
+    stream: mlx.mlx_stream,
+    /// How long the inference thread waits for more decision requests to
+    /// answer in the same pass (`MLX_SERVE_LAYA_BATCH_WINDOW_US`, default 0:
+    /// only requests already queued are merged).
+    batch_window_us: u32 = 0,
+    limits: DecisionLimits = .{},
+
+    pub const Backend = union(enum) { laya: *laya.Engine, kev: *kev.Engine };
+
+    pub fn load(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !*DecisionEngine {
+        const self = try allocator.create(DecisionEngine);
+        errdefer allocator.destroy(self);
+        self.allocator = allocator;
+        self.stream = mlx.mlx_default_gpu_stream_new();
+        errdefer _ = mlx.mlx_stream_free(self.stream);
+        self.backend = if (isKevPack(io, model_dir))
+            .{ .kev = try kev.Engine.load(io, allocator, model_dir, self.stream) }
+        else
+            .{ .laya = try laya.Engine.load(io, allocator, model_dir, self.stream) };
+        self.limits = DecisionLimits.fromEnv();
+        self.batch_window_us = if (std.c.getenv("MLX_SERVE_LAYA_BATCH_WINDOW_US")) |raw|
+            std.fmt.parseInt(u32, std.mem.sliceTo(raw, 0), 10) catch blk: {
+                log.warn("[decision] ignoring MLX_SERVE_LAYA_BATCH_WINDOW_US={s} (want microseconds)\n", .{raw});
+                break :blk 0;
+            }
+        else
+            0;
+        log.info("[decision] {s} engine ready\n", .{if (self.backend == .kev) "Kev" else "Laya"});
+        return self;
+    }
+
+    pub fn deinit(self: *DecisionEngine) void {
+        switch (self.backend) {
+            inline else => |e| e.deinit(),
+        }
+        _ = mlx.mlx_stream_free(self.stream);
+        self.allocator.destroy(self);
+    }
+
+    fn limitMessage(self: *const DecisionEngine, buf: []u8, err: anyerror) ?[]const u8 {
+        if (self.limits.message(buf, err)) |msg| return msg;
+        return switch (self.backend) {
+            .laya => |e| e.limitMessage(buf, err),
+            .kev => null,
+        };
+    }
+};
+
+/// A `/v1/decisions` body parsed and validated on the connection thread,
+/// before the request queues for the inference thread.
+pub const DecisionRequest = struct {
+    parsed: std.json.Parsed(std.json.Value),
+    state: std.json.Value,
+    questions: Questions,
+
+    pub const Questions = union(enum) { laya: laya.Questions, kev: kev.Questions };
+
+    pub fn deinit(self: *DecisionRequest, allocator: std.mem.Allocator) void {
+        switch (self.questions) {
+            inline else => |*q| q.deinit(allocator),
+        }
+        self.parsed.deinit();
+    }
+
+    pub fn count(self: *const DecisionRequest) usize {
+        return switch (self.questions) {
+            inline else => |q| q.qs.len,
+        };
+    }
+};
+
+/// Parse and validate `{"model", "state": <string|object|array>, "questions": {id: {...}}}`.
+/// An invalid body is answered 400 here and gives null.
+pub fn prepareDecisions(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, engine: *DecisionEngine) !?DecisionRequest {
+    laya.checkJsonDepth(body) catch |err| {
+        try sendError(conn, 400, laya.errorMessage(err).?);
+        return null;
+    };
+    var parsed = laya.parseRequestJson(allocator, body) catch {
+        try sendError(conn, 400, "request body is not valid JSON");
+        return null;
+    };
+    var keep = false;
+    defer if (!keep) parsed.deinit();
+    if (parsed.value != .object) {
+        try sendError(conn, 400, "request body must be a JSON object");
+        return null;
+    }
+    const obj = parsed.value.object;
+    const state = obj.get("state") orelse {
+        try sendError(conn, 400, "missing 'state'");
+        return null;
+    };
+    const questions = obj.get("questions") orelse {
+        try sendError(conn, 400, "missing 'questions'");
+        return null;
+    };
+    const qs: DecisionRequest.Questions = switch (engine.backend) {
+        .laya => |e| .{ .laya = e.parseQuestions(allocator, questions, engine.limits.max_questions) catch |err| {
+            try sendDecisionError(conn, engine, err);
+            return null;
+        } },
+        .kev => |e| .{ .kev = e.parseQuestions(allocator, questions, engine.limits.max_questions) catch |err| {
+            try sendDecisionError(conn, engine, err);
+            return null;
+        } },
+    };
+    keep = true;
+    return .{ .parsed = parsed, .state = state, .questions = qs };
+}
+
+/// 400 naming a validation or limit error; 500 for any other.
+fn sendDecisionError(conn: *Conn, engine: *DecisionEngine, err: anyerror) !void {
+    var limit_buf: [160]u8 = undefined;
+    const named = engine.limitMessage(&limit_buf, err) orelse switch (engine.backend) {
+        .laya => laya.errorMessage(err),
+        .kev => kev.errorMessage(err),
+    };
+    if (named) |msg| return sendError(conn, 400, msg);
+    log.err("[decision] predict failed: {s}\n", .{@errorName(err)});
+    return sendError(conn, 500, "decision forward failed");
+}
+
+/// One queued `/v1/decisions` request.
+pub const DecisionJob = struct {
+    allocator: std.mem.Allocator,
+    conn: *Conn,
+    req: *const DecisionRequest,
+};
+
+/// The backend's `predict` JSON for prepared requests, sent to each connection.
+/// Runs on the inference thread like every gen job; one request's error is that
+/// request's response only. Laya answers merged requests in one pass; Kev one
+/// request at a time.
+pub fn handleDecisions(engine: *DecisionEngine, model_id: []const u8, jobs: []const DecisionJob) void {
+    const t0 = std.Io.Timestamp.now(jobs[0].conn.io, .boot);
+    var nq: usize = 0;
+    for (jobs) |j| nq += j.req.count();
+    switch (engine.backend) {
+        .laya => |e| {
+            var buf: [16]laya.Engine.Job = undefined;
+            const pj = if (jobs.len <= buf.len) buf[0..jobs.len] else engine.allocator.alloc(laya.Engine.Job, jobs.len) catch {
+                for (jobs) |j| sendError(j.conn, 500, "out of memory") catch {};
+                return;
+            };
+            defer if (jobs.len > buf.len) engine.allocator.free(pj);
+            for (pj, jobs) |*p, j| p.* = .{ .a = j.allocator, .model_id = model_id, .state = j.req.state, .questions = &j.req.questions.laya, .max_input_tokens = engine.limits.max_input_tokens };
+            e.predictMany(pj);
+            logDecisionPass(jobs, nq, t0);
+            for (pj, jobs) |p, j| sendDecision(engine, j, p.result) catch |err| {
+                log.warn("[decision] response not sent: {s}\n", .{@errorName(err)});
+            };
+        },
+        .kev => |e| {
+            for (jobs) |j| sendDecision(engine, j, e.predict(j.allocator, model_id, j.req.state, &j.req.questions.kev, engine.limits.max_input_tokens)) catch |err| {
+                log.warn("[decision] response not sent: {s}\n", .{@errorName(err)});
+            };
+            logDecisionPass(jobs, nq, t0);
+        },
+    }
+}
+
+fn logDecisionPass(jobs: []const DecisionJob, nq: usize, t0: std.Io.Timestamp) void {
+    const ms = @as(f64, @floatFromInt(t0.untilNow(jobs[0].conn.io, .boot).nanoseconds)) / 1e6;
+    if (jobs.len > 1)
+        log.info("[decision] {d} requests merged, {d} question(s) in {d:.1} ms\n", .{ jobs.len, nq, ms })
+    else
+        log.info("[decision] {d} question(s) in {d:.1} ms\n", .{ nq, ms });
+}
+
+fn sendDecision(engine: *DecisionEngine, job: DecisionJob, result: anyerror![]u8) !void {
+    const out = result catch |err| return sendDecisionError(job.conn, engine, err);
+    defer job.allocator.free(out);
+    try sendBytesJson(job.conn, job.allocator, out);
+}
 
 /// Mesh backend (currently Hunyuan3D-2.1 shape). Thin owner of the hunyuan3d
 /// engine — the DINO conditioner, DiT, and ShapeVAE decoder live in
@@ -1385,6 +1701,7 @@ pub const EditFormError = error{
     MultipleChoicesUnsupported,
     UrlResponseUnsupported,
     OutputFormatUnsupported,
+    MalformedNumber,
     StreamUnsupported,
     OutOfMemory,
 };
@@ -1396,12 +1713,13 @@ pub fn editFormErrorMessage(err: EditFormError) []const u8 {
         error.NotMultipart => "/v1/images/edits expects multipart/form-data with a 'boundary' parameter",
         error.MissingPrompt => "missing required form field 'prompt'",
         error.MissingImage => "missing required form field 'image' (the picture to edit)",
-        error.TooManyImages => "too many 'image' parts (at most 4: the edited source plus 3 references)",
+        error.TooManyImages => "too many 'image' parts (at most 10: the edited source plus 9 references)",
         error.MaskUnsupported => "'mask' is not supported: this server's editors are maskless in-context models (describe the change in the prompt instead)",
         error.MultipleChoicesUnsupported => "'n' must be 1 — this engine generates a single image per request",
         error.UrlResponseUnsupported => "'response_format' must be 'b64_json' — this server does not host generated files",
         error.OutputFormatUnsupported => "'output_format' must be 'png' — this server always returns PNG",
         error.StreamUnsupported => "'stream' is not supported on /v1/images/edits (use /v1/images/generations for SSE progress)",
+        error.MalformedNumber => "'steps'/'seed'/'guidance_scale'/'ref_resolution' must be a JSON number (they are spliced into the request body verbatim)",
         error.OutOfMemory => "out of memory",
     };
 }
@@ -1423,6 +1741,11 @@ pub fn openaiEditFormToJson(allocator: std.mem.Allocator, body: []const u8, cont
     var lora_scales: ?[]const u8 = null;
     var lora_path: ?[]const u8 = null;
     var lora_scale: ?[]const u8 = null;
+    var ref_resolution: ?[]const u8 = null;
+    var steps: ?[]const u8 = null;
+    var seed: ?[]const u8 = null;
+    var guidance_scale: ?[]const u8 = null;
+    var negative_prompt: ?[]const u8 = null;
 
     while (it.next()) |part| {
         // `image`, `image[]` and `image[0]` are all in the wild.
@@ -1441,6 +1764,16 @@ pub fn openaiEditFormToJson(allocator: std.mem.Allocator, body: []const u8, cont
             if (!std.mem.eql(u8, part.data, "auto") and part.data.len != 0) size = part.data;
         } else if (std.mem.eql(u8, part.name, "mask")) {
             if (part.data.len != 0) return error.MaskUnsupported;
+        } else if (std.mem.eql(u8, part.name, "ref_resolution")) {
+            if (part.data.len != 0) ref_resolution = part.data;
+        } else if (std.mem.eql(u8, part.name, "steps")) {
+            if (part.data.len != 0) steps = part.data;
+        } else if (std.mem.eql(u8, part.name, "seed")) {
+            if (part.data.len != 0) seed = part.data;
+        } else if (std.mem.eql(u8, part.name, "guidance_scale")) {
+            if (part.data.len != 0) guidance_scale = part.data;
+        } else if (std.mem.eql(u8, part.name, "negative_prompt")) {
+            if (part.data.len != 0) negative_prompt = part.data;
         } else if (std.mem.eql(u8, part.name, "n")) {
             if (part.data.len != 0 and !std.mem.eql(u8, part.data, "1")) return error.MultipleChoicesUnsupported;
         } else if (std.mem.eql(u8, part.name, "response_format")) {
@@ -1513,6 +1846,33 @@ pub fn openaiEditFormToJson(allocator: std.mem.Allocator, body: []const u8, cont
         }
         try out.appendSlice(allocator, "]");
     }
+    if (ref_resolution) |rr| {
+        if (!chat_mod.isJsonNumber(rr)) return error.MalformedNumber;
+        try out.appendSlice(allocator, ",\"ref_resolution\":");
+        try out.appendSlice(allocator, rr);
+    }
+    // Sampling knobs: each numeric value is validated as JSON grammar before
+    // splicing — a value like `8,"stream":true` must die HERE as a named 400,
+    // not smuggle extra fields into the body the JSON handler would honor.
+    if (steps) |v| {
+        if (!chat_mod.isJsonNumber(v)) return error.MalformedNumber;
+        try out.appendSlice(allocator, ",\"steps\":");
+        try out.appendSlice(allocator, v);
+    }
+    if (seed) |v| {
+        if (!chat_mod.isJsonNumber(v)) return error.MalformedNumber;
+        try out.appendSlice(allocator, ",\"seed\":");
+        try out.appendSlice(allocator, v);
+    }
+    if (guidance_scale) |v| {
+        if (!chat_mod.isJsonNumber(v)) return error.MalformedNumber;
+        try out.appendSlice(allocator, ",\"guidance_scale\":");
+        try out.appendSlice(allocator, v);
+    }
+    if (negative_prompt) |v| {
+        try out.appendSlice(allocator, ",\"negative_prompt\":");
+        try chat_mod.appendJsonString(allocator, &out, v);
+    }
     try out.appendSlice(allocator, "}");
     return out.toOwnedSlice(allocator);
 }
@@ -1569,6 +1929,32 @@ fn fitWithinCap(w: u32, h: u32, cap: u32) Dims {
 fn resolveEditTargetSize(src_w: u32, src_h: u32, budget_w: u32, budget_h: u32, cap: u32) Dims {
     const fit = fitAspect(src_w, src_h, budget_w, budget_h);
     return fitWithinCap(fit.w, fit.h, cap);
+}
+
+/// Qwen-Image-2.1 edit output dims. An explicit size FLOORS to the DiT's /32
+/// grid (a request is a ceiling, never upscaled); a missing size re-derives the
+/// LAST condition image's aspect at the default 1024² resolution (diffusers
+/// calculate_dimensions + its own /32 round), both then clamped to [32, max_dim].
+fn qwenEditDims(explicit: ?Dims, last_ref_w: u32, last_ref_h: u32, max_dim: u32) Dims {
+    var w: u32 = undefined;
+    var h: u32 = undefined;
+    if (explicit) |e| {
+        w = e.w / 32 * 32;
+        h = e.h / 32 * 32;
+    } else {
+        const t = qwen_image.editTargetSize(last_ref_w, last_ref_h, 1024);
+        w = qwenSnap32(t.w);
+        h = qwenSnap32(t.h);
+    }
+    return .{ .w = std.math.clamp(w, 32, max_dim), .h = std.math.clamp(h, 32, max_dim) };
+}
+
+/// round(x/32)*32 — the reference chain's own grid rounding (NOT the explicit
+/// path's floor; the two are deliberately different). u64: x+16 can wrap u32.
+fn qwenSnap32(x: u32) u32 {
+    const r: u64 = (@as(u64, x) + 16) / 32 * 32;
+    const aligned_cap: u64 = @as(u64, std.math.maxInt(u32)) / 32 * 32;
+    return @intCast(@min(r, aligned_cap));
 }
 
 /// Native pixel dims of an encoded PNG/JPEG, without decoding the pixels.
@@ -1805,6 +2191,9 @@ pub fn handleImage(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, 
     const prompt = try jsonUnescape(allocator, prompt_raw);
     defer allocator.free(prompt);
     if (prompt.len == 0) return sendError(conn, 400, "empty 'prompt'");
+    const transparent = sse.bodyWantsTrue(body, "transparent");
+    if (transparent and engine.backend != .qwen_image)
+        return sendError(conn, 400, "'transparent' requires a Qwen-Image model");
 
     // Requested size (default 1024²); the backend resolves it (FLUX is fixed
     // 1024², Krea accepts any multiple of 16 in [256,2048]).
@@ -1828,7 +2217,7 @@ pub fn handleImage(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, 
         log.warn("[image] requested {d}x{d} resolved to {d}x{d} for this backend\n", .{ req_w, req_h, width, height });
     }
     const seed: u64 = extractJsonInt(body, "seed") orelse 42;
-    const steps: u32 = @intCast(extractJsonInt(body, "steps") orelse 4);
+    const steps: u32 = @intCast(extractJsonInt(body, "steps") orelse engine.defaultSteps());
 
     // Source image: `image` (base64 PNG/JPEG) + `mode` ("variation" default /
     // "edit"). Variation = SDEdit renoise at `strength` (both backends);
@@ -1846,11 +2235,14 @@ pub fn handleImage(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, 
     defer for (edit_imgs[0..edit_imgs_n]) |ei| {
         _ = mlx.mlx_array_free(ei);
     };
-    // Raw reference bytes for byte-based edit backends (MageFlow); owned copies
-    // that must outlive `generateImage`.
+    // Raw reference bytes for byte-based edit backends (MageFlow, Qwen-Image);
+    // owned copies that must outlive `generateImage`.
     var edit_byte_bufs: [MAX_EDIT_IMAGES][]u8 = undefined;
     var edit_byte_n: usize = 0;
     defer for (edit_byte_bufs[0..edit_byte_n]) |b| allocator.free(b);
+    // Qwen-Image-2.1 edits: native size of the LAST condition image (the
+    // primary, or the last ref_image) — output aspect follows it.
+    var qwen_edit_last_ref: ?Dims = null;
     var strength: f32 = 0.6;
     var edit_mode = false;
     if (extractJsonString(body, "mode")) |m| {
@@ -1862,7 +2254,7 @@ pub fn handleImage(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, 
     }
     if (extractJsonString(body, "image")) |raw_img| {
         if (edit_mode and !engine.supportsEdit())
-            return sendError(conn, 400, "instruction editing (mode:\"edit\") requires a FLUX.2 or Mage-Flow-Edit model");
+            return sendError(conn, 400, "instruction editing (mode:\"edit\") requires a FLUX.2, Mage-Flow-Edit, or Qwen-Image-2.1 model with its vision tower (re-convert with the current converter)");
         if (!edit_mode and !engine.supportsImg2Img())
             return sendError(conn, 400, "image-to-image (mode:\"variation\") isn't available for this model — either its VAE encoder failed to load, or this backend has no variation path");
         if (extractJsonFloat(body, "strength")) |sv| {
@@ -1873,18 +2265,23 @@ pub fn handleImage(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, 
             return sendError(conn, 400, "invalid base64 in 'image'");
         defer allocator.free(img_bytes);
         if (edit_mode and engine.editUsesRawBytes()) {
-            // Byte-based edit backend (MageFlow): keep the source bytes; the
-            // engine does its own target-size VAE resize + VLM resize.
+            // Byte-based edit backend: keep the source bytes; the engine does
+            // its own preprocessing (MageFlow's target-size VAE resize + VLM
+            // resize, Qwen's tower/VAE encode — raw bytes, so alpha survives).
             edit_byte_bufs[0] = try allocator.dupe(u8, img_bytes);
             edit_byte_n = 1;
-            // MageFlow edits AT the target grid: every reference is resized to
-            // (W,H), so a square target squashes a 3:2 photo — and an editor
-            // that changes the geometry of its input is wrong by construction.
-            // NO size in the request = the reference pipeline's default
-            // (`max_size = source size`): hand back the source's own resolution.
-            // An explicit size keeps the PRIMARY reference's aspect ratio and
-            // treats the request as the pixel budget to fit it into.
-            if (imageNativeSize(img_bytes)) |nat| {
+            if (engine.backend == .qwen_image) {
+                // Qwen output dims follow the LAST condition image; they resolve
+                // once ref_images are collected below.
+                if (imageNativeSize(img_bytes)) |nat| qwen_edit_last_ref = .{ .w = nat.w, .h = nat.h };
+            } else if (imageNativeSize(img_bytes)) |nat| {
+                // MageFlow edits AT the target grid: every reference is resized to
+                // (W,H), so a square target squashes a 3:2 photo — and an editor
+                // that changes the geometry of its input is wrong by construction.
+                // NO size in the request = the reference pipeline's default
+                // (`max_size = source size`): hand back the source's own resolution.
+                // An explicit size keeps the PRIMARY reference's aspect ratio and
+                // treats the request as the pixel budget to fit it into.
                 // No size given => the reference IS the budget, which `fitAspect`
                 // resolves to the source's own dimensions (/16).
                 const fit = if (size_given)
@@ -1950,14 +2347,21 @@ pub fn handleImage(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, 
             return sendError(conn, 400, "invalid 'ref_images' (must be a JSON array of base64 strings)");
         while (it.next()) |raw_ref| {
             const cur_n = if (engine.editUsesRawBytes()) edit_byte_n else edit_imgs_n;
-            if (cur_n >= MAX_EDIT_IMAGES)
-                return sendError(conn, 400, "too many reference images ('ref_images' takes at most 3 beside 'image')");
+            if (cur_n >= editRefCap(engine.backend))
+                return sendError(conn, 400, if (engine.backend == .qwen_image)
+                    "too many reference images ('ref_images' takes at most 9 beside 'image')"
+                else
+                    "too many reference images ('ref_images' takes at most 3 beside 'image')");
             const ref_bytes = base64DecodeAlloc(allocator, raw_ref) catch
                 return sendError(conn, 400, "invalid base64 in 'ref_images'");
             defer allocator.free(ref_bytes);
             if (engine.editUsesRawBytes()) {
                 edit_byte_bufs[edit_byte_n] = try allocator.dupe(u8, ref_bytes);
                 edit_byte_n += 1;
+                // Qwen output aspect follows the LAST condition image.
+                if (engine.backend == .qwen_image) {
+                    if (imageNativeSize(ref_bytes)) |rnat| qwen_edit_last_ref = .{ .w = rnat.w, .h = rnat.h };
+                }
                 log.info("[image] edit ref {d}: {d} bytes (byte-based backend)\n", .{ edit_byte_n, ref_bytes.len });
                 continue;
             }
@@ -1970,6 +2374,18 @@ pub fn handleImage(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, 
             log.info("[image] edit ref {d}: {d}x{d} -> {d}x{d}\n", .{ edit_imgs_n, rnat.w, rnat.h, rrd.w, rrd.h });
         }
         if (it.bad) return sendError(conn, 400, "invalid 'ref_images' (must be a JSON array of base64 strings)");
+    }
+
+    // Qwen-Image-2.1 edit output dims: the LAST condition image's aspect at the
+    // default 1024² resolution (a request size floors to the /32 grid instead).
+    // RAW req_w/req_h, not the /16-normalized width/height: normalizeSize
+    // rounds UP, and an explicit size is a ceiling here, never an upscale.
+    if (qwen_edit_last_ref) |nat| {
+        const fit = qwenEditDims(if (size_given) .{ .w = req_w, .h = req_h } else null, nat.w, nat.h, engine.maxDim());
+        if (fit.w != width or fit.h != height)
+            log.info("[image] edit: target {d}x{d} -> {d}x{d} (last reference is {d}x{d}, size {s})\n", .{ width, height, fit.w, fit.h, nat.w, nat.h, if (size_given) "requested" else "matched to source" });
+        width = fit.w;
+        height = fit.h;
     }
 
     // Conditioning rebalance: global gain + per-tapped-layer weights.
@@ -2011,7 +2427,18 @@ pub fn handleImage(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, 
         negative_prompt = negative_prompt_owned.?;
     }
     if (guidance_scale != 1.0 and !engine.supportsGuidance())
-        return sendError(conn, 400, "'guidance_scale' requires a FLUX.2 model");
+        return sendError(conn, 400, "'guidance_scale' requires a FLUX.2 or Qwen-Image model");
+
+    // Qwen-Image edit: reference conditioning resolution (diffusers'
+    // per-call `output_resolution` knob). Lower = fewer joint tokens per
+    // ref at conditioning-fidelity cost; 1024 = the trained regime.
+    var ref_resolution: u32 = 1024;
+    if (extractJsonInt(body, "ref_resolution")) |rr| {
+        if (rr < 256 or rr > 1024) return sendError(conn, 400, "'ref_resolution' must be in [256,1024]");
+        if (engine.backend != .qwen_image)
+            return sendError(conn, 400, "'ref_resolution' requires a Qwen-Image model");
+        ref_resolution = @intCast(rr);
+    }
 
     // Style LoRA(s): one or more absolute paths to .safetensors adapters,
     // each with an optional scale — mirrors mflux's `--lora-paths`/
@@ -2050,6 +2477,7 @@ pub fn handleImage(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, 
     if (want_stream) try conn.writeAll(sse.headers);
 
     const gen_opts = ImageGenOpts{
+        .transparent = transparent,
         .init_image = init_img, // null in edit mode
         .strength = strength,
         .edit_images = edit_imgs[0..edit_imgs_n],
@@ -2058,7 +2486,30 @@ pub fn handleImage(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, 
         .cond_weights = cond_weights,
         .guidance_scale = guidance_scale,
         .negative_prompt = negative_prompt,
+        .ref_resolution = ref_resolution,
     };
+
+    // Qwen-Image edit: the pack's residency bill reserved a flat transient;
+    // a request with many references (or a big target) needs more than that,
+    // and running past the working set hangs the first denoise step with no
+    // error — refuse by NAME with the number we compared.
+    if (engine.backend == .qwen_image and gen_opts.edit_image_bytes.len != 0) {
+        const bill = qwenImageEditTransientBytes(
+            @intCast(gen_opts.edit_image_bytes.len), gen_opts.ref_resolution, width, height,
+        );
+        if (bill > QWEN_IMAGE_EDIT_TRANSIENT_BYTES) {
+            var active: usize = 0;
+            _ = mlx.mlx_get_active_memory(&active);
+            const headroom: u64 = mlx.maxRecommendedWorkingSet() -| @as(u64, active);
+            const need: u64 = bill - QWEN_IMAGE_EDIT_TRANSIENT_BYTES;
+            if (need > headroom) {
+                log.info("[image] edit bill refused: {d} refs at refres {d} + {d}x{d} target needs {d} MB over the reserve, headroom {d} MB\n", .{
+                    gen_opts.edit_image_bytes.len, gen_opts.ref_resolution, width, height, need >> 20, headroom >> 20,
+                });
+                return sendError(conn, 400, "this edit's working set (references + target) needs more GPU memory than is free — lower 'ref_resolution' or the reference count, or shrink 'size'");
+            }
+        }
+    }
     const img = engine.generateImage(allocator, prompt, width, height, seed, steps, gen_opts, prog) catch |err| {
         // Client hung up mid-generation — there is nobody to answer, and
         // saying "generation failed" would be a lie about a job we stopped.
@@ -3857,6 +4308,80 @@ pub fn stagedPeakBytes(resident: u64, stages: []const u64) u64 {
     return resident + biggest;
 }
 
+/// A 1024² denoise plus the f32 VAE decode, on top of the weights.
+const QWEN_IMAGE_GEN_TRANSIENT_BYTES: u64 = 4 << 30;
+
+/// Qwen-Image-2.1's text encoder is half the pack and idle for the whole
+/// denoise, so a machine the full set would crowd (past 3/4 of the GPU working
+/// set) loads it per request and frees it before the first DiT forward. The
+/// engine and the residency bill read this ONE answer. Set
+/// MLX_SERVE_QWEN_IMAGE_LOW_MEMORY=1 to force staging even on larger machines;
+/// unset, 0, and other values retain the automatic policy.
+pub fn qwenImageStagesTextEncoder(weights: u64, working_set: u64) bool {
+    const low_memory: ?[]const u8 = if (std.c.getenv("MLX_SERVE_QWEN_IMAGE_LOW_MEMORY")) |v| std.mem.span(v) else null;
+    return qwenImageStagesTextEncoderFromInputs(weights, working_set, low_memory);
+}
+
+fn qwenImageStagesTextEncoderFromInputs(weights: u64, working_set: u64, low_memory: ?[]const u8) bool {
+    if (low_memory) |value| {
+        if (std.mem.eql(u8, value, "1")) return true;
+    }
+    if (working_set == 0) return false;
+    return (weights + QWEN_IMAGE_GEN_TRANSIENT_BYTES) / 3 > working_set / 4;
+}
+
+pub fn qwenImagePeakBytes(text_encoder: u64, rest: u64, working_set: u64) u64 {
+    return qwenImagePeakBytesForStaging(text_encoder, rest, qwenImageStagesTextEncoder(text_encoder + rest, working_set));
+}
+
+fn qwenImagePeakBytesForStaging(text_encoder: u64, rest: u64, staged: bool) u64 {
+    // The DiT/VAE remain resident while encoding: staging only removes the
+    // encoder before denoising, so the full weight set still counts at peak.
+    if (staged)
+        return stagedPeakBytes(rest, &.{ text_encoder, QWEN_IMAGE_GEN_TRANSIENT_BYTES });
+    return text_encoder + rest + QWEN_IMAGE_GEN_TRANSIENT_BYTES;
+}
+
+/// An edit denoise plus the f32 VAE decode, on top of the weights — the tower
+/// itself lives in text_encoder/ and rides `text_encoder`.
+const QWEN_IMAGE_EDIT_TRANSIENT_BYTES: u64 = 6 << 30;
+
+/// The tower's encode working set (Qwen3-VL activations for every condition
+/// image) coexists with the LOADED TE during conditioning; the staged bill
+/// must not let the stage max() absorb it.
+const QWEN_IMAGE_EDIT_ENCODE_WS_BYTES: u64 = 2 << 30;
+
+/// The REQUEST-scope edit transient: what a specific edit's joint denoise
+/// allocates on top of the pack's flat reserve. The dominant term is the
+/// widest attention's f32 scores buffer (heads x q x joint kv) — the
+/// allocation that, run past the working set, hangs the first denoise step
+/// with no error (ddalcu/mlx-serve#496: 7 references). Persistent per-ref
+/// buffers were measured at ~65 MB per 1024-conditioning reference.
+const QWEN_IMAGE_EDIT_TEXT_TOKENS: u64 = 2600; // ti2i prompt budget upper bound
+const QWEN_IMAGE_EDIT_HEADS: u64 = 32; // the checkpoint's num_attention_heads
+
+pub fn qwenImageEditTransientBytes(refs: u32, ref_resolution: u32, out_w: u32, out_h: u32) u64 {
+    const rt: u64 = @as(u64, ref_resolution / 16) * (ref_resolution / 16);
+    const ot: u64 = @as(u64, out_w / 16) * (out_h / 16);
+    const joint: u64 = @as(u64, refs) * rt + ot + QWEN_IMAGE_EDIT_TEXT_TOKENS;
+    const widest_q: u64 = @max(ot, rt);
+    const scores: u64 = QWEN_IMAGE_EDIT_HEADS * widest_q * joint * 4;
+    const persistent: u64 = @as(u64, refs) * rt * (65 << 20) / 4096;
+    return scores + persistent;
+}
+
+/// The edit-capable pack's bill: the SAME staging answer as t2i (the engine
+/// and the residency bill read one `qwenImageStagesTextEncoder`), with the
+/// heavier edit transient whenever the tower is present.
+pub fn qwenImageEditPeakBytes(text_encoder: u64, rest: u64, working_set: u64, has_tower: bool) u64 {
+    const transient: u64 = if (has_tower) QWEN_IMAGE_EDIT_TRANSIENT_BYTES else QWEN_IMAGE_GEN_TRANSIENT_BYTES;
+    if (qwenImageStagesTextEncoder(text_encoder + rest, working_set)) {
+        const te_stage: u64 = if (has_tower) text_encoder +| QWEN_IMAGE_EDIT_ENCODE_WS_BYTES else text_encoder;
+        return stagedPeakBytes(rest, &.{ te_stage, transient });
+    }
+    return text_encoder + rest + transient;
+}
+
 /// LTX's plan. Its engine is RESIDENT (transformer + connector + VAEs + audio
 /// stay on `LtxVideoEngine` for its lifetime), with two corrections the
 /// directory sum cannot make:
@@ -3932,6 +4457,12 @@ pub fn h3PeakBytes(te: u64, dit_resident: u64, video_vae: u64, audio_vae: u64) u
 /// keeps the sum-of-safetensors default — over-billing fails safe (a refused
 /// load names its numbers), under-billing kills the process mid-request.
 pub fn estimatePeakResidentBytesIn(io: std.Io, dir: std.Io.Dir, model_type: []const u8) u64 {
+    return estimatePeakResidentBytesInDir(io, dir, model_type, null);
+}
+
+/// Same estimate with the model's path, when the caller knows it: the
+/// qwen arm needs it to peek text_encoder/ for the edit tower.
+fn estimatePeakResidentBytesInDir(io: std.Io, dir: std.Io.Dir, model_type: []const u8, model_dir: ?[]const u8) u64 {
     const sz = struct {
         fn f(io_: std.Io, d: std.Io.Dir, name: []const u8) u64 {
             const st = d.statFile(io_, name, .{}) catch return 0;
@@ -3953,6 +4484,17 @@ pub fn estimatePeakResidentBytesIn(io: std.Io, dir: std.Io.Dir, model_type: []co
             sz(io, dir, "video_vae.safetensors"),
             sz(io, dir, "audio_vae.safetensors"),
         );
+    }
+    if (std.mem.startsWith(u8, model_type, "qwen_image")) {
+        var te_dir = dir.openDir(io, "text_encoder", .{ .iterate = true }) catch return sumSafetensorsIn(io, dir);
+        defer te_dir.close(io);
+        const te = sumSafetensorsIn(io, te_dir);
+        const rest = sumSafetensorsIn(io, dir) -| te;
+        // A tower in text_encoder/ means the pack edits — bill the heavier
+        // edit transient (the tower's own bytes already ride `te`). Whatever
+        // `towerPresentIn` answers, the engine's `has_tower` reads it too.
+        const tower = if (model_dir) |md| qwen_image.towerPresentIn(io, std.heap.page_allocator, md) else false;
+        return if (tower) qwenImageEditPeakBytes(te, rest, mlx.maxRecommendedWorkingSet(), true) else qwenImagePeakBytes(te, rest, mlx.maxRecommendedWorkingSet());
     }
     if (std.mem.eql(u8, model_type, "minimax_music3")) {
         // The whole engine is resident for its lifetime (no staging), so the
@@ -4006,7 +4548,7 @@ pub fn estimatePeakResidentBytes(io: std.Io, model_dir: []const u8, model_type: 
     if (model_dir.len == 0 or model_dir[0] != '/') return 0; // openDirAbsolute UB class
     var dir = std.Io.Dir.openDirAbsolute(io, model_dir, .{ .iterate = true }) catch return 0;
     defer dir.close(io);
-    const in_dir = estimatePeakResidentBytesIn(io, dir, model_type);
+    const in_dir = estimatePeakResidentBytesInDir(io, dir, model_type, model_dir);
     // LTX reads its text encoder from a DIFFERENT repo, so it is a stage the
     // model dir cannot see. Every other backend's weights are all in its own
     // directory; if that stops being true, it belongs here beside this one.
@@ -4056,7 +4598,7 @@ fn sendError(conn: *Conn, code: u16, msg: []const u8) !void {
     var body_buf: [640]u8 = undefined;
     const body = std.fmt.bufPrint(&body_buf, "{{\"error\":{{\"message\":\"{s}\"}}}}", .{esc}) catch return;
     var hdr: [256]u8 = undefined;
-    const head = std.fmt.bufPrint(&hdr, "HTTP/1.1 {d} Error\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ code, body.len }) catch return;
+    const head = std.fmt.bufPrint(&hdr, "HTTP/1.1 {d} Error\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n", .{ code, body.len }) catch return;
     try conn.writeAllNoFlush(head);
     try conn.writeAll(body);
 }
@@ -4436,6 +4978,7 @@ test "modalityFromType classifies the media archs + markers (incl. krea + hunyua
     try testing.expectEqual(Modality.mesh, modalityFromType("hunyuan3d").?);
     try testing.expectEqual(Modality.image, modalityFromType("mage_flow").?);
     try testing.expectEqual(Modality.image, modalityFromType("mageflow").?);
+    try testing.expectEqual(Modality.image, modalityFromType("qwen_image21").?);
     try testing.expectEqual(@as(?Modality, null), modalityFromType("gemma4"));
     try testing.expectEqual(@as(?Modality, null), modalityFromType("qwen3_5_moe"));
 }
@@ -4552,6 +5095,33 @@ test "openaiEditFormToJson: OpenAI multipart becomes our edit request" {
     defer p4.deinit();
     try testing.expectEqualStrings("/l/a.safetensors", p4.value.object.get("lora_paths").?.array.items[0].string);
     try testing.expectEqual(@as(f64, 0.8), p4.value.object.get("lora_scales").?.array.items[0].float);
+
+    // ref_resolution (the qwen speed knob) rides through the form too.
+    const rr = "--X\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\np\r\n" ++
+        "--X\r\nContent-Disposition: form-data; name=\"ref_resolution\"\r\n\r\n512\r\n" ++
+        "--X\r\nContent-Disposition: form-data; name=\"image\"\r\n\r\nAAA\r\n--X--\r\n";
+    const j5 = try openaiEditFormToJson(a, rr, CT);
+    defer a.free(j5);
+    var p5 = try std.json.parseFromSlice(std.json.Value, a, j5, .{});
+    defer p5.deinit();
+    try testing.expectEqual(@as(i64, 512), p5.value.object.get("ref_resolution").?.integer);
+
+    // Sampling knobs ride through too (dropping them silently ran every
+    // multipart edit at the 40-step default).
+    const knobs = "--X\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\np\r\n" ++
+        "--X\r\nContent-Disposition: form-data; name=\"steps\"\r\n\r\n15\r\n" ++
+        "--X\r\nContent-Disposition: form-data; name=\"seed\"\r\n\r\n7\r\n" ++
+        "--X\r\nContent-Disposition: form-data; name=\"guidance_scale\"\r\n\r\n2.5\r\n" ++
+        "--X\r\nContent-Disposition: form-data; name=\"negative_prompt\"\r\n\r\nblurry\r\n" ++
+        "--X\r\nContent-Disposition: form-data; name=\"image\"\r\n\r\nAAA\r\n--X--\r\n";
+    const j6 = try openaiEditFormToJson(a, knobs, CT);
+    defer a.free(j6);
+    var p6 = try std.json.parseFromSlice(std.json.Value, a, j6, .{});
+    defer p6.deinit();
+    try testing.expectEqual(@as(i64, 15), p6.value.object.get("steps").?.integer);
+    try testing.expectEqual(@as(i64, 7), p6.value.object.get("seed").?.integer);
+    try testing.expectEqual(@as(f64, 2.5), p6.value.object.get("guidance_scale").?.float);
+    try testing.expectEqualStrings("blurry", p6.value.object.get("negative_prompt").?.string);
 }
 
 test "openaiEditFormToJson: everything we can't honor is an explicit error" {
@@ -4565,6 +5135,11 @@ test "openaiEditFormToJson: everything we can't honor is an explicit error" {
         .{ "Content-Disposition: form-data; name=\"response_format\"\r\n\r\nurl", EditFormError.UrlResponseUnsupported },
         .{ "Content-Disposition: form-data; name=\"output_format\"\r\n\r\njpeg", EditFormError.OutputFormatUnsupported },
         .{ "Content-Disposition: form-data; name=\"stream\"\r\n\r\ntrue", EditFormError.StreamUnsupported },
+        // Numeric fields are spliced into the rebuilt JSON body: a value like
+        // `8,"stream":true` would otherwise sail past this surface's own
+        // named 400s inside the handler (the review's exact injection).
+        .{ "Content-Disposition: form-data; name=\"steps\"\r\n\r\n8,\"stream\":true", EditFormError.MalformedNumber },
+        .{ "Content-Disposition: form-data; name=\"ref_resolution\"\r\n\r\nNaN", EditFormError.MalformedNumber },
     };
     inline for (cases) |c| {
         const form = base ++ "--X\r\n" ++ c[0] ++ "\r\n--X--\r\n";
@@ -4663,6 +5238,37 @@ test "maxDim matches what normalizeSize actually clamps to (drift guard)" {
     try testing.expectEqual(clampFluxDim(99999), ImageEngine.maxDimFor(.flux));
     try testing.expectEqual(clampKreaDim(99999), ImageEngine.maxDimFor(.krea));
     try testing.expectEqual(clampKreaDim(99999), ImageEngine.maxDimFor(.mage_flow));
+    try testing.expectEqual(clampKreaDim(99999), ImageEngine.maxDimFor(.qwen_image));
+}
+
+test "editRefCap is 10 for Qwen-Image and 4 for the other editors" {
+    try testing.expectEqual(MAX_EDIT_IMAGES, editRefCap(.{ .qwen_image = undefined }));
+    try testing.expectEqual(MAX_EDIT_IMAGES_OTHER, editRefCap(.{ .flux = undefined }));
+    try testing.expectEqual(MAX_EDIT_IMAGES_OTHER, editRefCap(.{ .mage_flow = undefined }));
+}
+
+test "peekModelType classifies a model_index-only Qwen-Image-2.1 repo" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    try tmp.dir.createDirPath(io, "q");
+    try tmp.dir.writeFile(io, .{ .sub_path = "q/model_index.json", .data = "{\"_class_name\":\"QwenImage21Pipeline\"}" });
+    const dir = try std.fmt.allocPrint(a, "{s}/q", .{root});
+    defer a.free(dir);
+    const mt = peekModelType(io, a, dir) orelse return error.TestUnexpectedResult;
+    defer a.free(mt);
+    try testing.expectEqualStrings("qwen_image21", mt);
+
+    // The 2.0 family is a different architecture — no classification.
+    try tmp.dir.createDirPath(io, "q20");
+    try tmp.dir.writeFile(io, .{ .sub_path = "q20/model_index.json", .data = "{\"_class_name\":\"QwenImagePipeline\"}" });
+    const dir20 = try std.fmt.allocPrint(a, "{s}/q20", .{root});
+    defer a.free(dir20);
+    try testing.expect(peekModelType(io, a, dir20) == null);
 }
 
 test "Modality.mesh advertises the 3d capability" {
@@ -4749,7 +5355,7 @@ test "ImageEngine FLUX generatePng produces a PNG (characterization)" {
 }
 
 test "Modality.modelType round-trips through modalityFromType" {
-    for ([_]Modality{ .image, .audio, .video, .mesh }) |m| {
+    for ([_]Modality{ .image, .audio, .video, .mesh, .decision }) |m| {
         try testing.expectEqual(m, modalityFromType(m.modelType()).?);
     }
 }
@@ -5298,6 +5904,106 @@ test "stagedPeakBytes: disjoint stages never sum, and resident always carries" {
     try std.testing.expectEqual(@as(u64, 0), stagedPeakBytes(0, &.{ 0, 0 }));
 }
 
+test "Qwen-Image stages its text encoder only where the full set crowds the GPU" {
+    const GB: u64 = 1024 * 1024 * 1024;
+    // The 8-bit pack (TE 9 + DiT/VAE 9) on a 32 GB Mac's ~22 GB working set.
+    try std.testing.expect(qwenImageStagesTextEncoderFromInputs(18 * GB, 22 * GB, null));
+    try std.testing.expectEqual(18 * GB, qwenImagePeakBytesForStaging(9 * GB, 9 * GB, true));
+    // Same pack with room to spare: resident, and the bill is everything.
+    try std.testing.expect(!qwenImageStagesTextEncoderFromInputs(18 * GB, 48 * GB, null));
+    try std.testing.expectEqual(22 * GB, qwenImagePeakBytesForStaging(9 * GB, 9 * GB, false));
+    // The 4-bit pack on a 16 GB Mac; a small encoder still bills the denoise.
+    try std.testing.expect(qwenImageStagesTextEncoderFromInputs(10 * GB, 11 * GB, null));
+    try std.testing.expectEqual(8 * GB, qwenImagePeakBytesForStaging(2 * GB, 4 * GB, true));
+    // Unknown working set never stages.
+    try std.testing.expect(!qwenImageStagesTextEncoderFromInputs(18 * GB, 0, null));
+}
+
+test "Qwen-Image low-memory override forces staging without disabling automatic staging" {
+    const GB: u64 = 1024 * 1024 * 1024;
+    for ([_]?[]const u8{ null, "0", "invalid" }) |value| {
+        try std.testing.expect(!qwenImageStagesTextEncoderFromInputs(10 * GB, 22 * GB, value));
+        try std.testing.expect(qwenImageStagesTextEncoderFromInputs(18 * GB, 22 * GB, value));
+    }
+    try std.testing.expect(qwenImageStagesTextEncoderFromInputs(10 * GB, 22 * GB, "1"));
+    try std.testing.expect(qwenImageStagesTextEncoderFromInputs(10 * GB, 0, "1"));
+    const staged = qwenImageStagesTextEncoderFromInputs(10 * GB, 22 * GB, "1");
+    // An encoder larger than the denoise allowance still coexists with the
+    // DiT/VAE while encoding; never bill only the smaller denoise residency.
+    try std.testing.expectEqual(10 * GB, qwenImagePeakBytesForStaging(5 * GB, 5 * GB, staged));
+    try std.testing.expectEqual(9 * GB, qwenImagePeakBytesForStaging(3 * GB, 5 * GB, staged));
+}
+
+test "Qwen-Image edit dims: explicit floors to /32, no size follows the last reference at 1024²" {
+    // No size, 4:3 last reference: the diffusers chain is 1182x887
+    // (calculate_dimensions at 1024²) and the reference's /32 ROUND snaps it
+    // to 1184x896 — a floor would say 1152x864, so this pins the rounding.
+    const a = qwenEditDims(null, 512, 384, 2048);
+    try testing.expectEqual(@as(u32, 1184), a.w);
+    try testing.expectEqual(@as(u32, 896), a.h);
+    // A square source stays at the default resolution.
+    const b = qwenEditDims(null, 256, 256, 2048);
+    try testing.expectEqual(@as(u32, 1024), b.w);
+    try testing.expectEqual(@as(u32, 1024), b.h);
+    // An explicit size FLOORS to the /32 grid — round would say 512x320.
+    const c = qwenEditDims(.{ .w = 500, .h = 300 }, 512, 384, 2048);
+    try testing.expectEqual(@as(u32, 480), c.w);
+    try testing.expectEqual(@as(u32, 288), c.h);
+    // Explicit clamps to the backend ceiling…
+    const d = qwenEditDims(.{ .w = 4096, .h = 4096 }, 512, 384, 2048);
+    try testing.expectEqual(@as(u32, 2048), d.w);
+    try testing.expectEqual(@as(u32, 2048), d.h);
+    // …and so does a derived dim (a 1:10 source at 1024² is 320x3232 pre-clamp).
+    const e = qwenEditDims(null, 100, 1000, 2048);
+    try testing.expectEqual(@as(u32, 320), e.w);
+    try testing.expectEqual(@as(u32, 2048), e.h);
+    // Flooring never collapses a side below one /32 tile — explicit or derived.
+    const f = qwenEditDims(.{ .w = 16, .h = 16 }, 512, 384, 2048);
+    try testing.expectEqual(@as(u32, 32), f.w);
+    try testing.expectEqual(@as(u32, 32), f.h);
+    const g = qwenEditDims(null, 1, 10000, 2048);
+    try testing.expectEqual(@as(u32, 32), g.w);
+    try testing.expectEqual(@as(u32, 2048), g.h);
+}
+
+test "Qwen-Image edit residency: the tower pack's heavier transient on the same staging answer" {
+    const GB: u64 = 1024 * 1024 * 1024;
+    try testing.expectEqual(@as(u64, 6 << 30), QWEN_IMAGE_EDIT_TRANSIENT_BYTES);
+    // Staged 8-bit pack (TE 9 + rest 9) on a ~22 GB working set: the TE stage
+    // dominates at 11 GB (TE 9 + the tower's 2 GiB encode working set).
+    try testing.expectEqual(20 * GB, qwenImageEditPeakBytes(9 * GB, 9 * GB, 22 * GB, true));
+    // Resident: everything coexists — the t2i bill plus the 2 GiB the tower's
+    // reference-image working set adds.
+    try testing.expectEqual(24 * GB, qwenImageEditPeakBytes(9 * GB, 9 * GB, 48 * GB, true));
+    // No tower: the edit bill IS the t2i bill (transient stays 4 GiB).
+    try testing.expectEqual(22 * GB, qwenImageEditPeakBytes(9 * GB, 9 * GB, 48 * GB, false));
+    try testing.expectEqual(qwenImagePeakBytes(9 * GB, 9 * GB, 48 * GB), qwenImageEditPeakBytes(9 * GB, 9 * GB, 48 * GB, false));
+    // Staged 4-bit pack (TE 2 + rest 4): the 6 GiB edit transient becomes the
+    // biggest stage, where t2i's 4 GiB never was.
+    try testing.expectEqual(10 * GB, qwenImageEditPeakBytes(2 * GB, 4 * GB, 11 * GB, true));
+    try testing.expectEqual(8 * GB, qwenImageEditPeakBytes(2 * GB, 4 * GB, 11 * GB, false));
+}
+
+test "Qwen-Image edit transient: the request-scope bill scales with refs x ref tokens" {
+    const GB: u64 = 1024 * 1024 * 1024;
+    // One reference at 1024 sits inside the pack's flat reserve — the
+    // common case never sees the request gate.
+    const one = qwenImageEditTransientBytes(1, 1024, 256, 256);
+    try testing.expect(one < QWEN_IMAGE_EDIT_TRANSIENT_BYTES);
+    // The 5-reference live arm's shape: past the reserve (the marginal must
+    // clear live headroom) but well inside a 46 GB box.
+    const five = qwenImageEditTransientBytes(5, 1024, 256, 256);
+    try testing.expect(five > QWEN_IMAGE_EDIT_TRANSIENT_BYTES);
+    try testing.expect(five < 20 * GB);
+    // The hang regime (ddalcu/mlx-serve#496): 10 references plus a 2048x2048
+    // target is past ANY working set — the gate must refuse it by name.
+    const ten = qwenImageEditTransientBytes(10, 1024, 2048, 2048);
+    try testing.expect(ten > 100 * GB);
+    // ref_resolution halves the joint: the scores term shrinks with it.
+    const half = qwenImageEditTransientBytes(10, 512, 2048, 2048);
+    try testing.expect(half * 2 < ten);
+}
+
 test "LTX bills ONE transformer variant, plus the text encoder its dir cannot see" {
     const MB: u64 = 1024 * 1024;
     // Real dgrauet/ltx-2.3-mlx-q4 sizes. Both transformer variants ship at
@@ -5505,4 +6211,12 @@ test "videoRgbTransportReason: chained windows are billed into the response cap 
     try std.testing.expect(videoRgbTransportReason(minimax_h3.chainDeliveredFrames(5, 141), 1056, 864) != null);
     // One window of the same shape fits.
     try std.testing.expect(videoRgbTransportReason(141, 1056, 864) == null);
+}
+
+test "decision limits: one set for every backend, named in the 400 text" {
+    var buf: [160]u8 = undefined;
+    const l: DecisionLimits = .{ .max_questions = 3, .max_input_tokens = 10 };
+    try testing.expect(std.mem.indexOf(u8, l.message(&buf, error.TooManyQuestions).?, "limit 3") != null);
+    try testing.expect(std.mem.indexOf(u8, l.message(&buf, error.TooManyInputTokens).?, "10 input tokens") != null);
+    try testing.expect(l.message(&buf, error.TooManyOptions) == null);
 }

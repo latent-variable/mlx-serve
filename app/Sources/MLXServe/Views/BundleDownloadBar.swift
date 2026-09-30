@@ -33,22 +33,25 @@ struct BundleDownloadBar: View {
     @ViewBuilder
     private var notStartedRow: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(showsStartButton
+            Text(L10n.text(
+                 showsStartButton
                  ? "This model isn't downloaded yet."
-                 : "This model isn't downloaded yet — use Download above.")
-                .font(.caption).foregroundStyle(.secondary)
+                 : "This model isn't downloaded yet — use Download above."
+))
+                .font(.app(.caption)).foregroundStyle(.secondary)
             if showsStartButton {
             Button {
                 downloads.startBundle(bundle) { appState.refreshModels() }
             } label: {
-                Label("Download (\(bundle.approxSizeLabel))", systemImage: "arrow.down.circle")
+                Label("Download (\(bundle.approxSizeLabel))", systemImage: "arrow.down.circle").font(.app(.body))
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             }
             if bundle.components.count > 1 {
-                Text("Includes \(bundle.components.count) models (e.g. the text encoder).")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                Text(L10n.format("Includes %lld models (e.g. the text encoder).",
+                                 Int64(bundle.components.count)))
+                    .font(.app(.caption2)).foregroundStyle(.tertiary)
             }
         }
     }
@@ -58,16 +61,18 @@ struct BundleDownloadBar: View {
             HStack(spacing: 8) {
                 ProgressView(value: a.state.progress).frame(maxWidth: .infinity)
                 Text("\(a.state.percentFormatted) \(a.state.speedFormatted)")
-                    .font(.system(size: 9).monospacedDigit()).foregroundStyle(.secondary)
+                    .font(.app(.caption2).monospacedDigit()).foregroundStyle(.secondary)
                 Button { downloads.cancelBundle(bundle) } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
                 .help("Cancel download")
             }
-            let label = a.count > 1 ? "Downloading model \(a.index)/\(a.count): " : "Downloading: "
+            let label = a.count > 1
+                ? L10n.format("Downloading model %lld/%lld: ", Int64(a.index), Int64(a.count))
+                : L10n.text("Downloading: ")
             Text(label + (a.state.currentFile.isEmpty ? a.state.statusText : a.state.currentFile))
-                .font(.system(size: 9)).foregroundStyle(.secondary)
+                .font(.app(.caption2)).foregroundStyle(.secondary)
                 .lineLimit(1).truncationMode(.middle)
         }
     }
@@ -75,10 +80,11 @@ struct BundleDownloadBar: View {
     private func failedRow(_ state: DownloadManager.DownloadState) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(state.error ?? "Download failed")
-                .font(.caption2).foregroundStyle(.red).lineLimit(2)
-            Button("Retry") {
+                .font(.app(.caption2)).foregroundStyle(.red).lineLimit(2)
+            Button {
                 downloads.startBundle(bundle) { appState.refreshModels() }
-            }
+            } label: { Text("Retry")
+                .font(.app(.body)) }
             .buttonStyle(.bordered).controlSize(.small)
         }
     }

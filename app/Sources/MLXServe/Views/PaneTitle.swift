@@ -11,12 +11,12 @@ struct PaneTitleBar: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(title)
-                .font(.headline)
+            Text(L10n.text(title))
+                .font(.app(.sectionTitle))
                 .foregroundStyle(.primary)
             Button(action: add) {
                 Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.app(.callout, weight: .semibold))
                     .foregroundStyle(.primary)
                     // A square target the glyph sits in the middle of, rather
                     // than the glyph's own bounds — a bare symbol is a few
@@ -29,7 +29,7 @@ struct PaneTitleBar: View {
             }
             .buttonStyle(.plain)
             .onHover { hovering = $0 }
-            .help(addHelp)
+            .help(L10n.text(addHelp))
         }
         // Breathing room from the column's leading edge; the toolbar gives none
         // once the shared background is off.

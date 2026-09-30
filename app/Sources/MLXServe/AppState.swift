@@ -20,6 +20,8 @@ class AppState: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     @Published var downloads = DownloadManager()
     @Published var localModels: [LocalModel] = []
+
+    private let libraryRefresher = ModelLibraryRefresher()
     /// Chat is answered by Apple's on-device model rather than the server.
     /// Persisted like `selectedModelPath`; the local pick stays set underneath
     /// so turning it off lands back on the model that was chosen before.
@@ -30,22 +32,10 @@ class AppState: ObservableObject {
         didSet {
             UserDefaults.standard.set(selectedModelPath, forKey: "selectedModelPath")
             guard oldValue != selectedModelPath, !selectedModelPath.isEmpty else { return }
-            // Drafter pairing: a drafter is paired to a specific Gemma 4 size,
-            // and carrying the wrong one over crashes the server with
-            // `DrafterTargetMismatch` — so every model change re-decides from
-            // scratch (`DrafterPairing.decide`). It pairs a dense Gemma 4 with
-            // the drafter that came down with it whether or not one was on
-            // before: the checkpoint is a dependency of the model now, not
-            // something the user went shopping for. `drafterOptOut` is what
-            // makes an explicit off stick.
-            syncDrafterPairing()
+            // The drafter follows the model: the server reads its `drafter`
+            // entry in model-settings.json at every load, hot switch included.
             switch Self.modelSwitchAction(forStatus: server.status, path: selectedModelPath) {
             case .hotSwitch(let id):
-                // The decision `syncDrafterPairing()` just made, not a
-                // second read of the disk: a hot-switch that ignores the
-                // user's off switch loads a drafter the restart path
-                // wouldn't, and only one of the two would be reproducible.
-                let drafterPath: String? = serverOptions.drafterPath.isEmpty ? nil : serverOptions.drafterPath
                 let mgr = server
                 // Tracked so `useModelAndAwaitReady` can await this exact
                 // switch — hot-switch never moves `server.status` off
@@ -70,7 +60,7 @@ class AppState: ObservableObject {
                 pendingModelLoadTask = Task { @MainActor in
                     defer { if self.modelSwitchGeneration == generation { self.loadingModelPath = nil } }
                     do {
-                        _ = try await mgr.loadModel(id: id, drafterPath: drafterPath, setDefault: true)
+                        _ = try await mgr.loadModel(id: id, setDefault: true)
                     } catch {
                         // Register-by-path failed (unsupported arch, partial
                         // download) or the load 503'd (memory) — a full
@@ -132,6 +122,8 @@ class AppState: ObservableObject {
     /// in flight. A RESTART is not tracked here — that one moves the server
     /// status, which the Start control already reports.
     @Published var loadingModelPath: String?
+    /// The model the "Model Settings" window edits (tray button); nil = closed.
+    @Published var modelSettingsRequest: ModelSettingsRequest?
     /// Bumped per hot-switch; each switch task captures its value so only the
     /// LATEST switch's completion clears `loadingModelPath` (see the didSet).
     private var modelSwitchGeneration = 0
@@ -156,8 +148,7 @@ class AppState: ObservableObject {
     lazy var terminals = TerminalSessionStore(server: server,
                                               options: { [unowned self] in self.serverOptions })
     /// The sidebar's dragged order over conversations and terminals (ids in
-    /// visual order). Empty = newest first. Persisted; terminals' ids drop out
-    /// at quit like the terminals do.
+    /// visual order). Empty = newest first. Persisted.
     @Published var sidebarOrder: [UUID] = (UserDefaults.standard.stringArray(forKey: "sidebarRowOrder") ?? [])
         .compactMap(UUID.init) {
         didSet {
@@ -165,9 +156,20 @@ class AppState: ObservableObject {
         }
     }
 
+    /// The sidebar's user-made groups (Move to Group). Persisted.
+    @Published var sidebarGroups: SidebarGroups = UserDefaults.standard.data(forKey: "sidebarGroups")
+        .flatMap { try? JSONDecoder().decode(SidebarGroups.self, from: $0) } ?? SidebarGroups() {
+        didSet {
+            UserDefaults.standard.set(try? JSONEncoder().encode(sidebarGroups), forKey: "sidebarGroups")
+        }
+    }
+
     /// Drag-to-reorder: `visible` is the whole panel in its current visual
     /// order, so the result is a complete order and stale ids self-prune.
     func moveSidebarRow(_ id: UUID, onto target: UUID, visible: [UUID]) {
+        var groups = sidebarGroups
+        groups.join(id, groupOf: target)
+        if groups != sidebarGroups { sidebarGroups = groups }
         let next = SidebarChatRows.moved(id, onto: target, in: visible)
         if next != visible { sidebarOrder = next }
     }
@@ -388,6 +390,9 @@ class AppState: ObservableObject {
         pendingChatOpenTick += 1
     }
 
+    /// The checkpoint dir the Laya Decisions window shows.
+    @Published var decisionsModelPath: String?
+
     /// Show a sandbox terminal — the one way in, same shape as `showTasks()`.
     func showTerminal(_ id: UUID) {
         chatWorkspace = .terminal(id)
@@ -398,24 +403,28 @@ class AppState: ObservableObject {
     /// hot-mounted into the guest. A coding agent asks which folder it works
     /// in; a plain shell opens on click in the Settings folder.
     /// The ONE door for every "… in Sandbox" entry (tray, chip, sidebar).
-    func startTerminal(agentId: String?) {
+    func startTerminal(agentId: String?, group: UUID? = nil) {
         let agent = SandboxAgentRegistry.all.first { $0.id == agentId }
         // Every caller is a MENU item. A modal panel run inside the menu's own
         // click handler races the menu's dismissal and sometimes never shows,
         // so the picker opens one run-loop turn later, once the menu is gone.
         DispatchQueue.main.async { [self] in
             guard let workspace = terminalWorkspace(askingFor: agent?.displayName) else { return }
-            showTerminal(terminals.start(agent: agent, workspace: workspace))
+            let id = terminals.start(agent: agent, workspace: workspace)
+            sidebarGroups.assign([id], to: group)
+            showTerminal(id)
         }
     }
 
     /// A host CLI (Claude Code, opencode, …) or a plain shell in a terminal
     /// row of the chat window — the same door shape as the sandbox one;
     /// Terminal.app is no longer involved.
-    func startTerminal(hostCLI cli: LauncherCLI) {
+    func startTerminal(hostCLI cli: LauncherCLI, group: UUID? = nil) {
         DispatchQueue.main.async { [self] in
             guard let workspace = terminalWorkspace(askingFor: cli == .shell ? nil : cli.displayName) else { return }
-            showTerminal(terminals.startHost(cli: cli, workspace: workspace))
+            let id = terminals.startHost(cli: cli, workspace: workspace)
+            sidebarGroups.assign([id], to: group)
+            showTerminal(id)
         }
     }
 
@@ -561,6 +570,10 @@ class AppState: ObservableObject {
         // (`maxTokens`, `contextSize`) into it on first run if the dedicated
         // ServerOptions blob hasn't been written yet. After that the bridges
         // above (var maxTokens / var contextSize) keep them in sync.
+        // Held until the first model scan: the save below drops these keys.
+        if let legacy = ServerOptions.legacyDrafter() {
+            UserDefaults.standard.set(["path": legacy.path, "optedOut": legacy.optedOut], forKey: Self.pendingDrafterMigrationKey)
+        }
         var opts = ServerOptions.load()
         if UserDefaults.standard.object(forKey: "serverOptions") == nil {
             let storedMax = UserDefaults.standard.integer(forKey: "maxTokens")
@@ -569,6 +582,8 @@ class AppState: ObservableObject {
             if storedCtx > 0 { opts.ctxSize = storedCtx }
             opts.save()
         }
+        opts.migrateLegacyPrefixCacheMem()
+        opts.save()
         self.serverOptions = opts
         self.mcpMode = UserDefaults.standard.bool(forKey: "mcpMode")
         self.defaultAgentId = UserDefaults.standard.string(forKey: "defaultAgentId")
@@ -584,7 +599,13 @@ class AppState: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
-        refreshModels()
+        // The launch plan below reads `localModels`, so the first scan is awaited
+        // instead of fired: the walk is off-main, and a plan resolved against an
+        // empty library would silently stop preloading the pinned model.
+        Task { [weak self] in
+            guard let self else { return }
+            await self.refreshModelsBeforeLaunch()
+        }
         // A Finder-launched bundle has no shell environment, so HF_HOME /
         // HF_HUB_CACHE / XDG_CACHE_HOME are invisible until we ask the login
         // shell. Off-main (it spawns one), and rescan only if the cache moved.
@@ -595,6 +616,7 @@ class AppState: ObservableObject {
             }
         }
         loadChatHistory()
+        sidebarGroups.retain(only: Set(chatSessions.map(\.id) + terminals.sessions.sessions.map(\.id)))
         // Start background task scheduling (catch-up + timer arming). Notifications
         // route back here to resume paused runs / deep-link into the Tasks window.
         TaskNotifier.shared.appState = self
@@ -640,21 +662,28 @@ class AppState: ObservableObject {
         // and a sheet with no host window is a screen nobody can see. That is
         // also why the user can no longer end up in front of nothing — whatever
         // dismisses the sheet, a composer is what was already behind it.
+    }
+
+    /// Fills the library once, then decides what the launch does with it.
+    ///
+    /// Both the welcome-vs-chat decision and the preload gate read `localModels`,
+    /// which the scan publishes — awaiting it is what keeps them from resolving
+    /// against an empty list on every launch.
+    private func refreshModelsBeforeLaunch() async {
+        adoptDiscoveredModels(await libraryRefresher.scan(inputs: downloads.scanInputs()))
+
+        let hasChat = localModels.contains(where: \.isChatPickable)
         let suppressed = UserDefaults.standard.bool(forKey: LaunchDecision.suppressDefaultsKey)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self else { return }
-            let hasChat = self.localModels.contains(where: \.isChatPickable)
-            let decision = LaunchDecision.resolve(welcomeSuppressed: suppressed,
-                                                  hasChatModels: hasChat)
-            if decision.opensChatWindow { self.pendingChatOpenTick += 1 }
-            if decision.presentsWelcome {
-                self.welcomeHasChatModels = hasChat
-                self.showWelcome = true
-            }
+        let decision = LaunchDecision.resolve(welcomeSuppressed: suppressed,
+                                              hasChatModels: hasChat)
+        if decision.opensChatWindow { pendingChatOpenTick += 1 }
+        if decision.presentsWelcome {
+            welcomeHasChatModels = hasChat
+            showWelcome = true
         }
 
-        // Auto-start is headless unless "Load a model at start" resolves an installed
-        // model (`refreshModels()` above fills the library the gate checks).
+        // Auto-start is headless unless "Preload the model when the server starts" resolves an installed
+        // model.
         let launchPlan = StartupModelChoice.launch(
             autoStart: autoStartServer,
             loadModelAtStart: loadModelAtStart,
@@ -744,8 +773,17 @@ class AppState: ObservableObject {
         await server.refreshModels()
     }
 
+    /// Rescan the model library without blocking the caller: the walk reads every
+    /// served root, and this is reached from UI actions. Callers that need the
+    /// list caught up observe `localModels`.
     func refreshModels() {
-        localModels = downloads.discoverLocalModels()
+        libraryRefresher.refresh(inputs: downloads.scanInputs()) { [weak self] models in
+            self?.adoptDiscoveredModels(models)
+        }
+    }
+
+    private func adoptDiscoveredModels(_ models: [LocalModel]) {
+        localModels = models
         // Auto-select a base model if none selected or the current selection is
         // invalid. Drafters and media / non-chat models never get auto-picked —
         // they aren't loadable as the primary chat model (must match the tray
@@ -754,32 +792,31 @@ class AppState: ObservableObject {
         let repaired = reconciledModelSelection(current: selectedModelPath,
                                                 pickablePaths: baseModels.map(\.path))
         if repaired != selectedModelPath { selectedModelPath = repaired }
-        adoptNewlyAvailableDrafter()
+        migrateGlobalDrafter()
+        Task { await downloads.checkPackUpdates(models: models) }
     }
 
-    // MARK: - Drafter pairing
+    // MARK: - Drafter migration
 
-    /// Re-decide the drafter for the selected model. Called on every model
-    /// change — it both pairs and UNPAIRS, because a drafter carried onto the
-    /// wrong Gemma 4 size is `DrafterTargetMismatch` at server start.
-    private func syncDrafterPairing() {
-        let paired = DrafterPairing.decide(
-            modelPath: selectedModelPath,
-            optedOut: serverOptions.drafterOptOut,
-            onDiskPath: downloads.recommendedDrafterFromPath(selectedModelPath)?.url.path)
-        if serverOptions.drafterPath != paired { serverOptions.drafterPath = paired }
-    }
+    private static let pendingDrafterMigrationKey = "pendingDrafterMigration"
 
-    /// The model list changed (a download landed): fill in a pairing that
-    /// wasn't possible a moment ago — downloading a Gemma 4 fetches its drafter
-    /// too, and it finishes after the model is already selected.
-    private func adoptNewlyAvailableDrafter() {
-        guard serverOptions.drafterPath.isEmpty, !serverOptions.drafterOptOut else { return }
-        let paired = DrafterPairing.decide(
-            modelPath: selectedModelPath,
-            optedOut: false,
-            onDiskPath: downloads.recommendedDrafterFromPath(selectedModelPath)?.url.path)
-        if !paired.isEmpty { serverOptions.drafterPath = paired }
+    /// Once: the old global drafter becomes per-model `drafter` entries (every
+    /// Gemma with its paired drafter on disk, plus the selected model).
+    private func migrateGlobalDrafter() {
+        guard let pending = UserDefaults.standard.dictionary(forKey: Self.pendingDrafterMigrationKey) else { return }
+        UserDefaults.standard.removeObject(forKey: Self.pendingDrafterMigrationKey)
+        var pairs: [String: String] = [:]
+        for m in localModels where m.isChatPickable {
+            let gems = DrafterGems.gems(forRepoId: m.name, packFiles: nil, localDrafter: false, mtpAvailable: false)
+            guard gems.contains(where: { $0.kind == .gemmaAssistant }),
+                  let d = downloads.recommendedDrafterFromPath(m.path) else { continue }
+            pairs[m.path] = d.url.path
+        }
+        var file = ModelSettingsFile.load()
+        DrafterMigration.migrate(&file, pairs: pairs, selected: selectedModelPath,
+                                 globalPath: pending["path"] as? String ?? "",
+                                 optedOut: pending["optedOut"] as? Bool ?? false)
+        try? file.save()
     }
 
     /// What `useModelAndAwaitReady` must do once `selectedModelPath`'s

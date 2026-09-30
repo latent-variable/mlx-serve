@@ -18,6 +18,7 @@
 const std = @import("std");
 const log = @import("log.zig");
 const opencode2_plugin = @import("opencode2_plugin");
+const agent_skills = @import("agent_skills");
 
 pub const Budget = struct { context: u64, output: u64 };
 
@@ -87,8 +88,7 @@ pub fn piModelsJson(allocator: std.mem.Allocator, base_url: []const u8, entries:
         \\      "compat": {{
         \\        "supportsDeveloperRole": false,
         \\        "supportsReasoningEffort": true,
-        \\        "maxTokensField": "max_tokens",
-        \\        "thinkingFormat": "qwen"
+        \\        "maxTokensField": "max_tokens"
         \\      }},
         \\      "models": [
     , .{base_url});
@@ -96,7 +96,8 @@ pub fn piModelsJson(allocator: std.mem.Allocator, base_url: []const u8, entries:
         try out.print(allocator,
             \\{s}
             \\        {{"id": "{s}", "name": "{s} (mlx-serve)", "input": [{s}],
-            \\         "contextWindow": {d}, "maxTokens": {d}, "reasoning": true}}
+            \\         "contextWindow": {d}, "maxTokens": {d}, "reasoning": true,
+            \\         "thinkingLevelMap": {{"off": "none"}}}}
         , .{
             if (i == 0) "" else ",",
             e.id,
@@ -157,6 +158,12 @@ pub fn ompModelsYml(allocator: std.mem.Allocator, base_url: []const u8, entries:
     return out.toOwnedSlice(allocator);
 }
 
+/// opencode sends `reasoning_effort` only when the model declares it; without
+/// it every turn ran thinking-off. Variants are its in-session effort picker.
+const opencode_reasoning =
+    \\"options": {"reasoningEffort": "medium"}, "variants": {"none": {"reasoningEffort": "none"}, "low": {"reasoningEffort": "low"}, "medium": {"reasoningEffort": "medium"}, "high": {"reasoningEffort": "high"}}
+;
+
 /// opencode config — carried inline via OPENCODE_CONFIG_CONTENT (merges over
 /// the user's own config, no file writes). Single-quoted in the script, so
 /// the JSON must stay single-quote-free.
@@ -182,17 +189,19 @@ pub fn opencodeJson(allocator: std.mem.Allocator, base_url: []const u8, entries:
         const reserve = compactionReserve(ctx);
         try out.print(allocator, "\"compaction\": {{\"buffer\": {d}, \"keep\": {{\"tokens\": {d}}}}}, ", .{ reserve, @min(15000, reserve) });
     }
+    try out.appendSlice(allocator, "\"skills\": {\"paths\": [\"~/.mlx-serve/" ++ skill_dir ++ "\"]}, ");
     try out.print(allocator,
         \\"provider": {{"mlx": {{"npm": "@ai-sdk/openai-compatible", "name": "MLX Serve (local)", "options": {{"baseURL": "{s}/v1"}}, "models": {{
     , .{base_url});
     for (entries, 0..) |e, i| {
-        try out.print(allocator, "{s}\"{s}\": {{\"name\": \"{s} (mlx-serve)\",{s} \"limit\": {{\"context\": {d}, \"output\": {d}}}}}", .{
+        try out.print(allocator, "{s}\"{s}\": {{\"name\": \"{s} (mlx-serve)\",{s} \"limit\": {{\"context\": {d}, \"output\": {d}}}, {s}}}", .{
             if (i == 0) "" else ", ",
             e.id,
             e.id,
             if (e.vision) " \"attachment\": true," else "",
             e.budget.context,
             compactionReserve(e.budget.context),
+            opencode_reasoning,
         });
     }
     try out.appendSlice(allocator, "}}}}");
@@ -446,6 +455,7 @@ pub fn scriptFor(allocator: std.mem.Allocator, kind: AgentKind, base_url: []cons
     if (budget.context > 0 and budget.context < contextFloor(kind)) {
         try out.print(allocator, "echo 'mlx-serve: the model advertises a {d}-token context; {s} needs {d}+ to work well (raise --ctx-size or Settings > Server > Context size).' >&2\n", .{ budget.context, @tagName(kind), contextFloor(kind) });
     }
+    try out.print(allocator, "export MLX_SERVE_URL='{s}'\n", .{base_url});
     switch (kind) {
         .claude => {
             try out.print(allocator,
@@ -464,7 +474,7 @@ pub fn scriptFor(allocator: std.mem.Allocator, kind: AgentKind, base_url: []cons
             if (budget.context > 0) {
                 try out.print(allocator, "export CLAUDE_CODE_MAX_CONTEXT_TOKENS={d}\n", .{budget.context});
             }
-            try out.print(allocator, "claude --model {s}", .{model});
+            try out.print(allocator, "claude --plugin-dir \"$HOME/.mlx-serve/{s}\" --model {s}", .{ claude_plugin_dir, model });
         },
         .pi => {
             try out.print(allocator,
@@ -561,8 +571,6 @@ fn serverUp(allocator: std.mem.Allocator, io: std.Io, base_url: []const u8) bool
     return true;
 }
 
-/// `open -g -a "MLX Core"` — nonzero exit = the app isn't installed, which is
-/// the detection: no probing of /Applications by hand.
 /// HTTP status of `GET <base_url>/metrics.json`, or null when curl could not
 /// reach the server at all.
 fn metricsStatus(allocator: std.mem.Allocator, io: std.Io, base_url: []const u8) ?u16 {
@@ -577,9 +585,11 @@ fn metricsStatus(allocator: std.mem.Allocator, io: std.Io, base_url: []const u8)
     return std.fmt.parseInt(u16, std.mem.trim(u8, result.stdout, " \r\n"), 10) catch null;
 }
 
+/// `open -g -b <bundle id>` finds the app under any bundle name; nonzero exit =
+/// the app isn't installed, which is the detection.
 fn tryStartApp(allocator: std.mem.Allocator, io: std.Io) bool {
     const result = std.process.run(allocator, io, .{
-        .argv = &.{ "open", "-g", "-a", "MLX Core" },
+        .argv = &.{ "open", "-g", "-b", "com.dalcu.mlx-core" },
     }) catch return false;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -687,9 +697,66 @@ fn userOpencodeCliPath(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/.config/opencode/cli.json", .{homeDir()});
 }
 
+/// The shared skill folder under `~/.mlx-serve`, and the Claude Code plugin
+/// that carries it (Claude has no skills dir we own; `--plugin-dir` loads it).
+const skill_dir = "skills/" ++ agent_skills.name;
+const claude_plugin_dir = "claude/plugin";
+
+/// Where each agent discovers skills inside its dedicated config dir; opencode
+/// reads `skills.paths` from its inline config instead, aider has no skills.
+fn agentSkillLink(kind: AgentKind) ?[]const u8 {
+    return switch (kind) {
+        .pi => "pi/skills/" ++ agent_skills.name,
+        .omp => "omp/skills/" ++ agent_skills.name,
+        .codex => "codex/skills/" ++ agent_skills.name,
+        .hermes => "hermes/skills/" ++ agent_skills.name,
+        .claude => claude_plugin_dir ++ "/skills/" ++ agent_skills.name,
+        .opencode, .opencode2, .aider => null,
+    };
+}
+
+/// Install the mlx-serve skill under `root` (`~/.mlx-serve`) wherever it is
+/// missing, and link it into the agent's skills dir. Never overwrites: the
+/// user's edits stick, the app's "Update System Prompt and Skills" refreshes.
+pub fn installSkill(allocator: std.mem.Allocator, io: std.Io, root: []const u8, kind: AgentKind) !void {
+    var dir = try std.Io.Dir.cwd().createDirPathOpen(io, root, .{});
+    defer dir.close(io);
+    try dir.createDirPath(io, skill_dir);
+    for (agent_skills.files) |f| {
+        const sub = try std.fmt.allocPrint(allocator, skill_dir ++ "/{s}", .{f.name});
+        defer allocator.free(sub);
+        dir.writeFile(io, .{ .sub_path = sub, .data = f.bytes, .flags = .{ .exclusive = true } }) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+    const link = agentSkillLink(kind) orelse return;
+    if (kind == .claude) {
+        try dir.createDirPath(io, claude_plugin_dir ++ "/.claude-plugin");
+        dir.writeFile(io, .{
+            .sub_path = claude_plugin_dir ++ "/.claude-plugin/plugin.json",
+            .data = "{\"name\": \"mlx-serve\", \"description\": \"Skills for the local mlx-serve server\"}\n",
+            .flags = .{ .exclusive = true },
+        }) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+    try dir.createDirPath(io, std.fs.path.dirname(link).?);
+    const target = try std.fmt.allocPrint(allocator, "{s}/" ++ skill_dir, .{root});
+    defer allocator.free(target);
+    dir.symLink(io, target, link, .{ .is_directory = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+}
+
 /// Write the agent's config files (the app's prepareConfig twin). opencode
 /// carries its config inline and writes nothing.
 fn writeConfigs(allocator: std.mem.Allocator, io: std.Io, kind: AgentKind, base_url: []const u8, model: []const u8, budget: Budget, entries: []const Entry) !void {
+    const root = try std.fmt.allocPrint(allocator, "{s}/.mlx-serve", .{homeDir()});
+    defer allocator.free(root);
+    try installSkill(allocator, io, root, kind);
     switch (kind) {
         .claude, .opencode => {},
         .opencode2 => {
@@ -991,6 +1058,20 @@ test "pi models.json and opencode config parse as JSON and stay single-quote-fre
     }
 }
 
+test "pi models.json sends the thinking level as reasoning_effort, off as none" {
+    // thinkingFormat "qwen" makes pi send only enable_thinking: low/medium never
+    // reached the server and every turn thought unbounded.
+    const entries = [_]Entry{.{ .id = "m1", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true }};
+    const json = try piModelsJson(t.allocator, "http://127.0.0.1:11234", &entries);
+    defer t.allocator.free(json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, json, .{});
+    defer parsed.deinit();
+    const mlx_p = parsed.value.object.get("providers").?.object.get("mlx").?.object;
+    try t.expect(mlx_p.get("compat").?.object.get("thinkingFormat") == null);
+    const m = mlx_p.get("models").?.array.items[0].object;
+    try t.expectEqualStrings("none", m.get("thinkingLevelMap").?.object.get("off").?.string);
+}
+
 test "compactionReserve: a quarter of the window, capped where the agents' own defaults take over" {
     // pi keeps 20000 recent tokens and opencode2 reserves a 20000 buffer by
     // default; both assume a 200k window. A 24k window compacted before its
@@ -1041,6 +1122,11 @@ test "opencode config: limit.output is the compaction reserve, opencode2 gets a 
     const limit = p1.value.object.get("provider").?.object.get("mlx").?.object.get("models").?.object.get("m1").?.object.get("limit").?.object;
     try t.expectEqual(@as(i64, 6144), limit.get("output").?.integer);
     try t.expect(p1.value.object.get("compaction") == null);
+    // opencode sends no reasoning_effort unless the model declares one: thinking stayed off.
+    const m1 = p1.value.object.get("provider").?.object.get("mlx").?.object.get("models").?.object.get("m1").?.object;
+    try t.expectEqualStrings("medium", m1.get("options").?.object.get("reasoningEffort").?.string);
+    try t.expectEqualStrings("none", m1.get("variants").?.object.get("none").?.object.get("reasoningEffort").?.string);
+    try t.expectEqualStrings("high", m1.get("variants").?.object.get("high").?.object.get("reasoningEffort").?.string);
 
     const v2 = try opencodeJson(t.allocator, "http://127.0.0.1:11234", &entries, "m1", true);
     defer t.allocator.free(v2);
@@ -1220,7 +1306,7 @@ test "claude script declares the advertised context window (CLAUDE_CODE_MAX_CONT
     defer t.allocator.free(script);
     try t.expect(std.mem.indexOf(u8, script, "export CLAUDE_CODE_MAX_CONTEXT_TOKENS=786432") != null);
     try t.expect(std.mem.indexOf(u8, script, "export CLAUDE_CODE_MAX_OUTPUT_TOKENS=65536") != null);
-    try t.expect(std.mem.indexOf(u8, script, "\nclaude --model m1") != null);
+    try t.expect(std.mem.indexOf(u8, script, " --model m1\n") != null);
 
     // An unknown context is not a claim: omit the export rather than pin a
     // number the server never advertised.
@@ -1228,4 +1314,38 @@ test "claude script declares the advertised context window (CLAUDE_CODE_MAX_CONT
     defer t.allocator.free(unknown);
     try t.expect(std.mem.indexOf(u8, unknown, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") == null);
     try t.expect(std.mem.indexOf(u8, unknown, "export CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192") != null);
+}
+
+test "skill install: writes a missing skill, keeps an edited one, links the agent's skills dir" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [512]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(io, &buf)];
+
+    try tmp.dir.createDirPath(io, "skills/mlx-serve");
+    try tmp.dir.writeFile(io, .{ .sub_path = "skills/mlx-serve/SKILL.md", .data = "edited" });
+    try installSkill(t.allocator, io, root, .pi);
+    try installSkill(t.allocator, io, root, .claude);
+
+    var got: [64]u8 = undefined;
+    try t.expectEqualStrings("edited", try tmp.dir.readFile(io, "pi/skills/mlx-serve/SKILL.md", &got));
+    try t.expectEqualStrings("edited", try tmp.dir.readFile(io, "claude/plugin/skills/mlx-serve/SKILL.md", &got));
+    const media = try tmp.dir.readFileAlloc(io, "skills/mlx-serve/media.md", t.allocator, .limited(1 << 20));
+    defer t.allocator.free(media);
+    try t.expect(std.mem.indexOf(u8, media, "/v1/images/generations") != null);
+    _ = try tmp.dir.statFile(io, "claude/plugin/.claude-plugin/plugin.json", .{});
+}
+
+test "launch scripts point every agent at the skill and export MLX_SERVE_URL" {
+    const b = Budget{ .context = 65536, .output = 8192 };
+    const claude = try scriptFor(t.allocator, .claude, "http://x:1", "m1", b, null, &.{});
+    defer t.allocator.free(claude);
+    try t.expect(std.mem.indexOf(u8, claude, "export MLX_SERVE_URL='http://x:1'\n") != null);
+    try t.expect(std.mem.indexOf(u8, claude, "claude --plugin-dir \"$HOME/.mlx-serve/claude/plugin\" --model m1") != null);
+
+    const entries = [_]Entry{.{ .id = "m1", .budget = b, .vision = false, .loaded = true }};
+    const oc = try opencodeJson(t.allocator, "http://x:1", &entries, null, false);
+    defer t.allocator.free(oc);
+    try t.expect(std.mem.indexOf(u8, oc, "\"skills\": {\"paths\": [\"~/.mlx-serve/skills/mlx-serve\"]}") != null);
 }

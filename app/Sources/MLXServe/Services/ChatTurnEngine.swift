@@ -125,7 +125,7 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
     /// Live count of tokens each in-flight reply has produced — for the chat
     /// composer's live "gen:" readout and growing context bar. Counted by tallying
     /// streamed `.content`/`.reasoning` deltas (one per token for this server) and
-    /// PUBLISHED only at the StreamCoalescer's ~20 Hz flush cadence, never per
+    /// PUBLISHED only at the StreamCoalescer's ~10 Hz flush cadence, never per
     /// token — per-token @Published churn is exactly what StreamCoalescer exists to
     /// avoid. Reset at the start of each streamed round; reconciled to the
     /// authoritative `usage.completion_tokens` when the stream reports usage.
@@ -133,6 +133,57 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
 
     func liveCompletionTokens(for sessionId: UUID) -> Int {
         liveTokensBySession[sessionId] ?? 0
+    }
+
+    /// Per-session notes typed while a turn runs; read after each tool round
+    /// and at turn end, where a note ends the turn and starts the next
+    /// (`resumeWithSteeringNote`).
+    @Published private(set) var steering = SteeringNotes()
+
+    /// Turn phase per session plus the finished-unseen marks the sidebar dots
+    /// read. Written only on a phase change, never per token.
+    @Published private(set) var activity = SidebarActivity()
+
+    /// Ledger-gated: a stopped turn's task still reaches its next round (the
+    /// cancellation check sits inside the stream loop), and must not revive
+    /// the mark `stop` cleared.
+    private func setPhase(_ phase: TurnPhase, for sessionId: UUID) {
+        guard ledger.activeSessionIds.contains(sessionId),
+              activity.phase(for: sessionId) != phase else { return }
+        activity.setPhase(phase, for: sessionId)
+    }
+
+    /// A turn exit. `seen` = the chat is the one on screen, so no mark.
+    private func endActivity(for sessionId: UUID, outcome: SidebarActivity.Outcome = .finished) {
+        activity.end(for: sessionId, seen: appState.activeChatId == sessionId, outcome: outcome)
+    }
+
+    /// The sidebar calls this for a finished mark it has just drawn on a
+    /// selected row, so the mark clears the moment the chat is opened.
+    func markActivitySeen(_ sessionId: UUID) {
+        guard activity.unseen.contains(sessionId) else { return }
+        activity.markSeen(sessionId)
+    }
+
+    func setSteeringNote(_ text: String, for sessionId: UUID) {
+        steering.append(text, for: sessionId)
+    }
+
+    func clearSteeringNote(for sessionId: UUID) {
+        steering.clear(for: sessionId)
+    }
+
+    /// Only the turn that still owns the slot hands its note on; a stopped or
+    /// superseded one, or a chat that can no longer run, leaves it for the
+    /// composer.
+    private func resumeWithSteeringNote(sessionId: UUID, token: UUID, config: TurnConfig,
+                                        approval: @escaping (APIClient.ToolCall) async -> Bool) {
+        guard endTurn(sessionId: sessionId, token: token),
+              session(sessionId) != nil,
+              Self.canRunTurn(serverRunning: server.status == .running, apple: appState.useAppleModel),
+              let note = steering.take(for: sessionId) else { return }
+        runTurn(sessionId: sessionId, userText: note, images: nil, audio: nil,
+                config: config, approval: approval)
     }
 
     /// The turn table: token-identified turn per session (see `TurnLedger`)
@@ -196,6 +247,8 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
         let existing = Set(appState.chatSessions.map(\.id))
         for sid in ledger.orphaned(existingSessions: existing) {
             stop(sessionId: sid)
+            steering.clear(for: sid)
+            activity.markSeen(sid)
         }
     }
 
@@ -380,11 +433,12 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
     private func beginLiveTokenCount(for sessionId: UUID) {
         ledger.setLiveTokens(0, session: sessionId)
         liveTokensBySession[sessionId] = 0
+        setPhase(.generating, for: sessionId)
     }
 
     /// Stream one text/reasoning delta into the session and tally it toward the
     /// live token count. The published dict advances only when the coalescer
-    /// actually flushes (≤20 Hz), so the live readout never adds per-token churn.
+    /// actually flushes (≤10 Hz), so the live readout never adds per-token churn.
     private func streamDelta(content: String = "", reasoning: String = "",
                              coalescer: inout StreamCoalescer, to sessionId: UUID) {
         ledger.setLiveTokens(ledger.liveTokens(session: sessionId) + 1, session: sessionId)
@@ -416,6 +470,7 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
         tasks[sessionId] = nil
         ledger.endAll(session: sessionId)
         liveTokensBySession.removeValue(forKey: sessionId)
+        endActivity(for: sessionId)
         // Belt and braces on the meter: the cancelled generation's own `defer`
         // clears it as it unwinds, but a card left behind on a stopped turn is a
         // permanent fake progress bar.
@@ -431,10 +486,13 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
 
     /// End a turn from its own task's unwind. Token-gated: a superseded task
     /// presents a stale token and touches NOTHING (its successor owns the slot).
-    private func endTurn(sessionId: UUID, token: UUID) {
-        guard ledger.end(session: sessionId, token: token) else { return }
+    @discardableResult
+    private func endTurn(sessionId: UUID, token: UUID,
+                         outcome: SidebarActivity.Outcome = .finished) -> Bool {
+        guard ledger.end(session: sessionId, token: token) else { return false }
         tasks[sessionId] = nil
         liveTokensBySession.removeValue(forKey: sessionId)
+        endActivity(for: sessionId, outcome: outcome)
         if mediaProgressSessionId == sessionId {
             mediaProgress = nil
             mediaProgressSessionId = nil
@@ -446,6 +504,7 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
         appState.finishRevisions(in: sessionId)
         appState.saveChatHistory()
         publishTurnState()
+        return true
     }
 
     /// Apple's on-device model answers with no mlx-serve process, so the
@@ -567,14 +626,14 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
 
         // Build the request from the session (its source of truth). We append
         // the streaming placeholder AFTER this so it never lands in the
-        // request — same pattern the agent loop uses. Image/video handling:
-        // only the latest user message's attachments are sent (older turns'
-        // are stripped for bandwidth).
+        // request — same pattern the agent loop uses. Attachments: every user
+        // message's when the server preprocesses (it renders each where it was
+        // sent); Gemma's raw-pixel format (~9 MB an image) keeps only the latest.
         let sessionMsgs = session(sessionId)?.messages ?? []
         let lastUserIdx = sessionMsgs.lastIndex { $0.role == .user }
         let useServerPreprocess = wantsServerImagePreprocess
         let history: [[String: Any]] = sessionMsgs.enumerated().map { i, msg in
-            if i == lastUserIdx, msg.role == .user {
+            if msg.role == .user, useServerPreprocess || i == lastUserIdx {
                 let imgs = msg.images ?? []
                 let vids = msg.videos ?? []
                 let clips = msg.audio ?? []
@@ -641,6 +700,7 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
     private func streamPlainResponse(api: APIClient, sessionId: UUID,
                                      messages: [[String: Any]], config: TurnConfig,
                                      token: UUID, continuing: Bool = false) async {
+        var failed = false
         do {
             let thinking = config.enableThinking || appState.serverOptions.defaultEnableThinking
             let stream: AsyncThrowingStream<SSEEvent, Error>
@@ -711,10 +771,17 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
             print("[ChatTurnEngine] Chat error: \(error)")
             try? "Chat error: \(error)\n".write(toFile: NSString(string: "~/.mlx-serve/debug.log").expandingTildeInPath, atomically: true, encoding: .utf8)
             appendErrorNotice(error, to: sessionId)
+            failed = true
         }
         appState.updateLastMessage(in: sessionId, streaming: false)
         appState.saveChatHistory()
-        endTurn(sessionId: sessionId, token: token)
+        if failed {
+            endTurn(sessionId: sessionId, token: token, outcome: .attention)
+            return
+        }
+        // Plain chat never asks for tool approval, and the note runs with this
+        // same config, so the closure is never called.
+        resumeWithSteeringNote(sessionId: sessionId, token: token, config: config, approval: { _ in false })
     }
 
     // MARK: - Agent mode (native tool calling)
@@ -780,9 +847,12 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
                 print("[ChatTurnEngine] Agent error: \(error)")
                 try? "Agent error: \(error)\n".write(toFile: NSString(string: "~/.mlx-serve/debug.log").expandingTildeInPath, atomically: true, encoding: .utf8)
                 self.appendErrorNotice(error, to: sessionId)
+                self.appState.saveChatHistory()
+                self.endTurn(sessionId: sessionId, token: token, outcome: .attention)
+                return
             }
             self.appState.saveChatHistory()
-            self.endTurn(sessionId: sessionId, token: token)
+            self.resumeWithSteeringNote(sessionId: sessionId, token: token, config: config, approval: approval)
         }
     }
 
@@ -841,7 +911,8 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
                 maxTokens: turnMax,
                 buildMultimodalContent: { text, images in
                     Self.buildMultimodalContent(text: text, images: images, serverPreprocess: useServerPreprocess)
-                }
+                },
+                historyImages: useServerPreprocess
             )
             let userMsg = history.last { ($0["role"] as? String) == "user" }?["content"] as? String ?? ""
             let mcpToolsJSON = config.mcpMode ? mcpManager.toolDefinitionsJSON() : nil
@@ -935,12 +1006,8 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
                     hasPersona: !config.systemPromptPrefix.isEmpty)
             }
             var messages: [[String: Any]] = [["role": "system", "content": systemPrompt]]
-            // Some models (e.g. Gemma 4 E4B) can't generate after tool results without
-            // a user message. Add a nudge so the model knows to synthesize a response —
-            // asks explicitly for a short plain-text summary when finished so the user
-            // never sees a conversation that ends on a bare tool-call echo.
             if let lastRole = history.last?["role"] as? String, lastRole == "tool" {
-                history.append(["role": "user", "content": "Continue. If the task is complete, reply with a short plain-text summary for the user (what got done, where it lives, any caveats) — no tool calls, no JSON. If more work is needed, make the next tool call."])
+                history.append(["role": "user", "content": AgentEngine.toolRoundNudge])
             }
             messages.append(contentsOf: history)
 
@@ -1215,6 +1282,7 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
             // user's intent is visible in the transcript.
             var roundOutputs: [String] = []
             var roundHandles: [String] = []
+            setPhase(.tool, for: sessionId)
             for tc in receivedToolCalls {
                 try Task.checkCancellation()
 
@@ -1361,6 +1429,11 @@ final class ChatTurnEngine: ObservableObject, TurnRunning {
                 appState.appendMessage(to: sessionId, message: msg)
                 return
             }
+
+            // A note ends the turn after the tool results;
+            // `resumeWithSteeringNote` starts the next one with it.
+            try Task.checkCancellation()
+            if steering.note(for: sessionId) != nil { return }
         }
 
         // Max iterations reached

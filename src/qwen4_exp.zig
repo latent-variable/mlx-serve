@@ -1,15 +1,19 @@
 //! Qwen3.8-Flash-Next (`model_type` qwen4_exp) host-side pieces: the hashed
 //! n-gram embedding (PLE) id math and the mmapped quantized n-gram table.
 //!
-//! The 51B-parameter table (320M rows x 160) is never uploaded to the GPU:
+//! The 51B-parameter table (320M rows x 160) is never copied to the GPU:
 //! a token touches 16 rows, so the rows are dequantized from the mmap on the
-//! host and only the [T, 2560] result is sent. Memory cost = page cache.
+//! host and only the [T, 2560] result is sent, or (serial forwards, when the
+//! working set fits it) a kernel reads the mapping in place (`ple_gpu.zig`).
 //! Format: `ngram_table.bin` is a safetensors-format file holding one merged
-//! 4-bit affine table (`weight` U32 [R, dim*bits/32], `scales`/`biases` BF16
-//! [R, dim/gs]) written by `tests/convert_qwen38_flash_next.py`.
+//! affine table (`weight` U32 [R, dim*bits/32], `scales`/`biases` BF16
+//! [R, dim/gs]) written by `tests/convert_qwen38_flash_next.py`, or one
+//! merged RAW BF16 table (`weight` BF16 [R, dim], no scales/biases,
+//! `"bits":"16"`) for bit-exact PLE lookups.
 
 const std = @import("std");
 const log = @import("log.zig");
+const ple_gpu = @import("ple_gpu.zig");
 
 const MASK64: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 const SPLITMIX_GAMMA: u64 = 0x9E3779B97F4A7C15;
@@ -195,6 +199,9 @@ pub const NgramTable = struct {
     warm_thread: ?std.Thread = null,
     warm_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     warm_bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    /// Set once `ple_gpu.wrap` hands the mapping to a no-copy Metal buffer: MLX unmaps it
+    /// when its last reference drops, so a kernel still in flight never reads freed pages.
+    gpu_owns_map: bool = false,
 
     pub fn open(path: []const u8) !NgramTable {
         var pbuf: [std.fs.max_path_bytes]u8 = undefined;
@@ -204,9 +211,10 @@ pub const NgramTable = struct {
         const fd = std.c.open(pbuf[0..path.len :0], .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
         if (fd < 0) return error.FileNotFound;
         errdefer _ = std.c.close(fd);
-        var st: std.c.Stat = undefined;
-        if (std.c.fstat(fd, &st) != 0) return error.StatFailed;
-        const size: usize = @intCast(st.size);
+        // File size via lseek-to-end: 0.17 has no portable fstat wrapper on
+        // Linux (std.c.Stat is void there) and this loader has no `std.Io`.
+        const size: usize = @intCast(@max(std.c.lseek(fd, 0, std.c.SEEK.END), 0));
+        if (size == 0) return error.StatFailed;
         const map = try std.posix.mmap(null, size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, fd, 0);
         errdefer std.posix.munmap(map);
         if (size < 8) return error.NgramTableTruncated;
@@ -218,10 +226,11 @@ pub const NgramTable = struct {
         return t;
     }
 
-    /// Widths `mx.quantize` packs and `dequantRow` unpacks.
+    /// Widths `mx.quantize` packs and `dequantRow` unpacks, plus 16 = raw
+    /// BF16 rows (no scales/biases; `row` copies them out converted to f32).
     fn bitsSupported(bits: u32) bool {
         return switch (bits) {
-            2, 3, 4, 5, 6, 8 => true,
+            2, 3, 4, 5, 6, 8, 16 => true,
             else => false,
         };
     }
@@ -305,6 +314,25 @@ pub const NgramTable = struct {
         if (!bitsSupported(bits)) return error.NgramTableBits;
         if (gs == 0 or gs > 1024) return error.NgramTableBits;
 
+        // Raw BF16 mode: one `weight` BF16 [rows, dim] region, no
+        // scales/biases. `wcols`/`scols` stay 0; only `row`'s raw arm reads it.
+        if (bits == 16) {
+            const w = try headerRegion(obj, "weight", "BF16", 2, map.len, data_off);
+            if (w.cols > std.math.maxInt(u32)) return error.NgramTableRegion;
+            return .{
+                .map = map,
+                .rows = w.rows,
+                .dim = @intCast(w.cols),
+                .bits = bits,
+                .group_size = gs,
+                .w_off = data_off + @as(usize, @intCast(w.start)),
+                .s_off = 0,
+                .b_off = 0,
+                .wcols = 0,
+                .scols = 0,
+            };
+        }
+
         const w = try headerRegion(obj, "weight", "U32", 4, map.len, data_off);
         const sc = try headerRegion(obj, "scales", "BF16", 2, map.len, data_off);
         const bi = try headerRegion(obj, "biases", "BF16", 2, map.len, data_off);
@@ -342,7 +370,7 @@ pub const NgramTable = struct {
         self.pool = null;
         if (self.fd >= 0) _ = std.c.close(self.fd);
         self.fd = -1;
-        std.posix.munmap(self.map);
+        if (!self.gpu_owns_map) std.posix.munmap(self.map);
     }
 
     const WARM_CHUNK: usize = 8 << 20;
@@ -394,6 +422,15 @@ pub const NgramTable = struct {
     /// straddle a word boundary at 3/5/6 bits).
     pub fn row(self: *const NgramTable, r: u64, out: []f32) void {
         std.debug.assert(r < self.rows and out.len >= self.dim);
+        // Raw BF16 arm: straight convert, no scales/biases.
+        if (self.bits == 16) {
+            const raw = self.map[self.w_off + r * self.dim * 2 ..][0 .. self.dim * 2];
+            var i: u32 = 0;
+            while (i < self.dim) : (i += 1) {
+                out[i] = bf16ToF32(std.mem.readInt(u16, raw[i * 2 ..][0..2], .little));
+            }
+            return;
+        }
         const words = self.map[self.w_off + r * self.wcols * 4 ..][0 .. self.wcols * 4];
         const scales = self.map[self.s_off + r * self.scols * 2 ..][0 .. self.scols * 2];
         const biases = self.map[self.b_off + r * self.scols * 2 ..][0 .. self.scols * 2];
@@ -421,6 +458,11 @@ pub const NgramTable = struct {
     /// `[ids.len / n_heads][n_heads * dim]` row-major. `kv_len` is the context position this
     /// gather runs at and picks the wide arm; the output is byte-identical either way.
     pub fn gather(self: *const NgramTable, row_ids: []const i64, out: []f32, kv_len: u64) void {
+        // Raw BF16 arm rides no pool (single region, no dequant): serial walk.
+        if (self.bits == 16) {
+            for (row_ids, 0..) |r, i| self.row(@intCast(r), out[i * self.dim ..][0..self.dim]);
+            return;
+        }
         const need: usize = self.wcols * 4 + self.scols * 4;
         // Prefill-width gathers ride the pool only past `PREFILL_PREFETCH_MIN_KV`: a resident
         // table loses 2-7% to the wake rounds, an evicted one (weights pushed the 32 GB
@@ -651,6 +693,12 @@ pub fn bf16ToF32(u: u16) f32 {
     return @bitCast(@as(u32, u) << 16);
 }
 
+/// Round-to-nearest-even f32 -> bf16 bits, the PLE rows' upload format.
+pub fn bf16Rne(v: f32) u16 {
+    const u: u32 = @bitCast(v);
+    return @intCast((u +% 0x7FFF +% ((u >> 16) & 1)) >> 16);
+}
+
 // ── tests ──
 
 const testing = std.testing;
@@ -758,6 +806,29 @@ test "ngram table row dequant reads the dense mx.quantize packing at every width
     }
 }
 
+test "ngram table raw bf16 rows copy out converted without scales" {
+    // bits 16: `weight` BF16 [2,4], no scales/biases keys at all.
+    const header = "{\"__metadata__\":{\"format\":\"mlx-serve-ngram\",\"bits\":\"16\",\"group_size\":\"32\"},\"weight\":{\"dtype\":\"BF16\",\"shape\":[2,4],\"data_offsets\":[0,16]}}";
+    const total = 8 + 256 + 16;
+    const buf = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), total);
+    defer std.heap.page_allocator.free(buf);
+    @memset(buf, ' ');
+    std.mem.writeInt(u64, buf[0..8], 256, .little);
+    @memcpy(buf[8 .. 8 + header.len], header);
+    const data = buf[264..];
+    const vals = [_]u16{ 0x3F80, 0xC000, 0x4000, 0x0000, 0xBF80, 0x3F00, 0xC040, 0x4040 };
+    for (vals, 0..) |v, k| std.mem.writeInt(u16, data[k * 2 ..][0..2], v, .little);
+    const t = try NgramTable.parse(buf, buf[8..264], 264);
+    try testing.expectEqual(@as(u32, 16), t.bits);
+    try testing.expectEqual(@as(u64, 2), t.rows);
+    try testing.expectEqual(@as(u32, 4), t.dim);
+    var out: [4]f32 = undefined;
+    t.row(0, &out);
+    try testing.expectEqualSlices(f32, &[_]f32{ 1.0, -2.0, 2.0, 0.0 }, &out);
+    t.row(1, &out);
+    try testing.expectEqualSlices(f32, &[_]f32{ -1.0, 0.5, -3.0, 3.0 }, &out);
+}
+
 /// Module-owned state for one loaded qwen4_exp model: the n-gram hash and
 /// the mmapped table. Non-null on `Transformer.qwen4` ⇒ the arch is served
 /// serially with speculation off (`ownsModuleDecodeState`), which is what
@@ -766,9 +837,13 @@ test "ngram table row dequant reads the dense mx.quantize packing at every width
 pub const Qwen4State = struct {
     hash: NgramHash,
     table: NgramTable,
+    /// The table as one no-copy GPU buffer; null = the host gather serves every forward.
+    gpu: ?ple_gpu.Table = null,
 
     pub fn deinit(self: *Qwen4State) void {
         self.table.close();
+        if (self.gpu) |g| g.release();
+        self.gpu = null;
     }
 };
 

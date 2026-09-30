@@ -223,7 +223,7 @@ final class TelegramBridge: ObservableObject {
             // re-enters reconcile() as a no-op (token/enabled unchanged).
             appState.serverOptions.telegram.allowedChatIds.append(chatId)
             await send(token: token, chatId: chatId,
-                       text: "✅ Locked to this chat. I'll relay your messages to the local model on \(hostName()). Send /new anytime to start a fresh conversation.")
+                       text: L10n.format("✅ Locked to this chat. I'll relay your messages to the local model on %@. Send /new anytime to start a fresh conversation.", hostName()))
             // Fall through and answer this first message (unless it's a command).
         case .allowed:
             break
@@ -252,7 +252,7 @@ final class TelegramBridge: ObservableObject {
 
         guard appState.server.status == .running else {
             await send(token: token, chatId: chatId,
-                       text: "⚠️ No model is loaded right now. Open MLX Core, start a model, then message me again.")
+                       text: "⚠️ No model is loaded right now. Open MLX-Serve, start a model, then message me again.")
             return
         }
 
@@ -267,7 +267,7 @@ final class TelegramBridge: ObservableObject {
         switch action {
         case .imageUnsupported:
             await send(token: token, chatId: chatId,
-                       text: "🚫 This model can't see images. Load a vision model (e.g. Gemma 4) in MLX Core and try again.")
+                       text: "🚫 This model can't see images. Load a vision model (e.g. Gemma 4) in MLX-Serve and try again.")
         case .unsupported(let reason):
             await send(token: token, chatId: chatId, text: reason)
         case .textOnly, .image, .audio:
@@ -566,7 +566,7 @@ final class TelegramBridge: ObservableObject {
             ? "agent mode (it can run shell commands and edit files on the Mac)"
             : "chat mode"
         return """
-        👋 Connected to MLX Core in \(mode).
+        👋 Connected to MLX-Serve in \(mode).
         Send a message and I'll relay it to your local model.
         You can also send 📷 photos (vision models will look at them) and 🎙️ voice notes (audio models hear them; other models read an on-device transcript).
         Commands:

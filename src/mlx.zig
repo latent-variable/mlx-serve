@@ -73,6 +73,7 @@ pub extern "c" fn mlx_string_free(str: mlx_string) c_int;
 // Device
 pub extern "c" fn mlx_device_new() mlx_device;
 pub extern "c" fn mlx_device_new_type(dtype: mlx_device_type, index: c_int) mlx_device;
+pub extern "c" fn mlx_device_is_available(avail: *bool, dev: mlx_device) c_int;
 pub extern "c" fn mlx_device_free(dev: mlx_device) c_int;
 pub extern "c" fn mlx_get_default_device(dev: *mlx_device) c_int;
 pub extern "c" fn mlx_set_default_device(dev: mlx_device) c_int;
@@ -101,6 +102,7 @@ pub extern "c" fn mlx_synchronize(s: mlx_stream) c_int;
 
 // Metal
 pub extern "c" fn mlx_metal_is_available(res: *bool) c_int;
+pub extern "c" fn _mlx_array_is_available(res: *bool, arr: mlx_array) c_int;
 
 // Array creation
 pub extern "c" fn mlx_array_new() mlx_array;
@@ -108,6 +110,9 @@ pub extern "c" fn mlx_array_new_int(val: c_int) mlx_array;
 pub extern "c" fn mlx_array_new_float(val: f32) mlx_array;
 pub extern "c" fn mlx_array_new_bool(val: bool) mlx_array;
 pub extern "c" fn mlx_array_new_data(data: ?*const anyopaque, shape: [*]const c_int, dim: c_int, dtype: mlx_dtype) mlx_array;
+/// Wraps `data` in place when the backend can (Metal no-copy `newBuffer(ptr, len)`), else
+/// COPIES it and calls `dtor(payload)` at once. `dtor` also runs when the last reference drops.
+pub extern "c" fn mlx_array_new_data_managed_payload(data: *anyopaque, shape: [*]const c_int, dim: c_int, dtype: mlx_dtype, payload: ?*anyopaque, dtor: *const fn (?*anyopaque) callconv(.c) void) mlx_array;
 pub extern "c" fn mlx_array_free(arr: mlx_array) c_int;
 pub extern "c" fn mlx_array_set(arr: *mlx_array, src: mlx_array) c_int;
 
@@ -138,6 +143,11 @@ pub extern "c" fn mlx_array_data_uint8(arr: mlx_array) ?[*]const u8;
 pub extern "c" fn mlx_vector_array_new() mlx_vector_array;
 pub extern "c" fn mlx_vector_array_new_data(data: [*]const mlx_array, size: usize) mlx_vector_array;
 pub extern "c" fn mlx_vector_array_free(vec: mlx_vector_array) c_int;
+// Graph printing, for the decode-graph dump diagnostic (MLX_SERVE_DECODE_GRAPH_DUMP).
+pub const mlx_node_namer = extern struct { ctx: ?*anyopaque = null };
+pub extern "c" fn mlx_node_namer_new() mlx_node_namer;
+pub extern "c" fn mlx_node_namer_free(namer: mlx_node_namer) c_int;
+pub extern "c" fn mlx_print_graph(os: *std.c.FILE, namer: mlx_node_namer, outputs: mlx_vector_array) c_int;
 pub extern "c" fn mlx_vector_array_size(vec: mlx_vector_array) usize;
 pub extern "c" fn mlx_vector_array_get(res: *mlx_array, vec: mlx_vector_array, idx: usize) c_int;
 pub extern "c" fn mlx_vector_array_new_value(val: mlx_array) mlx_vector_array;
@@ -211,6 +221,7 @@ pub extern "c" fn mlx_sin(res: *mlx_array, a: mlx_array, s: mlx_stream) c_int;
 pub extern "c" fn mlx_erf(res: *mlx_array, a: mlx_array, s: mlx_stream) c_int;
 
 pub extern "c" fn mlx_reshape(res: *mlx_array, a: mlx_array, shape: [*]const c_int, shape_num: usize, s: mlx_stream) c_int;
+pub extern "c" fn mlx_hadamard_transform(res: *mlx_array, a: mlx_array, scale: mlx_optional_float, s: mlx_stream) c_int;
 pub extern "c" fn mlx_transpose(res: *mlx_array, a: mlx_array, s: mlx_stream) c_int;
 pub extern "c" fn mlx_transpose_axes(res: *mlx_array, a: mlx_array, axes: [*]const c_int, axes_num: usize, s: mlx_stream) c_int;
 pub extern "c" fn mlx_expand_dims(res: *mlx_array, a: mlx_array, axis: c_int, s: mlx_stream) c_int;
@@ -309,6 +320,7 @@ pub extern "c" fn mlx_take_along_axis(res: *mlx_array, a: mlx_array, indices: ml
 pub extern "c" fn mlx_put_along_axis(res: *mlx_array, a: mlx_array, indices: mlx_array, values: mlx_array, axis: c_int, s: mlx_stream) c_int;
 pub extern "c" fn mlx_logical_and(res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) c_int;
 pub extern "c" fn mlx_logical_or(res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) c_int;
+pub extern "c" fn mlx_logical_not(res: *mlx_array, a: mlx_array, s: mlx_stream) c_int;
 pub extern "c" fn mlx_repeat_axis(res: *mlx_array, arr: mlx_array, repeats: c_int, axis: c_int, s: mlx_stream) c_int;
 pub extern "c" fn mlx_tile(res: *mlx_array, arr: mlx_array, reps: [*]const c_int, reps_num: usize, s: mlx_stream) c_int;
 pub extern "c" fn mlx_log1p(res: *mlx_array, a: mlx_array, s: mlx_stream) c_int;
@@ -346,6 +358,7 @@ pub extern "c" fn mlx_fast_metal_kernel_config_set_thread_group(cls: mlx_fast_me
 pub extern "c" fn mlx_fast_metal_kernel_config_add_template_arg_dtype(cls: mlx_fast_metal_kernel_config, name: [*:0]const u8, dtype: mlx_dtype) c_int;
 pub extern "c" fn mlx_any_axes(res: *mlx_array, a: mlx_array, axes: [*]const c_int, axes_num: usize, keepdims: bool, s: mlx_stream) c_int;
 pub extern "c" fn mlx_fast_metal_kernel_config_add_template_arg_int(cls: mlx_fast_metal_kernel_config, name: [*:0]const u8, value: c_int) c_int;
+pub extern "c" fn mlx_fast_metal_kernel_config_add_template_arg_bool(cls: mlx_fast_metal_kernel_config, name: [*:0]const u8, value: bool) c_int;
 pub extern "c" fn mlx_fast_metal_kernel_config_set_verbose(cls: mlx_fast_metal_kernel_config, verbose: bool) c_int;
 
 pub const mlx_fast_metal_kernel = extern struct { ctx: ?*anyopaque = null };
@@ -360,6 +373,7 @@ pub extern "c" fn mlx_random_key(res: *mlx_array, seed: u64) c_int;
 // Bounds are ARRAYS, unlike mlx_random_normal's scalar loc/scale.
 pub extern "c" fn mlx_random_uniform(res: *mlx_array, low: mlx_array, high: mlx_array, shape: [*]const c_int, shape_num: usize, dtype: mlx_dtype, key: mlx_array, s: mlx_stream) c_int;
 pub extern "c" fn mlx_random_seed(seed: u64) c_int;
+pub extern "c" fn mlx_random_bits(res: *mlx_array, shape: [*]const c_int, shape_num: usize, width: c_int, key: mlx_array, s: mlx_stream) c_int;
 // Uniform random integers in [low, high) — DiffusionGemma canvas init/renoise.
 pub extern "c" fn mlx_random_randint(res: *mlx_array, low: mlx_array, high: mlx_array, shape: [*]const c_int, shape_num: usize, dtype: mlx_dtype, key: mlx_array, s: mlx_stream) c_int;
 
@@ -419,7 +433,18 @@ var no_gpu_backend_cache: ?bool = null;
 pub fn noGpuBackend() bool {
     if (no_gpu_backend_cache == null) {
         var avail: bool = false;
-        _ = mlx_metal_is_available(&avail);
+        if (comptime builtin.os.tag.isDarwin()) {
+            _ = mlx_metal_is_available(&avail);
+        } else {
+            // Non-Darwin backends (mlx-omarchy Vulkan) are invisible to
+            // mlx_metal_is_available. Ask the device API directly: the GPU
+            // device reports availability whether the backend is Metal,
+            // Vulkan or CUDA, and mlx_default_gpu_stream_new() resolves to
+            // that device's stream.
+            const dev = mlx_device_new_type(.gpu, 0);
+            defer _ = mlx_device_free(dev);
+            _ = mlx_device_is_available(&avail, dev);
+        }
         no_gpu_backend_cache = !avail;
     }
     return no_gpu_backend_cache.?;
@@ -670,14 +695,23 @@ pub fn wiredFitTarget(active_bytes: usize, slack_bytes: usize, max_rec: usize) ?
 pub const WiredPolicyResult = struct { mode: WiredMode, target: ?usize };
 
 pub fn maxRecommendedWorkingSet() usize {
+    return defaultDeviceInfoSize("max_recommended_working_set_size");
+}
+
+/// `MTLDevice.maxBufferLength`; 0 when the query fails.
+pub fn maxBufferLength() usize {
+    return defaultDeviceInfoSize("max_buffer_length");
+}
+
+fn defaultDeviceInfoSize(key: [*:0]const u8) usize {
     var dev = mlx_device{ .ctx = null };
     _ = mlx_get_default_device(&dev);
     var info = mlx_device_info_new();
     defer _ = mlx_device_info_free(info);
     if (mlx_device_info_get(&info, dev) != 0) return 0;
-    var max_rec: usize = 0;
-    if (mlx_device_info_get_size(&max_rec, info, "max_recommended_working_set_size") != 0) return 0;
-    return max_rec;
+    var v: usize = 0;
+    if (mlx_device_info_get_size(&v, info, key) != 0) return 0;
+    return v;
 }
 
 /// Apply the wired-residency policy. Call on the inference thread AFTER a
@@ -832,6 +866,17 @@ pub fn takeError(buf: []u8) ?[]const u8 {
     mlx_error_len = 0;
     mlx_error_latched.store(false, .release);
     return buf[0..n];
+}
+
+/// Consume the latch only when its message contains `needle`; any other error stays latched.
+pub fn takeErrorIf(needle: []const u8) bool {
+    if (!mlx_error_latched.load(.acquire)) return false;
+    lockErrBuf();
+    defer unlockErrBuf();
+    if (std.mem.indexOf(u8, mlx_error_buf[0..mlx_error_len], needle) == null) return false;
+    mlx_error_len = 0;
+    mlx_error_latched.store(false, .release);
+    return true;
 }
 
 /// Drop a latch a best-effort op raised and its caller already reported, so an

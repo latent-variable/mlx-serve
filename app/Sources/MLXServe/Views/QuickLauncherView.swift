@@ -54,11 +54,11 @@ struct QuickLauncherView: View {
     private var inputRow: some View {
         HStack(spacing: 12) {
             Image(systemName: "bolt.fill")
-                .font(.system(size: 18, weight: .medium))
+                .font(.app(.title2, weight: .medium))
                 .foregroundStyle(Color.accentColor)
             TextField("Ask the local model anything…", text: $query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 20, weight: .regular))
+                .font(.app(.title, weight: .regular))
                 .focused($focused)
                 .onSubmit {
                     if controller.submit(query) { query = "" }
@@ -73,7 +73,7 @@ struct QuickLauncherView: View {
 
     private func noticeRow(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.caption)
+            .font(.app(.caption))
             .foregroundStyle(.secondary)
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -86,8 +86,8 @@ struct QuickLauncherView: View {
             VStack(alignment: .leading, spacing: 10) {
                 if let question = convo.messages.last(where: { $0.role == .user })?.content,
                    !question.isEmpty {
-                    Text(question)
-                        .font(.caption)
+                    Text(verbatim: question)
+                        .font(.app(.caption))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
@@ -112,21 +112,24 @@ struct QuickLauncherView: View {
     private var footer: some View {
         HStack(spacing: 12) {
             Text("↩ ask · esc close")
-                .font(.caption2)
+                .font(.app(.caption2))
                 .foregroundStyle(.tertiary)
             Spacer()
             if generatingHere {
-                Button("Stop") { controller.stopOwnTurn() }
+                Button { controller.stopOwnTurn() } label: { Text("Stop")
+                    .font(.app(.body)) }
                     .keyboardShortcut(".", modifiers: .command)
                     .controlSize(.small)
             }
-            Button("New  ⌘N") {
+            Button {
                 controller.newConversation()
                 query = ""
-            }
+            } label: { Text("New  ⌘N")
+                .font(.app(.body)) }
             .keyboardShortcut("n", modifiers: .command)
             .controlSize(.small)
-            Button("Open in Chat  ⌘↩") { controller.openInChat() }
+            Button { controller.openInChat() } label: { Text("Open in Chat  ⌘↩")
+                .font(.app(.body)) }
                 .keyboardShortcut(.return, modifiers: .command)
                 .controlSize(.small)
         }
@@ -146,13 +149,13 @@ struct QuickLauncherTrayRow: View {
         TrayFeatureRow(
             icon: "bolt.fill",
             title: "Quick Launcher",
-            subtitle: "\(QuickLauncherHotKey.display) — ask from anywhere",
+            subtitle: L10n.format("%@ — ask from anywhere", QuickLauncherHotKey.display),
             isOn: appState.quickLauncherEnabled
         ) {
             Toggle("", isOn: $appState.quickLauncherEnabled)
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .controlSize(.small)
+                .controlSize(.small).font(.app(.body))
         }
         .help("Spotlight-style prompt panel on \(QuickLauncherHotKey.display): summon it from any app, ask the local model, and press ⌘↩ to continue in the chat window. If nothing happens on \(QuickLauncherHotKey.display), macOS may be using it for input-source switching (System Settings → Keyboard → Keyboard Shortcuts → Input Sources).")
     }

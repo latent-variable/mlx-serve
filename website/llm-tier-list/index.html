@@ -331,6 +331,14 @@
       border-radius: 5px; padding: 2px 6px;
     }
     .mc-tag.mc-new { color: #0e8a4f; background: #e4f8ea; }
+    .mc-tag.mc-app { color: #8a5a00; background: #fdf0d5; }
+    /* a row opened from an app deep link flashes once, reusing the promotion pop */
+    .deep-flash { animation: promote-pop 1.6s ease; border-radius: 8px; }
+    .app-pick-legend {
+      font-size: 12.5px; color: var(--text-secondary);
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      margin: 0 0 20px;
+    }
     .mc-votes { display: flex; gap: 6px; margin-top: 2px; }
     .vote-btn {
       font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
@@ -342,6 +350,14 @@
     .vote-btn:hover { border-color: var(--text-secondary); color: var(--text-primary); }
     .vote-btn.vote-up.mine { background: #e4f8ea; border-color: #30d158; color: #0e8a4f; }
     .vote-btn.vote-down.mine { background: #ffe9e7; border-color: #ff6961; color: #c22e26; }
+    .run-btn {
+      font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 10px; border-radius: 7px; border: 1px solid var(--border);
+      background: var(--bg-alt); color: var(--text-secondary);
+      transition: all 0.12s ease;
+    }
+    .run-btn:hover { border-color: var(--accent); color: var(--text-primary); }
 
     /* ─── compact header (hero removed: board stays above the fold) ─── */
     .page-head { padding: 26px 0 18px; }
@@ -417,7 +433,7 @@
       #unranked-table th:nth-child(6), #unranked-table td:nth-child(6) { display: none; }
       #unranked-table th, #unranked-table td { padding: 8px 6px; }
       #unranked-table td:nth-child(1) { white-space: normal; overflow-wrap: anywhere; }
-      #unranked-table .vote-btn { padding: 4px 7px; font-size: 11px; gap: 3px; }
+      #unranked-table .vote-btn, #unranked-table .run-btn { padding: 4px 7px; font-size: 11px; gap: 3px; }
     }
   </style>
 </head>
@@ -425,21 +441,46 @@
 
   <nav>
     <a href="../" class="nav-logo">
-      <img src="../appiconb.png" alt="MLX Core" class="nav-logo-img">
-      <span>mlx-serve</span>
+      <img src="../appiconb.png" alt="MLX-Serve" class="nav-logo-img">
+      <span>MLX-Serve</span>
       <span class="nav-ver"></span>
     </a>
     <input type="checkbox" id="nav-toggle" class="nav-toggle-input">
     <ul class="nav-links" onclick="if(event.target.closest('a')) document.getElementById('nav-toggle').checked=false">
-      <li><a href="../#explore" class="hide-mobile">Deep dives</a></li>
-      <li><a href="../#performance" class="hide-mobile">Performance</a></li>
-      <li><a href="../#features" class="hide-mobile">Features</a></li>
+      <li class="nav-sub hide-mobile">
+        <a href="../#explore" class="nav-sub-trigger" aria-haspopup="true">Overview <svg viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4"/></svg></a>
+        <ul class="nav-submenu">
+          <li><a href="../#explore">Deep dives</a></li>
+          <li><a href="../#performance">Performance</a></li>
+          <li><a href="../#features">Features</a></li>
+          <li><a href="../#faq">FAQ</a></li>
+          <li><a href="../blog/">Blog</a></li>
+        </ul>
+      </li>
+      <li class="nav-sub hide-mobile">
+        <a href="../#explore" class="nav-sub-trigger" aria-haspopup="true">Features <svg viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4"/></svg></a>
+        <ul class="nav-submenu nav-submenu-wide">
+          <li><a href="../onboarding/">Getting started</a></li>
+          <li><a href="../image-generation/">Image generation</a></li>
+          <li><a href="../video-generation/">Video generation</a></li>
+          <li><a href="../music-generation/">Music generation</a></li>
+          <li><a href="../3d-generation/">3D generation</a></li>
+          <li><a href="../voice-cloning/">Voice cloning</a></li>
+          <li><a href="../claude-code-local/">Claude Code, local</a></li>
+          <li><a href="../local-ai-assistant/">AI assistant</a></li>
+          <li><a href="../agent-sandbox/">Agent sandbox</a></li>
+          <li><a href="../speculative-decoding/">Speculative decoding</a></li>
+          <li><a href="../tool-calling/">Tool calling</a></li>
+          <li><a href="../lm-studio-alternative/">vs LM Studio</a></li>
+          <li><a href="../ollama-alternative/">vs Ollama</a></li>
+        </ul>
+      </li>
       <li><a href="../api/" class="hide-mobile">API</a></li>
       <li><a href="../cli/" class="hide-mobile">CLI</a></li>
       <li><a href="./" class="hide-mobile nav-current">Tier list</a></li>
-      <li><a href="../#faq" class="hide-mobile">FAQ</a></li>
+      <li><a href="../benchmarks/" class="hide-mobile">Benchmarks</a></li>
       <li><a href="https://github.com/ddalcu/mlx-serve" class="nav-github" target="_blank" rel="noopener" aria-label="GitHub"><svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a></li>
-      <li><a href="https://github.com/ddalcu/mlx-serve/releases/latest/download/MLXCore.dmg" class="nav-dl nav-dl-desktop">Download</a></li>
+      <li><a href="https://github.com/ddalcu/mlx-serve/releases/latest/download/MLX-Serve.dmg" class="nav-dl nav-dl-desktop">Download</a></li>
       <li><a href="https://apps.apple.com/us/app/mlx-chat-local-ai/id6787603518" class="nav-appstore" target="_blank" rel="noopener"><img src="../assets/appstore.svg" alt="Download on the App Store" width="120" height="40"></a></li>
     </ul>
     <label for="nav-toggle" class="nav-burger" aria-label="Menu"><span></span><span></span><span></span></label>
@@ -584,6 +625,7 @@
         <div class="tier-row" data-tier="C"><div class="tier-badge">C</div><div class="tier-cards"></div></div>
         <div class="tier-row" data-tier="D"><div class="tier-badge">D</div><div class="tier-cards"></div></div>
       </div>
+      <p class="app-pick-legend"><span class="mc-tag mc-app">In the app</span> ships in the Mac app's Recommended tab — this board's shortlist for your machine.</p>
 
       <div class="unranked-head">
         <h2>Not yet ranked</h2>
@@ -621,7 +663,7 @@
       <h2>Found your model?<br>Run it in one command.</h2>
       <p><code>mlx-serve run &lt;model&gt;</code> downloads it straight from Hugging Face and drops you into a chat — or grab the Mac app.</p>
       <div class="hero-ctas">
-        <a href="https://github.com/ddalcu/mlx-serve/releases/latest/download/MLXCore.dmg" class="btn btn-primary">Download for Mac</a>
+        <a href="https://github.com/ddalcu/mlx-serve/releases/latest/download/MLX-Serve.dmg" class="btn btn-primary">Download for Mac</a>
         <a href="https://github.com/ddalcu/mlx-serve" class="btn btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
       </div>
     </div>
@@ -661,14 +703,21 @@
     { id: "gemma-4-12b",      name: "Gemma 4 12B",       params: "12B",          sizeGb: 7.0, minRam: 16,  tags: ["vision"], downloads: 0, paramsB: 12,  activeB: 12 },
     { id: "gemma-4-26b-a4b",  name: "Gemma 4 26B-A4B",   params: "26B (4B act)", sizeGb: 15,  minRam: 24,  tags: ["moe", "vision", "fast"], downloads: 0, paramsB: 25.2, activeB: 3.8 },
     { id: "gemma-4-31b",      name: "Gemma 4 31B",       params: "31B",          sizeGb: 17.4, minRam: 32, tags: ["vision"], downloads: 0, paramsB: 30.7, activeB: 30.7 },
-    { id: "qwen3.6-27b",      name: "Qwen3.6 27B",       params: "27B",          sizeGb: 15.5, minRam: 24, tags: [], downloads: 0, paramsB: 27.8, activeB: 27.8 },
     { id: "qwen3.8-27b",      name: "Qwen3.8 27B",       params: "27B",          sizeGb: 18.2, minRam: 24, tags: ["vision"], downloads: 0, paramsB: 27.8, activeB: 27.8 },
+    { id: "qwen3.8-flash-next", name: "Qwen3.8 Flash Next", params: "125B (6B act)", sizeGb: 70, minRam: 96, tags: ["moe", "vision"], downloads: 0, paramsB: 125, activeB: 6 },
     { id: "muse-glimmer-30b", name: "Muse-Glimmer 30B",  params: "30B",          sizeGb: 21.4, minRam: 32, tags: ["vision"], downloads: 0, paramsB: 30, activeB: 30 },
     { id: "qwen3.6-35b-a3b",  name: "Qwen3.6 35B-A3B",   params: "35B (3B act)", sizeGb: 20,  minRam: 32,  tags: ["moe", "fast"], downloads: 0, paramsB: 36, activeB: 3 },
     { id: "llama-3.3-70b",    name: "Llama 3.3 70B",     params: "70B",          sizeGb: 40,  minRam: 64,  tags: [], downloads: 0, paramsB: 70,  activeB: 70 },
     { id: "ling-3.0-flash",   name: "Ling 3.0 Flash",    params: "124B (5B act)", sizeGb: 70, minRam: 96,  tags: ["moe", "fast"], downloads: 0, paramsB: 124, activeB: 5.1 },
     { id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash", params: "284B (13B act)", sizeGb: 115, minRam: 128, tags: ["moe"], downloads: 0, paramsB: 284, activeB: 13 },
     { id: "hy3",              name: "Hunyuan 3 295B",    params: "295B MoE",     sizeGb: 95,  minRam: 128, tags: ["moe"], downloads: 0, paramsB: 295, activeB: 13 },
+    // The app-pane row lives here too so the app can deep-link every pick.
+    // It is unscored by Artificial Analysis, so it waits in the unranked
+    // table like the other new rows rather than being placed on a guess.
+    // The Bonsai seed shares the live group's id, so it only shows when the
+    // HF fetch fails — online the group's own downloads win.
+    { id: "mimo-v2.6-9b",      name: "MiMo 9B",           params: "9B",           sizeGb: 7.1, minRam: 16, tags: ["vision", "fast"], downloads: 0, paramsB: 9.7, activeB: 9.7 },
+    { id: "ternary-bonsai-2-27b", name: "Bonsai 2 27B",  params: "27B (2-bit)",  sizeGb: 8.0, minRam: 16, tags: ["fast"], downloads: 0, paramsB: 27.4, activeB: 27.4 },
   ];
   const TAG_LABELS = { vision: "Vision", moe: "MoE", fast: "Fast" };
 
@@ -694,7 +743,7 @@
   // phi, gemma2, …) are deliberately absent — see MODERN_FLOOR too.
   const LISTED_ARCHS = new Set(["gemma4", "gemma4_text", "diffusion_gemma",
     "gemma3", "gemma3_text", "qwen3", "qwen3_5", "qwen3_5_moe",
-    "qwen3_5_moe_text", "qwen3_next", "qwen3_moe", "qwen3_vl", "qwen3_vl_moe",
+    "qwen3_5_moe_text", "qwen3_next", "qwen3_moe", "qwen3_vl", "qwen3_vl_moe", "qwen4_exp",
     "nemotron_h", "lfm2", "lfm2_vl", "hy_v3", "llama", "mistral",
     "muse_glimmer", "muse_glimmer_text", "bailing_hybrid",
     "gpt_oss", "deepseek_v4", "glm_moe_dsa", "glm4_moe_lite", "glm4_moe",
@@ -808,7 +857,7 @@
       const sizeGb = Math.max(0.1, Math.round(g.params * 0.5625 / 1e9 * 10) / 10);
       const activeM = g.base.match(/(?:^|-)a(\d+(\.\d+)?)b(?:-|$)/i);
       const arch = g.arch || "";
-      const moe = !!activeM || arch.endsWith("_moe") || arch === "hy_v3" || arch === "glm_moe_dsa";
+      const moe = !!activeM || arch.endsWith("_moe") || arch === "hy_v3" || arch === "glm_moe_dsa" || arch === "qwen4_exp";
       const tags = [];
       if (g.vision) tags.push("vision");
       if (moe) tags.push("moe");
@@ -827,9 +876,13 @@
     // on the board; the unranked table is filterable so length is cheap
     return out.slice(0, 60);
   }
+  // Releases replaced by a newer one from the same lab. HF keeps ranking them
+  // on accumulated downloads long after nobody should pick them.
+  const SUPERSEDED = new Set(["qwen3.6-27b"]);
   function mergeWithSeed(groups, seeds) {
     const have = new Set(groups.map((g) => g.id));
-    return groups.concat(seeds.filter((s) => !have.has(s.id)));
+    return groups.concat(seeds.filter((s) => !have.has(s.id)))
+      .filter((m) => !SUPERSEDED.has(m.id));
   }
 
   // ── unranked-table helpers ─────────────────────────────────────────────
@@ -907,8 +960,13 @@
   // Cutoffs on the AA index. Sized against the current snapshot so no tier is
   // empty and S stays scarce (a tier list where everything is S ranks nothing).
   const INTEL_TIERS = [["S", 45], ["A", 35], ["B", 25], ["C", 15]];
+  // Editorial placements on the intelligence board: models we run and rate
+  // ourselves that the AA snapshot has not scored (or scores on a later,
+  // rebased scale). Never consulted in votes mode.
+  const TIER_PINS = { "qwen3.8-27b": "A", "qwen3.8-flash-next": "A" };
   function tierForModel(model, tally, mode) {
     if ((mode || TIER_MODE) === "votes") return tierFor(tally.up, tally.down);
+    if (TIER_PINS[model.id]) return TIER_PINS[model.id];
     // Rank on the PUBLISHED score only: an estimate is a guess from parameter
     // count, and guesses do not belong on a ranking board. Unscored models
     // wait in the table below, where they can still be voted on.
@@ -1080,7 +1138,7 @@
   };
   // A trained multi-token-prediction head ships INSIDE a checkpoint — it is
   // not a runtime flag you can turn on for any model.
-  const MTP_FAMILIES = [/^qwen3\.[56]/, /^ling-/, /^deepseek-v4/, /^glm-5/];
+  const MTP_FAMILIES = [/^qwen3\.[568]/, /^ling-/, /^deepseek-v4/, /^glm-5/];
   function specSupported(mode, model) {
     if (mode !== "mtp") return true;
     return MTP_FAMILIES.some((re) => re.test(model.id || ""));
@@ -1142,7 +1200,7 @@
   const AA_INDEX = {
     "kimi-k3": 57, "glm-5.2": 51, "deepseek-v4-flash": 50, "minimax-m3": 44,
     "mimo-v2.5-pro": 42, "inkling": 41, "nemotron-3-ultra-550b-a55b": 38,
-    "qwen3.6-27b": 37, "qwen3.6-35b-a3b": 32, "g9v3-39a5b": 31,
+    "qwen3.6-35b-a3b": 32, "g9v3-39a5b": 31,
     "mistral-medium-3.5": 30, "gemma-4-31b": 29, "gemma-4-26b-a4b": 26,
     "qwen3.5-35b-a3b": 24, "gpt-oss-120b": 24, "command-a": 23,
     "gemma-4-12b": 22, "qwen3.5-9b": 21, "apriel-v1.6-15b-thinker": 21,
@@ -1379,9 +1437,41 @@
     if (n >= 1e3) return Math.round(n / 1e3) + "K";
     return "" + n;
   }
+  // Models the Mac app's Recommended tab offers. app/Sources/MLXServe/Models/
+  // RecommendedModels.swift is the source of truth; the app's TierListLinks
+  // maps repos to these ids, and every row below carries id="tier-<id>" so
+  // those links land. Keep the two lists in step.
+  const APP_PICKS = new Set(["gemma-4-e4b", "gemma-4-12b", "gemma-4-26b-a4b",
+    "gemma-4-31b", "mimo-v2.6-9b", "qwen3.8-27b", "ternary-bonsai-2-27b",
+    "qwen3.6-35b-a3b", "qwen3.8-flash-next", "deepseek-v4-flash"]);
+  // The repo each app-shipped row's Run button copies (`mlx-serve run
+  // <repo>` — the same command the page's own download band advertises).
+  // Same list as APP_PICKS; RecommendedModels.swift is the source of truth.
+  const RUN_REPO = {
+    "gemma-4-e4b": "mlx-community/gemma-4-e4b-it-4bit",
+    "gemma-4-12b": "mlx-community/gemma-4-12b-it-4bit",
+    "gemma-4-26b-a4b": "mlx-community/gemma-4-26b-a4b-it-4bit",
+    "gemma-4-31b": "mlx-community/gemma-4-31b-it-4bit",
+    "mimo-v2.6-9b": "ddalcu/MiMo-V2.6-Distill-Qwen-9B-MLX-Serve-4bit",
+    "qwen3.8-27b": "ddalcu/Qwen3.8-27B-MLX-Serve-4bit",
+    "ternary-bonsai-2-27b": "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+    "qwen3.6-35b-a3b": "ddalcu/Qwen3.6-35B-A3B-MLX-Serve-4bit",
+    "qwen3.8-flash-next": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+    "deepseek-v4-flash": "ddalcu/DeepSeek-V4-Flash-0731-iQ-MLX-3.3bpw",
+  };
+  function copyRun(repo) {
+    const cmd = "mlx-serve run " + repo;
+    const done = () => showToast("Copied: " + cmd);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(cmd).then(done, () => showToast(cmd));
+    } else {
+      showToast(cmd);
+    }
+  }
   function chip(m, t) {
     const el = document.createElement("div");
     el.className = "model-chip";
+    el.id = "tier-" + m.id;
     el.dataset.model = m.id;
     const mine = state.mine[m.id] || 0;
     el.innerHTML =
@@ -1389,19 +1479,24 @@
       '<div class="mc-meta">' + m.params + " · ~" + m.sizeGb + " GB · " + m.minRam + "+ GB Mac" +
         (m.downloads ? " · ↓" + fmtCount(m.downloads) + "/mo" : "") + "</div>" +
       '<div class="mc-tags">' + (m.isNew ? '<span class="mc-tag mc-new">New</span>' : "") +
+        (APP_PICKS.has(m.id) ? '<span class="mc-tag mc-app">In the app</span>' : "") +
         m.tags.map((x) => '<span class="mc-tag">' + TAG_LABELS[x] + "</span>").join("") + "</div>" +
       '<div class="mc-votes">' +
         '<button class="vote-btn vote-up' + (mine === 1 ? " mine" : "") + '" aria-label="Upvote ' + m.name + '">▲ ' + t.up + "</button>" +
         '<button class="vote-btn vote-down' + (mine === -1 ? " mine" : "") + '" aria-label="Downvote ' + m.name + '">▼ ' + t.down + "</button>" +
+        (RUN_REPO[m.id] ? '<button class="run-btn" aria-label="Copy run command for ' + m.name + '">⧉ Run</button>' : "") +
       "</div>";
     el.querySelector(".mc-name").textContent = m.name;
     el.querySelector(".vote-up").addEventListener("click", () => backend.vote(m.id, mine === 1 ? 0 : 1));
     el.querySelector(".vote-down").addEventListener("click", () => backend.vote(m.id, mine === -1 ? 0 : -1));
+    const runBtn = el.querySelector(".run-btn");
+    if (runBtn) runBtn.addEventListener("click", () => copyRun(RUN_REPO[m.id]));
     return el;
   }
 
   function tableRow(m, t) {
     const tr = document.createElement("tr");
+    tr.id = "tier-" + m.id;
     const mine = state.mine[m.id] || 0;
     tr.innerHTML =
       '<td class="td-name"></td>' +
@@ -1410,12 +1505,16 @@
       "<td>" + m.minRam + "+ GB</td>" +
       "<td>" + (m.downloads ? fmtCount(m.downloads) : "—") + "</td>" +
       "<td>" + (m.isNew ? '<span class="mc-tag mc-new">New</span> ' : "") +
+        (APP_PICKS.has(m.id) ? '<span class="mc-tag mc-app">In the app</span> ' : "") +
         m.tags.map((x) => '<span class="mc-tag">' + TAG_LABELS[x] + "</span>").join(" ") + "</td>" +
       '<td><button class="vote-btn vote-up' + (mine === 1 ? " mine" : "") + '" aria-label="Upvote ' + m.name + '">▲ ' + t.up + "</button> " +
-        '<button class="vote-btn vote-down' + (mine === -1 ? " mine" : "") + '" aria-label="Downvote ' + m.name + '">▼ ' + t.down + "</button></td>";
+        '<button class="vote-btn vote-down' + (mine === -1 ? " mine" : "") + '" aria-label="Downvote ' + m.name + '">▼ ' + t.down + "</button>" +
+        (RUN_REPO[m.id] ? ' <button class="run-btn" aria-label="Copy run command for ' + m.name + '">⧉ Run</button>' : "") + "</td>";
     tr.querySelector(".td-name").textContent = m.name;
     tr.querySelector(".vote-up").addEventListener("click", () => backend.vote(m.id, mine === 1 ? 0 : 1));
     tr.querySelector(".vote-down").addEventListener("click", () => backend.vote(m.id, mine === -1 ? 0 : -1));
+    const runBtn = tr.querySelector(".run-btn");
+    if (runBtn) runBtn.addEventListener("click", () => copyRun(RUN_REPO[m.id]));
     return tr;
   }
 
@@ -1434,6 +1533,20 @@
       chipEl.classList.add("promoted");
       setTimeout(() => chipEl.classList.remove("promoted"), 1600);
     }
+  }
+
+  // App deep links land here as #tier-<model-id> (see TierListLinks in the
+  // app). Scroll the row into view and flash it once. Runs on boot and on
+  // hash changes only — never inside render(), or every vote would yank the
+  // scroll position.
+  function revealDeepLink() {
+    const h = (location.hash || "").slice(1);
+    if (!h.startsWith("tier-")) return;
+    const el = document.getElementById(h);
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    el.classList.add("deep-flash");
+    setTimeout(() => el.classList.remove("deep-flash"), 1700);
   }
 
   function renderAuth() {
@@ -1798,7 +1911,7 @@
       if (c) setActiveModels(mergeWithSeed(c.models, SEED_MODELS));
     }
     // the playground opens on a model we have actually benchmarked
-    const preferred = ["qwen3.6-27b", "gemma-4-26b-a4b", "qwen3.6-35b-a3b"];
+    const preferred = ["qwen3.8-27b", "gemma-4-26b-a4b", "qwen3.6-35b-a3b"];
     rig.modelId = (preferred.find((id) => activeModels.some((m) => m.id === id)) ||
       (activeModels[0] && activeModels[0].id));
     renderRig();
@@ -1812,6 +1925,9 @@
     document.getElementById("signout-btn").addEventListener("click", () => backend.signOut());
     renderAuth();
     backend.start();
+    render();
+    revealDeepLink();
+    window.addEventListener("hashchange", revealDeepLink);
   })();
   </script>
 </body>

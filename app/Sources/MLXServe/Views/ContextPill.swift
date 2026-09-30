@@ -34,8 +34,8 @@ struct ContextPill: View {
     var body: some View {
         Button { showDetail.toggle() } label: {
             HStack(spacing: 5) {
-                Text(stats.percentText)
-                    .font(.caption.monospacedDigit().weight(.medium))
+                Text(L10n.text(stats.percentText))
+                    .font(.app(.caption).monospacedDigit().weight(.medium))
                     .foregroundStyle(stats.pressure == .comfortable ? Color.secondary : tint)
                 ring
             }
@@ -46,7 +46,11 @@ struct ContextPill: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help("Context window — \(stats.percentText) of \(ContextWindowStats.compact(stats.contextLength)) tokens used. Click for the breakdown.")
+        .help(L10n.format(
+            "Context window — %@ of %@ tokens used. Click for the breakdown.",
+            stats.percentText,
+            ContextWindowStats.compact(stats.contextLength)
+        ))
         .popover(isPresented: $showDetail, arrowEdge: .top) {
             ContextWindowDetail(stats: stats, modelName: modelName, decodeSpeed: decodeSpeed)
         }
@@ -88,14 +92,14 @@ struct ContextWindowDetail: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "brain")
-                    .font(.system(size: 15))
+                    .font(.app(.title3))
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Context window")
-                        .font(.callout.weight(.semibold))
+                        .font(.app(.callout).weight(.semibold))
                     if let modelName, !modelName.isEmpty {
-                        Text(modelName)
-                            .font(.caption)
+                        Text(L10n.text(modelName))
+                            .font(.app(.caption))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -109,12 +113,12 @@ struct ContextWindowDetail: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(stats.percentText)
-                        .font(.system(size: 26, weight: .semibold, design: .rounded))
+                    Text(L10n.text(stats.percentText))
+                        .font(.app(.largeTitle, weight: .semibold, design: .rounded))
                         .foregroundStyle(tint)
                     Spacer()
                     Text("\(ContextWindowStats.compact(stats.usedTokens)) / \(ContextWindowStats.compact(stats.contextLength))")
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.app(.callout, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
 
@@ -129,7 +133,7 @@ struct ContextWindowDetail: View {
 
                 if stats.fromRejectedRequest {
                     Text("Last request overflowed the context window.")
-                        .font(.caption)
+                        .font(.app(.caption))
                         .foregroundStyle(.red)
                 }
             }
@@ -161,29 +165,29 @@ struct ContextWindowDetail: View {
     private func textRow(icon: String, label: String, value: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
-                .font(.system(size: 11))
+                .font(.app(.subheadline))
                 .foregroundStyle(.secondary)
                 .frame(width: 14)
-            Text(label)
-                .font(.callout)
+            Text(L10n.text(label))
+                .font(.app(.callout))
             Spacer()
             Text(value)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.app(.callout, design: .monospaced))
         }
     }
 
     private func row(icon: String, label: String, value: Int, emphasized: Bool = false) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
-                .font(.system(size: 11))
+                .font(.app(.subheadline))
                 .foregroundStyle(.secondary)
                 .frame(width: 14)
-            Text(label)
-                .font(.callout)
+            Text(L10n.text(label))
+                .font(.app(.callout))
             Spacer()
             // Exact figures here — the pill rounds, this is where you check.
             Text(value.formatted(.number.grouping(.automatic)))
-                .font(.system(size: 12, design: .monospaced))
+                .font(.app(.callout, design: .monospaced))
                 .fontWeight(emphasized ? .semibold : .regular)
         }
     }

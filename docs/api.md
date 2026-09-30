@@ -1,3 +1,5 @@
+[English](api.md) · [简体中文](zh-CN/api.md)
+
 # HTTP API
 
 Everything lives on one port (`http://localhost:11234` by default): OpenAI, Anthropic and Ollama wire protocols, plus native media generation endpoints.
@@ -56,6 +58,7 @@ Stateful chains via `previous_response_id`, full streaming SSE with per-event `s
 - `GET /v1/models` — list loaded models with capabilities + engine info
 - `POST /v1/completions` — text completions
 - `POST /v1/embeddings` — text embeddings (BERT, EmbeddingGemma, and last-token pooling models like Qwen3-Embedding; pooling follows the checkpoint's sentence-transformers metadata, `dimensions` truncates and renormalizes)
+- `POST /v1/decisions` — Laya typed decisions: `{"model", "state": <string|object>, "questions": {id: {"type": "choice"|"score"|"noul", "instructions", "criteria"}}}` returns laya's `predict` schema (`answers` with `type`, `confidence`, `action.act_probability`, plus `choice`+`probabilities`, `score`+`legend`+`probabilities`, or `noul`). An object state is serialized like Python's `json.dumps`. Limits: 64 questions (`MLX_SERVE_LAYA_MAX_QUESTIONS`), 32768 input tokens (`MLX_SERVE_LAYA_MAX_INPUT_TOKENS`), 4 MB body. `MLX_SERVE_LAYA_EMBED_INT8=1` stores the token embedding table as int8 (less memory, answers move slightly; off by default). A Kev pack (`kev_config.json`) takes the same request, `choice` criteria as an object or a list of labels, and answers without `action` (and without `confidence` on `noul`); the same question and input-token limits (the `MLX_SERVE_LAYA_*` pair above), 255 options, 8192 tokens per question including the state
 - `POST /v1/images/generations`, `POST /v1/images/edits` — image generation and instruction edits; the edits endpoint speaks the OpenAI SDK's multipart shape (`client.images.edit`), including repeated `image[]` for multi-reference
 - `POST /v1/audio/speech` — Qwen3-TTS (`ref_audio` clones a voice) or Kokoro (`voice` picks or blends one of 54), WAV out
 - `POST /v1/audio/music-generations` — text-to-music, WAV out: ACE-Step (48 kHz stereo, fast) or MiniMax Music 3 (`lyrics` required, 44.1 kHz, songs up to six minutes)
@@ -68,3 +71,15 @@ Stateful chains via `previous_response_id`, full streaming SSE with per-event `s
 - `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` — fetch / delete stored responses
 
 Every media endpoint takes `"stream": true` for SSE progress ending in a base64 `complete` payload. Video streams also accept `"preview": true` for a cheap JPEG on each denoise step (off by default; cached-velocity H3 steps stay preview-less). Media LoRAs use one grammar everywhere: `lora_paths` + `lora_scales`, up to 8, stacked.
+
+### Qwen-Image transparent PNG output
+
+`POST /v1/images/generations` accepts `"transparent": true` for Qwen-Image-2.1.
+It preserves the VAE's native fourth (alpha) channel in the returned PNG, including
+SSE `complete` responses. Omitted or `false` keeps the existing RGB output; other
+image backends return HTTP 400 when `transparent` is true.
+
+Use the [official RGBA prompt convention](https://github.com/QwenLM/Qwen-Image-2.1#transparent-image-generation-rgba), for example:
+`This is an RGBA image with transparency. A red apple. The image has alpha channel and the background is transparent.`
+The option preserves generated alpha; it does not remove a background or rewrite
+the prompt. This is output support only: input images still follow the RGB path.

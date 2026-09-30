@@ -35,6 +35,11 @@ final class CLILauncher: ObservableObject {
         detected + [.shell]
     }
 
+    /// A terminal row's host CLI, by the id it was started with.
+    nonisolated static func cli(id: String?) -> LauncherCLI? {
+        offered(detected: candidates).first { $0.id == id }
+    }
+
     init() {
         Task { await refresh() }
     }
@@ -125,17 +130,22 @@ final class CLILauncher: ObservableObject {
     /// now it runs in a terminal row of the chat window like the sandbox ones.
     static func launchCommand(_ cli: LauncherCLI, baseURL: String, servedModelId: String,
                               budget: AgentBudget.Budget, entries: [AgentModelEntry],
-                              workingDirectory: String?) -> (executable: String, args: [String]) {
+                              workingDirectory: String?, resume: Bool = false) -> (executable: String, args: [String]) {
         // pi and opencode both need their config files written before launch.
         // The budget travels with them: neither CLI reads `/v1/models` on its
         // own (pi's live list rides the extension we write), so the numbers
         // baked here ARE the contexts they believe the models have. `entries`
         // is the full chat-capable registry — the in-agent /model switch list.
         cli.prepareConfig?(baseURL, servedModelId, budget, entries)
+        if cli.requiresServer { AgentSkills.install(agentId: cli.id) }
 
         let cdLine = workingDirectory.map { "cd '\($0)'" } ?? ""
-        let script = cli.scriptBody(baseURL, servedModelId, cdLine, budget, entries)
-        let fullScript = "#!/bin/zsh -l\n\(script)\n"
+        var script = cli.scriptBody(baseURL, servedModelId, cdLine, budget, entries)
+        if resume, let args = cli.resumeArgs {
+            // Nothing to resume fails the CLI (claude: "No conversation found to continue"): start fresh then.
+            script = "mlx_agent() {\n\(script)\n}\nmlx_agent \(args) || mlx_agent"
+        }
+        let fullScript = "#!/bin/zsh -l\nexport MLX_SERVE_URL='\(baseURL)'\n\(script)\n"
 
         let filename = "mlx-launch-\(cli.id).command"
         let path = NSTemporaryDirectory() + filename
@@ -151,7 +161,7 @@ func warnIfSmallContext(agentId: String, context: Int) {
     guard let text = AgentBudget.contextWarning(agentId: agentId, context: context) else { return }
     MainActor.assumeIsolated {
         let alert = NSAlert()
-        alert.messageText = "Small context window"
+        alert.messageText = L10n.text("Small context window")
         alert.informativeText = text
         alert.alertStyle = .warning
         alert.runModal()
@@ -179,6 +189,9 @@ struct LauncherCLI: Identifiable, Equatable {
     /// A row that talks to mlx-serve refuses to start while the server is
     /// down; the plain shell does not.
     var requiresServer: Bool = true
+    /// Appended to the CLI's command line to continue its last conversation
+    /// in the working directory (a terminal row restored after a restart).
+    var resumeArgs: String? = nil
     /// Shell body that sets env vars and execs the CLI. Does NOT include the
     /// shebang. `entries` = the chat-capable registry snapshot (opencode bakes
     /// it into its inline config; pi/Claude Code ignore it — pi's list is
@@ -201,11 +214,12 @@ extension LauncherCLI {
         iconSystemName: nil,
         useClaudeIcon: true,
         prepareConfig: nil,
+        resumeArgs: "--continue",
         scriptBody: { baseURL, model, cdLine, budget, _ in
             """
             \(AgentConfigs.claudeCodeExports(baseURL: baseURL, model: model, budget: budget))
             \(cdLine)
-            claude --model \(model)
+            claude --dangerously-skip-permissions --plugin-dir "$HOME/.mlx-serve/\(AgentSkills.claudePluginDir)" --model \(model) "$@"
             """
         }
     )
@@ -249,11 +263,12 @@ extension LauncherCLI {
                 .write(toFile: (extDir as NSString).appendingPathComponent("mlx-models.js"),
                        atomically: true, encoding: .utf8)
         },
+        resumeArgs: "--continue",
         scriptBody: { _, model, cdLine, _, _ in
             """
             export PI_CODING_AGENT_DIR="$HOME/.mlx-serve/pi"
             \(cdLine)
-            pi --provider mlx --model \(model)
+            pi --provider mlx --model \(model) "$@"
             """
         }
     )
@@ -277,12 +292,13 @@ extension LauncherCLI {
                 .write(toFile: (dir as NSString).appendingPathComponent("models.yml"),
                        atomically: true, encoding: .utf8)
         },
+        resumeArgs: "--continue",
         scriptBody: { _, model, cdLine, _, _ in
             """
             export PI_CODING_AGENT_DIR="$HOME/.mlx-serve/omp"
             export OMP_CODING_AGENT_DIR="$HOME/.mlx-serve/omp"
             \(cdLine)
-            omp --model mlx/\(model)
+            omp --model mlx/\(model) "$@"
             """
         }
     )
@@ -310,12 +326,13 @@ extension LauncherCLI {
             "$HOME/Applications/ChatGPT.app/Contents/Resources/codex",
             "$HOME/Applications/Codex.app/Contents/Resources/codex",
         ],
+        resumeArgs: "resume --last",
         scriptBody: { _, _, cdLine, _, _ in
             """
             export CODEX_HOME="$HOME/.mlx-serve/codex"
             \(AgentConfigs.codexBinResolver)
             \(cdLine)
-            "$CODEX_BIN"
+            "$CODEX_BIN" "$@"
             """
         }
     )
@@ -340,11 +357,12 @@ extension LauncherCLI {
                 .write(toFile: (dir as NSString).appendingPathComponent(".env"),
                        atomically: true, encoding: .utf8)
         },
+        resumeArgs: "--continue",
         scriptBody: { _, _, cdLine, _, _ in
             """
             export HERMES_HOME="$HOME/.mlx-serve/hermes"
             \(cdLine)
-            hermes
+            hermes "$@"
             """
         }
     )
@@ -364,12 +382,13 @@ extension LauncherCLI {
                 .write(toFile: (dir as NSString).appendingPathComponent("model-metadata.json"),
                        atomically: true, encoding: .utf8)
         },
+        resumeArgs: "--restore-chat-history",
         scriptBody: { baseURL, model, cdLine, _, _ in
             """
             export OPENAI_API_BASE='\(baseURL)/v1'
             export OPENAI_API_KEY=mlx-serve
             \(cdLine)
-            aider --model openai/\(model) --weak-model openai/\(model) --model-metadata-file ~/.mlx-serve/aider/model-metadata.json
+            aider --model openai/\(model) --weak-model openai/\(model) --model-metadata-file ~/.mlx-serve/aider/model-metadata.json "$@"
             """
         }
     )
@@ -386,6 +405,7 @@ extension LauncherCLI {
         iconSystemName: "chevron.left.forwardslash.chevron.right",
         useClaudeIcon: false,
         prepareConfig: nil,
+        resumeArgs: "--continue",
         scriptBody: { baseURL, model, cdLine, budget, entries in
             // Full chat-capable list — opencode's in-session /models picker
             // shows exactly what this config declares. The served model is
@@ -398,7 +418,7 @@ extension LauncherCLI {
             return """
             export OPENCODE_CONFIG_CONTENT='\(AgentConfigs.opencodeJSON(baseURL: baseURL, defaultModel: model, entries: list))'
             \(cdLine)
-            opencode --model mlx/\(model)
+            opencode --model mlx/\(model) "$@"
             """
         }
     )
@@ -425,6 +445,7 @@ extension LauncherCLI {
             try? json.write(toFile: (cliDir as NSString).appendingPathComponent("cli.json"),
                             atomically: true, encoding: .utf8)
         },
+        resumeArgs: "--continue",
         scriptBody: { baseURL, model, cdLine, budget, entries in
             var list = entries
             if !list.contains(where: { $0.id == model }) {
@@ -435,7 +456,7 @@ extension LauncherCLI {
             export XDG_CONFIG_HOME="$HOME/.mlx-serve/opencode2"
             \(cdLine)
             if ! command -v opencode2 >/dev/null 2>&1; then echo "opencode2 is not installed: npm install -g @opencode/cli"; exit 127; fi
-            opencode2 --standalone
+            opencode2 --standalone "$@"
             """
         }
     )
@@ -492,10 +513,11 @@ struct CLILauncherButton: View {
 
     var body: some View {
         Group {
-            if !detector.hasScanned {
-                // Still scanning — reserve the space with a placeholder so the
-                // footer doesn't reflow when scan finishes a moment later.
-                Color.clear.frame(width: 0, height: 0)
+            if !isEnabled || !detector.hasScanned {
+                // A disabled Menu with a plain button style draws no label, so
+                // the tile vanished with the server; show the gray face instead.
+                TrayTileFace(icon: "terminal", title: "Code", isEnabled: false)
+                    .help(isEnabled ? "Scanning for coding agents…" : "Start the server to launch a coding agent")
             } else {
                 Menu {
                     CLILauncherMenuItems(detector: detector, baseURL: baseURL,
@@ -519,7 +541,6 @@ struct CLILauncherButton: View {
                 .menuIndicator(.hidden)
                 .frame(maxWidth: .infinity)
                 .onHover { hovering = $0 }
-                .disabled(!isEnabled)
                 .help("Launch a coding agent — on this Mac (\(detector.available.isEmpty ? "none detected" : detector.available.map(\.displayName).joined(separator: ", "))) or inside the sandbox (pi, hermes)")
             }
         }
@@ -548,7 +569,7 @@ struct CLILauncherMenuItems: View {
                     Button {
                         openHostCLI(cli)
                     } label: {
-                        Label(cli.displayName, systemImage: cli.iconSystemName ?? "terminal")
+                        Label(L10n.text(cli.displayName), systemImage: cli.iconSystemName ?? "terminal").font(.app(.body))
                     }
                 }
             }
@@ -558,13 +579,13 @@ struct CLILauncherMenuItems: View {
                 Button {
                     openSandboxAgent(spec.id)
                 } label: {
-                    Label("\(spec.displayName) in Sandbox", systemImage: "shippingbox")
+                    Label("\(spec.displayName) in Sandbox", systemImage: "shippingbox").font(.app(.body))
                 }
             }
             Button {
                 openSandboxAgent(nil)
             } label: {
-                Label("Shell in Sandbox", systemImage: "terminal")
+                Label("Shell in Sandbox", systemImage: "terminal").font(.app(.body))
             }
         }
     }

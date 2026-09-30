@@ -774,3 +774,85 @@ Also found on the way: a headless layout test must hold the `NSTextStorage`. The
 The agent's `browse`/`webSearch` tools drive `BrowserManager.webView` with no Browser pane open, and pages read `window.outerWidth/outerHeight` as 0 — a headless-bot signal. First guess was the missing NSWindow: hosting the view in a hidden window (even ordered in, alpha 0) still read 0. Cause: WebKit's `UIDelegate::windowFrame` returns an empty rect unless the UI delegate implements the private `_webView:getWindowFrameWithCompletionHandler:`. Fix: `WindowFrameUIDelegate` answers with the host window's frame; the Browser pane re-parents the same view and hands it back via `returnToHost` on dismantle. Compiled out under `MAS_BUILD` (no private selector in the store binary), so that build keeps the old behaviour. `document.visibilityState` still reads `hidden` while the view is not on screen — a second signal, not addressed. Guard: `BrowserHostWindowTests` (JS-level, red without the delegate).
 
 Same round: the URL bar stopped following the page after the first tool navigation, because `navigate()` installed a fresh one-shot `WKNavigationDelegate` per call and overwrote the `BrowserView` coordinator's — link clicks, back/forward and SPA `pushState` then published nothing. One persistent delegate now lives on the manager and the bar's state is KVO on the webView (`url` fires for same-document navigations too). `navigate` also forced `https://` onto everything, so `localhost:3000` and `index.html` were unreachable; `resolveURL` decides per target and `browse{action:"show"}` opens the window for the user (confirm + title only, never the page text — the model asks for content when it wants it). Guard: `BrowserNavigationTests` (pushState case is the one that catches a delegate-only fix).
+
+## The Create panes were relaid out model-first, and four SwiftUI traps came with it (2026-09-16)
+
+The Voice and Music panes read top to bottom as model, inputs, options, Generate: the model decides what everything under it means (whether there is a voice to clone, whether source-audio modes exist, what Advanced holds), and it used to sit in the middle of the form with its transfer bar down beside Generate. The drop targets, the chips above a text box and the resize handle became one type each, because each of them already existed twice and only one copy was ever fixed.
+
+Four traps, all of them silent:
+
+`.menuStyle(.borderlessButton)` hands the label to AppKit, which keeps its text and throws its background away, then draws its own indicator — a `Menu` styled as a chip came out as plain text with a system chevron on the wrong side. `.menuStyle(.button)` renders the label as a real button, so the chip survives and the chevron can sit inside it (`PaneChipMenu`).
+
+A drag handle placed BELOW the box it resizes must measure in `coordinateSpace: .global`. The default `.local` is the handle's own space, which moves as the box grows, so the translation subtracts its own effect: solving `h = base + (mouse - h)` gives half the cursor's speed, re-solved every frame, which reads as the handle chasing the pointer. The video pane's prompt handle had shipped like that; both now share `EditorResizeHandle`.
+
+A focused number box that declines every change to its bound value also declines values nobody typed. The guard exists so a repaint cannot move the caret mid-edit, but it also swallowed a tempo picked from the menu beside the box, which then only appeared when focus left. `NumberFieldRepaint.shouldRepaint` asks instead whether the value matches what the box itself would read: the box's own typing round-trips and is left alone, anything else is painted.
+
+`.frame(maxWidth: .infinity)` CENTRES without an `alignment:`, and a `LazyVGrid` divides its width into equal columns whether the cells need them or not — a 64pt box and a 210pt menu sat a column apart with nothing between them. `FlowLayout` packs subviews at their own widths and wraps, reporting no more width than it is offered, which is what keeps one long menu label from setting the pane's minimum width (the 2026-08-22 regression that put the column under the sidebar).
+
+Bonus, found while reading: a drop-target section carries `.padding(6)` for its dashed highlight whether or not a drag is in the air, so a section that happens to be a drop target has 6pt more outer rhythm than one that is not.
+
+## A clipped `.fill` image still takes the pointer (2026-09-20)
+The References well shows pictures as 84pt squares, `.fill` inside a `.clipShape`, with a remove badge in the top-right corner. Some badges took no click and no hover, "randomly", and worked again once the grid re-wrapped. Cause: `.fill` overflows the square (a widescreen photo is ~150pt wide), `.clipShape` clips the DRAWING only, and a later sibling wins the hit test — each landscape tile's left overhang covered the badge of the tile before it, and the last tile stayed live a third of a tile past its edge. Portraits overhang vertically, which is why the first three tiles were fine and it looked random. Fix: `contentShape` beside the clip. The chat composer's chips never hit it because their badge is offset OUTSIDE the square. Guard: none possible in the suite; the rule is in `app/CLAUDE.md`.
+
+## An overlay is proposed the size of the view it sits on (2026-09-20)
+The tile's hover bubble carries the whole picture, and every preview came out a third of the size. `HoverReveal` draws the bubble as an overlay of the tile, an overlay is proposed the tile's own 84pt, and a fit image with `maxWidth`/`maxHeight` sizes to the proposal, so the cap was the tile. Same trap as the prompt bubble's width. Fix: `previewSize` computes the fitted size from the picture's aspect and the frame is explicit. Guard: `ReferencePreviewTests`.
+
+## `onGeometryChange` fires when its value changes, so return the answer (2026-09-20)
+Three observers returned raw rects and widths, so a window drag wrote pane state on every frame and rebuilt the whole pane with it — the resize dragged. Returning a Bool at a threshold, an Int, or a rect quantised to 8pt fires only when the answer changes. And never measure the thing whose size depends on the answer: a `fixedSize` menu never re-fits once the segmented picker has shrunk, and a grid chunked from its own container's width goes into one long row and stays there (the row widens the form, the form measures as room for the row). Rows are decided inside the layout pass, or by the container: `LazyVGrid` with `adaptive(minimum:maximum:)` at ONE value packs fixed cells leading. A `ViewThatFits` over a segmented `Picker` never picks the fallback either, because the picker accepts any width and squeezes.
+
+## A padded stack that will not compress is centred by the ScrollView (2026-09-20)
+A child that refuses to compress makes the padded form wider than its column, and `ScrollView` centres content it cannot fit, so the overflow hangs off the leading edge. The fix is a full-width, leading-aligned frame with the padding INSIDE it; with the frame inside the padding the frame takes the column and the padding adds 32pt on top, which moves the form by less but still moves it. All three relaid panes carry the frame now.
+
+## A mixed drop was truncated before the router saw it (2026-09-20)
+Drop fourteen files on the references after removing three images and nothing lands: `MediaDropLoader` took the first `limit` files in drop order, which were the three still attached, and `H3RefDrop.route` refused them as duplicates. The router spends the per-type and combined caps itself, so the mixed slot hands it everything (`MediaDrop.deliverable`); a typed slot still spends its room in the loader. The drop path also did not dedupe while the picker did, and the tiles are identified by file, so a repeated URL rendered one tile and misnumbered the rest; hydrate is a third way in and dedupes too. Guard: `MediaDropTests`.
+
+## The video canvas rounded up where the server only checks (2026-09-20)
+`ResolutionGrid.snap` rounds up because the IMAGE handlers rewrite an off-grid size upward and the hint must name what the server will generate. The VIDEO handlers refuse an off-grid canvas, so the pane's snap is the one that counts, and 460 became 512 with 448 twelve pixels away. `ResolutionGrid.Rounding` is per grid: `.up` on the image presets, `.nearest` on the video ones. Guard: `CustomResolutionTests`.
+
+## The Video pane's draft was never in its settings blob (2026-09-20)
+The Create panes unmount on navigation, so a field not in the settings blob dies on a trip to Chat: the video pane lost its prompt, both anchors, every reference and the attached or generated clip that way, and its decoder had never listed four knobs (refine steps, audio guidance, chained windows, the DiffVAE toggle), which came back as defaults on every launch. Fix: the Music mechanism — `stickySnapshot` is the whole blob computed from state, one `onChange` saves it, files ride as paths checked on hydrate. A reference whose file is gone renumbers the tiles, so the pane flags it beside the heading until the prompt or the references are next touched. Guards: `MediaGenSettingsTests` (every field off its default).
+
+## The UI process pegged a core while a reply streamed (2026-09-20)
+MLXCore (the UI, not mlx-serve) sat near 100% of a core during any generation. Four causes, found with `sample <pid>` and a 1 Hz `top` log while `osascript` drove the window:
+- A per-frame `TimelineView(.animation)` wrapped the generating row's `Text`s, so every frame re-measured text and the window's min-size pass with it. Even cut down to the spinner alone, a SwiftUI timeline re-renders the window's whole hosting view per frame. The rings are a `CAShapeLayer` animation now (`ActivityRings`): the render server spins them, the app only sets arc length on the 0.5 s poll.
+- The `App` struct observed `AppState`, which publishes every streamed batch, so every scene root was rebuilt per batch (and `BenchmarkView.init` re-read IOKit each time). The struct HOLDS its objects (`Roots`, built lazily at first body because `AppState.init` needs `NSApp`); what the scene graph reads lives in small observing views (`MenuBarLabel`, `WelcomePresenter`, `ModelSettingsWindowRoot`, `DeleteChatCommand`).
+- One growing `Text` for the expanded reasoning was re-measured whole through CoreText several times per batch by the window's size-constraint pass, O(n) per batch and climbing. While it streams it is one `Text` per line (`StreamingLines`); selection returns when it stops.
+- Every batch re-rendered every transcript row and re-ran the LaTeX segmenter and inline markdown over the whole reply. `MessageBubble` is `Equatable` (callbacks compared by presence), `LaTeXSegmenter` returns early with no `$` or `\`, and `renderInline` is cached per block, so only the growing tail renders.
+Also: model and user text went through `L10n.text` (a bundle lookup keyed on the whole string), and the UI flush is 10 Hz. Measured on a FAST_DEV build, streaming a long markdown reply: 74% mean / 87% max before, about 45% after; idle 0%. What is left is not app code: each of the ~8 batches a second costs about 50 ms because `AppState.chatSessions` publishing invalidates the whole window, and a batch that changes nothing visible (thinking, collapsed) costs nearly as much as one that does. The fix for that is a per-message observable for the streaming text; owed. Guards: `MessageBubbleEquatableTests`, `StreamingLinesTests`, `HeldValueTests`.
+
+## A semantic font is a NAME, not a size (2026-09-26)
+macOS has no dynamic type. `NSFont.preferredFont(forTextStyle: .body)` hands every user 13pt, and SwiftUI's `.dynamicTypeSize(_:)` — an iOS environment — does not move a semantic font on this platform at all. Measured with `ImageRenderer` at 1×: a `Text` at `.body` rasterizes to the same height under `.xSmall`, under `.large` and under `.accessibility4`, and the same again with no step applied, while the same renderer tracks a stated point size faithfully (11pt→14px, 13pt→16px, 20pt→24px, 40pt→47px) — so the flatness is the platform's, not the probe's.
+
+That is what a PR got wrong, and it failed quietly. It made the app-wide Text Size a percentage and scaled it through `dynamicTypeSize`, so typing 150 % moved the chat transcript and nothing else: the transcript is AppKit, and it multiplied the number itself (`ChatMetrics.transcriptFontSize`), while every SwiftUI pane sat at 100 %. The tests stayed green because they only asserted which `DynamicTypeSize` a percentage mapped to — never that anything rendered larger — and a second defect hid behind the first, the modifier read the value straight off `UserDefaults` without observing it, so even a re-render needed a relaunch.
+
+The fix is a ladder rather than a percentage: `AppType` holds macOS's own sizes with a floor of 11 (26 / 22 / 17 / 15 / 13 / 12 / 11), `Font.app(_:)` is the only way a SwiftUI view states a size and `AppType.system` / `.monospaced` the only way an AppKit one does, and the chat transcript keeps its own four-step picker because snapping its ladder would collapse the prose/code gap its own comment documents. An even-only snap with a floor of 12 was tried and read a size too big next to Notes: body is 13 on macOS, keep it there.
+
+The lesson that generalises: a name that looks like it implies a behaviour is not a behaviour. Guards: `SystemTypeTests` fails the build on a stated point size, a bare `.font(.body)`, a step that is odd or under 12, a name the table does not define, and a step that has drifted from the system size it names; the console is the same rule in `rem`, pinned by `tests/html_console_test.mjs`.
+## A control's title is not your text (2026-09-27)
+The type ladder passed every test and 183 `Button("…")` titles were still at
+whatever AppKit drew. `.font()` does not reach a button's title on macOS: the
+same button measured 317px wide with a 12pt font and 317px with a 24pt one, and
+the same held for `.bordered`, `.destructive` and `.controlSize(.small)`. A
+`Picker` splits — `.radioGroup` and `.inline` draw their own text and take a
+font, `.automatic`, `.menu` and `.segmented` are NSPopUpButton and
+NSSegmentedControl and do not — which is worse than a uniform rule, because the
+style decides.
+
+Passing the title as the label is what works, in every style:
+
+    Button { … } label: { Text("Cancel").font(.app(.value)) }   // 298px → 515px
+
+Two Swift shapes bite on the rewrite. A trailing closure sits OUTSIDE the
+parenthesised argument list, so a scanner that reads `Button(…)` alone sees no
+action and writes `label:` in front of it. And Swift will not mix a labelled
+`action:` argument with a trailing `label:` — `Button(action: f) label: { … }` is
+a syntax error, so that shape has to become `Button(action: f, label: { … })`.
+
+## A guard that scans too much passes for the wrong reason (2026-09-27)
+`ancestorSetsSize` looked for a font anywhere between a block's opening line and
+two lines past its close. That made an unrelated SIBLING's `.app(…)` vouch for a
+bare `Text` elsewhere in the same body — so 62 real offenders sat in `main` with
+the guard green. A font is inherited through the trailing-modifier idiom: the
+block's own last line, or the couple of lines after its closing brace. Scanning
+only there surfaced every one of them, and a probe injected into a view the old
+window waved through now fails.

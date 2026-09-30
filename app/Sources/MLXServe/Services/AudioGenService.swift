@@ -49,7 +49,7 @@ final class AudioGenService: ObservableObject {
         }
 
         task?.cancel()
-        phase = .running(step: 0, total: 3, message: "Loading model…")
+        phase = .running(step: 0, total: 3, message: L10n.text("Loading model…"))
         log = []
 
         let outputPath = Self.makeOutputPath(text: request.text)
@@ -60,7 +60,10 @@ final class AudioGenService: ObservableObject {
         // already normalized to 24 kHz mono WAV by AudioReference. Send it
         // base64 as `ref_audio`; the server runs it through the ECAPA-TDNN
         // speaker encoder and conditions the talker on it.
-        let refB64: String? = request.refAudioPath.flatMap { path in
+        // Gated on the PRESET, here rather than in the pane: a model that
+        // cannot clone answers a named 400, and a clip left behind by a model
+        // switch must not reach it from the chat tool either.
+        let refB64: String? = AudioGenRequest.clonableReference(request).flatMap { path in
             (try? Data(contentsOf: URL(fileURLWithPath: path)))?.base64EncodedString()
         }
 
@@ -87,17 +90,17 @@ final class AudioGenService: ObservableObject {
                     case "progress":
                         let step = ev["step"] as? Int ?? 0
                         let total = ev["total"] as? Int ?? 0
-                        let stage = ev["stage"] as? String ?? "Generating audio"
+                        let stage = ev["stage"] as? String ?? L10n.text("Generating audio")
                         // ~0.08s of audio per talker frame (1920 samples @ 24 kHz).
                         let secs = Double(step) * 1920.0 / 24000.0
                         let msg = total == 0 && step > 0
-                            ? String(format: "%@ — ~%.1fs", stage, secs) : "\(stage)…"
+                            ? L10n.format("%@ — ~%.1fs", L10n.text(stage), secs) : L10n.format("%@…", L10n.text(stage))
                         phase = .running(step: step, total: total, message: msg)
                     case "complete":
                         if let b64 = ev["data"] as? String { wav = Data(base64Encoded: b64) }
                     case "error":
                         await releaseIfNeeded()
-                        phase = .failed(ev["message"] as? String ?? "Synthesis failed.")
+                        phase = .failed(ev["message"] as? String ?? L10n.text("Synthesis failed."))
                         return
                     default:
                         break
@@ -156,7 +159,7 @@ final class AudioGenService: ObservableObject {
             var wav: Data? = nil
             var reqJson: [String: Any] = ["model": modelId, "input": request.text,
                                           "speed": request.speed]
-            if let ref = request.refAudioPath,
+            if let ref = AudioGenRequest.clonableReference(request),
                let data = try? Data(contentsOf: URL(fileURLWithPath: ref)) {
                 reqJson["ref_audio"] = data.base64EncodedString()
             }
@@ -222,7 +225,7 @@ final class AudioGenService: ObservableObject {
             "speed: \(String(format: "%.2f", request.speed))",
             "temperature: \(String(format: "%.2f", request.temperature))",
         ]
-        if let ref = request.refAudioPath, !ref.isEmpty {
+        if let ref = AudioGenRequest.clonableReference(request) {
             lines.append("reference_voice: \((ref as NSString).lastPathComponent)")
         }
         let refText = request.refText.trimmingCharacters(in: .whitespacesAndNewlines)

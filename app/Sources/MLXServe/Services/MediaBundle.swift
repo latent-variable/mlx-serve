@@ -22,9 +22,16 @@ struct FileSelection: Equatable {
     /// per quant subfolder (see `MlxVariant`); each is fetched into its own
     /// model dir, so the prefix must come off on the way to disk.
     var subfolder: String? = nil
+    /// When set, pull ONLY this subfolder's files and KEEP the prefix: a pack's
+    /// `drafter/` lands at `<model_dir>/drafter/`, where the server finds it.
+    var packFolder: String? = nil
 
     /// Chat-model default: top-level files + `mtp/`, all needed extensions.
     static let chatDefault = FileSelection()
+
+    static func packFolder(_ folder: String) -> FileSelection {
+        FileSelection(packFolder: folder)
+    }
 
     /// One quant subfolder of a multi-variant MLX repo.
     static func mlxVariant(_ folder: String) -> FileSelection {
@@ -165,6 +172,43 @@ extension MediaBundle {
                     repo: repo,
                     selection: FileSelection(recursive: true),
                     readyMarkers: ["config.json", "model.safetensors", "voices.safetensors", "g2p"]
+                ),
+            ],
+            sizeEstimateGB: sizeGB
+        )
+    }
+
+    /// Laya typed decisions (`POST /v1/decisions`): one small repo, no root
+    /// config.json. Markers are the two configs discovery keys on plus the
+    /// weights and the tokenizer the encoder cannot run without.
+    static func laya(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
+        MediaBundle(
+            id: "laya:\(repo)",
+            displayName: displayName,
+            components: [
+                MediaComponent(
+                    repo: repo,
+                    selection: FileSelection(recursive: true),
+                    readyMarkers: ["rl_agent_config.json", "encoder/config.json", "model.safetensors", "tokenizer/tokenizer.json"]
+                ),
+            ],
+            sizeEstimateGB: sizeGB
+        )
+    }
+
+    /// Kev typed decisions: a Qwen3.5 trunk plus the pointer head. Markers
+    /// are the head, its config, the trunk's config and weight index, and the
+    /// tokenizer; the weights index covers both one-file and sharded packs.
+    static func kev(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
+        MediaBundle(
+            id: "kev:\(repo)",
+            displayName: displayName,
+            components: [
+                MediaComponent(
+                    repo: repo,
+                    selection: FileSelection(recursive: true),
+                    readyMarkers: ["kev_config.json", "kev_head.safetensors", "config.json",
+                                   "model.safetensors.index.json", "tokenizer.json"]
                 ),
             ],
             sizeEstimateGB: sizeGB
@@ -438,6 +482,23 @@ extension MediaBundle {
         )
     }
 
+    /// Qwen-Image-2.1 (mlx-serve pack): the diffusers layout plus the root
+    /// `config.json` our converter writes LAST, which is what names the backend.
+    static func qwenImage(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
+        MediaBundle(
+            id: "qwenimage:\(repo)",
+            displayName: displayName,
+            components: [
+                MediaComponent(
+                    repo: repo,
+                    selection: FileSelection(recursive: true),
+                    readyMarkers: ["config.json", "transformer", "vae", "text_encoder", "processor"]
+                ),
+            ],
+            sizeEstimateGB: sizeGB
+        )
+    }
+
     /// The subdirectory LTX 2.5 ships its own text encoder in. Cross-pinned
     /// with the server's `ltx_video.LtxVersion.textEncoderSubdir` — the server
     /// resolves the encoder from this exact path, so a rename here silently
@@ -463,6 +524,8 @@ extension ImageModelPreset {
             return .krea(repo: repo, displayName: name, sizeGB: Double(approxDownloadGB))
         case .mageFlowTurbo, .mageFlowEditTurbo:
             return .mageFlow(repo: repo, displayName: name, sizeGB: Double(approxDownloadGB))
+        case .qwenImage21:
+            return .qwenImage(repo: repo, displayName: name, sizeGB: Double(approxDownloadGB))
         case .flux2Klein9B, .flux2Klein9BBase:
             // The MLX conversions of klein 9B — distilled and base alike —
             // ship no root config.json.

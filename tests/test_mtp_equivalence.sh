@@ -31,12 +31,12 @@
 #   MTP_EXPECT_AUTO_PROFILE=g17_nax_q4_gs64 MTP_EXPECT_AUTO_DEPTH=8 \
 #     MTP_TEST_MODEL=<model-dir> ./tests/test_mtp_equivalence.sh
 #
-# MoE trunks (35B-A3B, qwen4_exp) keep MTP default-OFF per request; set
-# MTP_FORCE_ENABLE=1 to inject "enable_mtp":true into every request body so
-# engagement + acceptance-floor checks exercise the MoE head arm.
+# MTP_FORCE_ENABLE=1 injects "enable_mtp":true into every request body (a
+# no-op now that every loaded head, MoE included, drafts by default).
 
 set -u
-MODEL="${MTP_TEST_MODEL:-$HOME/.mlx-serve/models/ddalcu/Qwen3.8-27B-MLX-Serve-4bit}"
+source "$(dirname "$0")/_lib_models.sh"
+MODEL="${MTP_TEST_MODEL:-$(find_model ddalcu/Qwen3.8-27B-MLX-Serve-4bit ddalcu/Qwen3.8-27B-MLX-Serve-iQ-MLX-3.8bpw)}"
 PORT="${1:-11313}"
 BIN="./zig-out/bin/mlx-serve"
 # ~24 tokens of prefix. Mirrors the PLD/KV-quant first-N thresholds: INT4
@@ -63,6 +63,7 @@ checkpoint_has_mtp_head() {
         [ -f "$MODEL/mtp.safetensors" ] ||
         [ -f "$MODEL/model-mtp.safetensors" ] ||
         [ -f "$MODEL/optiq/mtp.safetensors" ] ||
+        [ -f "$MODEL/mtp_head.safetensors" ] ||
         python3 - "$MODEL" <<'PY'
 import json
 import pathlib
@@ -299,8 +300,16 @@ fi
 # 3.5/3.6 checkpoint is hd 256 with GDN layers, so both fusions must fire on
 # the verify widths this server just ran. Output equality alone is blind to a
 # decline gate quietly routing everything back to the composed chain.
-for ENGAGE_LINE in "\[attn\] fused QK-norm+RoPE (hd-256) engaged" "\[gdn\] packed prework engaged"; do
-    if grep -q "$ENGAGE_LINE" "$LOG"; then
+# Nemotron-H (Mamba2 + hd-128 attention) has its own kernels; its engagement
+# line is the fused Mamba2 step.
+ARCH=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1] + '/config.json')).get('model_type', ''))" "$MODEL" 2>/dev/null)
+if [ "$ARCH" = "nemotron_h" ]; then
+    ENGAGE_LINES=("\[mamba2\] fused step engaged")
+else
+    ENGAGE_LINES=("\[attn\] fused QK-norm\+RoPE \(hd-256\) engaged" "\[gdn\] (packed prework|verify recur|verify fold) engaged")
+fi
+for ENGAGE_LINE in "${ENGAGE_LINES[@]}"; do
+    if grep -qE "$ENGAGE_LINE" "$LOG"; then
         echo "PASS [engaged: $ENGAGE_LINE]"; PASS=$((PASS+1))
     else
         echo "FAIL [not engaged: $ENGAGE_LINE] — fused path silently declined"; FAIL=$((FAIL+1))
@@ -319,18 +328,25 @@ else
 fi
 
 # EV-controller engagement (dispatch-hole lesson: output equality can't see a
-# silent fallback). An ECHO workload is the max-confidence case: past the
-# ~10-round warmup the chain confidence clears any tau, so chunk-B extension
-# must fire (ext_rounds > 0 in [spec-stats]) under the adaptive default.
+# silent fallback). An ECHO workload is the max-acceptance case: the adaptive
+# controller must climb past the warmup depth (mean drafted depth > 2).
 ECHO_PROMPT="Repeat the following code block back EXACTLY as written, no commentary: def gcd(a, b):\\n    while b:\\n        a, b = b, a % b\\n    return a\\n\\ndef fib(n, memo={}):\\n    if n in memo: return memo[n]\\n    if n < 2: return n\\n    memo[n] = fib(n-1, memo) + fib(n-2, memo)\\n    return memo[n]\\n\\ndef reverse_string(s):\\n    out = ''\\n    for ch in s:\\n        out = ch + out\\n    return out"
 curl -s "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: application/json' -d "{
     $OPTIN\"model\":\"default\",\"stream\":false,\"temperature\":0,\"max_tokens\":160,
     \"messages\":[{\"role\":\"user\",\"content\":\"$ECHO_PROMPT\"}]}" >/dev/null
-EXT=$(grep -o 'ext_rounds=[0-9]*' "$LOG" | tail -1 | cut -d= -f2)
-if [ "${EXT:-0}" -gt 0 ]; then
-    echo "PASS [EV chunk-B extension engages on echo] (ext_rounds=$EXT)"; PASS=$((PASS+1))
+ECHO_STATS=$(grep 'spec-stats\] mode=mtp' "$LOG" | tail -1)
+# Prompt lookup (default on) serves most echo rounds; its rounds and drafts count too.
+ECHO_LOOKUP=$(echo "$ECHO_STATS" | grep -o 'lookup=[0-9]*/[0-9]*' | cut -d= -f2)
+ECHO_ROUNDS=$(( $(echo "$ECHO_STATS" | grep -o 'attempts=[0-9]*' | cut -d= -f2) + ${ECHO_LOOKUP%%/*} ))
+ECHO_DRAFTED=$(( $(echo "$ECHO_STATS" | grep -o ' drafted=[0-9]*' | cut -d= -f2) + ${ECHO_LOOKUP##*/} ))
+if [ "$ARCH" = "nemotron_h" ]; then
+    # A MoE trunk pays per verify row (more experts routed), so the controller
+    # correctly keeps this head at depth 1-2; the auto cap is 2 (ModelConfig.mtpDepth).
+    echo "SKIP [EV controller climb] (nemotron_h: depth capped at 2; drafted=$ECHO_DRAFTED over $ECHO_ROUNDS rounds)"
+elif [ "${ECHO_ROUNDS:-0}" -gt 0 ] && [ "${ECHO_DRAFTED:-0}" -gt $((2 * ECHO_ROUNDS)) ]; then
+    echo "PASS [EV controller climbs on echo] (drafted=$ECHO_DRAFTED over $ECHO_ROUNDS rounds)"; PASS=$((PASS+1))
 else
-    echo "FAIL [EV chunk-B extension]: ext_rounds=${EXT:-none} on a max-confidence echo — extension path never fired"
+    echo "FAIL [EV controller climb]: drafted=${ECHO_DRAFTED:-none} over ${ECHO_ROUNDS:-none} rounds on a max-acceptance echo — depth never rose"
     FAIL=$((FAIL+1))
 fi
 if [ -n "$EXPECT_AUTO_DEPTH" ]; then
@@ -370,10 +386,12 @@ curl -s "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: applicati
 FIXED_STATS=$(grep -o '\[spec-stats\] mode=mtp.*' "$LOG" | tail -1)
 FIXED_EXT=$(echo "$FIXED_STATS" | grep -o 'ext_rounds=[0-9]*' | cut -d= -f2)
 FIXED_DEPTH=$(echo "$FIXED_STATS" | grep -o ' depth=[0-9]*' | grep -o '[0-9]*')
-if [ "${FIXED_EXT:-1}" = "0" ] && [ "${FIXED_DEPTH:-0}" = "3" ]; then
-    echo "PASS [MLX_SERVE_MTP_ADAPTIVE=0 reverts to fixed depth 3, no extension]"; PASS=$((PASS+1))
+# The cap the server resolved (3 by default; a Hadamard pack pins 2).
+CAP_DEPTH=$(grep -o 'MTP head ready (depth=[0-9]*' "$LOG" | tail -1 | grep -o '[0-9]*$')
+if [ "${FIXED_EXT:-1}" = "0" ] && [ "${FIXED_DEPTH:-0}" = "${CAP_DEPTH:-3}" ]; then
+    echo "PASS [MLX_SERVE_MTP_ADAPTIVE=0 reverts to fixed depth ${CAP_DEPTH:-3}, no extension]"; PASS=$((PASS+1))
 else
-    echo "FAIL [adaptive kill switch]: depth=${FIXED_DEPTH:-none} ext_rounds=${FIXED_EXT:-none} (want depth=3 ext_rounds=0)"
+    echo "FAIL [adaptive kill switch]: depth=${FIXED_DEPTH:-none} ext_rounds=${FIXED_EXT:-none} (want depth=${CAP_DEPTH:-3} ext_rounds=0)"
     FAIL=$((FAIL+1))
 fi
 stop_server

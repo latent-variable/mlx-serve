@@ -2,6 +2,9 @@
 
 Full histories: live failures, measurements, diagnosis ladders, dead ends. The distilled RULES live in the root CLAUDE.md "Rules" section — when a rule changes, update the story here too. New gotchas in this domain: add the 1-3 line rule to root, the full story here.
 
+### Five request edges that answered 200 with the wrong thing (2026-09-16)
+A one-model sweep of malformed and out-of-range bodies (`tests/test_api_edges.sh`, 58 checks over the four text surfaces + Ollama) found five silent misbehaviours, none crashing, all answering: `stop: ""` (and `""` inside a stop array) matched at position 0 and returned an empty reply with `finish_reason: stop`; `response_format: {type: json_schema}` with no `schema`, or a non-object one, fell open to prompt-only JSON and shipped `{"text": "Hello".}`; an `image_url` the server could not decode — a remote `http://` URL (never fetched), bad base64, an unreadable payload — was dropped from the prompt and the model answered "Since you haven't provided an image" with a 200, on all three surfaces; an empty `/v1/embeddings` input was a 500; and Ollama's load handshake (`/api/generate` with no prompt, what open-webui sends to warm a model) was a 400. Fixes: empty stops are skipped at every parse site; a `json_schema` without an object schema is a named 400 on all three surfaces (`output_config.format` and `text.format` fell open the same way); `appendImageUrlContent` reports whether it appended and an active-turn image that did not is a named 400 on chat, messages and responses (historical images are never decoded, so never refused); empty embedding entries are a 400; the handshake answers `done: true, done_reason: load` without a forward. Guards: `tests/test_api_edges.sh`, `parseInput records an input_image the decoder could not read` (responses.zig), `ollama: generate with no prompt is the load handshake` (ollama.zig).
+
 ### A reasoning budget that only trims delivery cannot stop a thought from eating max_tokens 
 pi on Qwen3.8-Flash-Next with `contextWindow` 8k then 24k: every design turn came back `length` with empty content. Two causes, one per effort level. At `low` pi sends `reasoning_effort: low`; on Qwen3.8 the template reads the word, so since 2026-08-14 no budget was derived from it, and even where a budget applied it was a display trim after generation: nothing ever closed the think block. At `xhigh` no budget exists by design, and the launcher's output share (ctx/4 = 6144 at 24k, shrunk further by pi's per-turn estimate) was smaller than one thought. vLLM and SGLang enforce a thinking budget in-stream, Qwen's recipe: at the budget append "Considering the limited time by the user, I have to give the solution based on the thinking directly now." plus `</think>` and keep generating. Fix, both halves: `armThinkBound` resolves atomic opener/closer ids + the forced sequence per request and hangs a `ThinkBound` on the sampling params; `thinkBoundTick` (inside the pre-step guard every decode path runs) commits the forced tokens as one multi-token forward from any inter-tick state and routes the rest of the request regular; the surfaces get budget -1 so the closed thought streams whole. The effort word maps to a budget on consuming templates again, but only where the bound can arm. The launcher share moved to ctx/2 in all three copies. Not live-tested: the batched (N>1) path after a fire, and MTP-armed requests (the answer decodes plain, `.think_bound`). Guards: `ThinkBound` unit test, `tests/test_reasoning_budget_stream.sh` (stream + non-stream, closed thought, answer present), `budgetForContext` + `AgentBudgetTests`.
 
@@ -19,13 +22,28 @@ Third, the feature did not survive contact with its own clients. `GET /props` fe
 
 Guards: `tests/test_idle_evict.sh` (evicts when idle, reloads under all three concurrent readers, RSS flat across cycles that all end with nothing resident, and still resident with the flag off), `testing.allocator` on the reload-frees test, and behavioural tests on each `.loading` predicate. The locking itself is comment-pinned — a source scan is the obvious guard and this repo bans them.
 
-### Historical images decoded on every text-only continuation (2026-08-30)
+### Only the latest turn's images reached the model (2026-09-23)
 
-The active-turn media fix stopped the vision tower from re-encoding images behind the latest assistant boundary, but both chat parsers still eagerly base64-decoded, JPEG-decoded, resized, normalized and patchified every attachment before that selector ran. A Harness session retaining 24 images therefore logged 24 image decodes on every later text-only request. Qwen's 44x44 patch grid retains about 8.7 MiB of preprocessed float data per image until the request ends, so the request also carried roughly 200 MiB of avoidable transient buffers. Warm prefix reuse hid most of the latency at 24 images, but the CPU and allocation work grew linearly with conversation history and multiplied under concurrency.
-
-The fix performs a metadata-only pass over the parsed JSON tree first. `activeWireMediaIndex` mirrors `activeTurnMediaMessage` across ordinary assistant boundaries, assistant-prefix continuations and tool-call/result chains, with separate OpenAI and Anthropic wire shapes. The handler's existing parse loop then materializes attachments only for that selected raw message; historical data URLs remain borrowed JSON strings and allocate no media buffers. Skipped image-only history must still append its empty user message, because the role boundary is part of the rendered prompt even when its pixels are not active.
-
-The HTTP regression sends one historical image, twenty historical images, an image-only historical turn and an Anthropic historical image. All must complete with zero new `Decoded … image` log lines; the image-only case also compares prompt-token counts against a dropped empty turn so preserving the boundary is observable. Fresh images, trailing Harness context, assistant-prefix continuation, growing image conversations and changed-image prefix reuse remain covered in the same script.
+Defect: pi reading page1..3 of a spec mid-task saw page3 only. Flash invented a 5-digit SKU
+(page1 says 4 digits), the 27B said it could not see the images and OCR'd them with tesseract.
+Images in an Anthropic `tool_result` (Claude Code's Read tool) never reached the model at all.
+Cause: since the first vision commit the server encoded only the active turn's media and spliced
+its soft tokens after a user-turn marker it searched for (`userTurnInsertPos`, end-of-prompt
+fallback). Older images were dropped from every request; the Anthropic parser kept only the
+text of a `tool_result`.
+Fix: the vLLM/llama.cpp design. A message's media serializes as content parts, the model's own
+template renders one placeholder per item where the message sits, and `expandMediaPlaceholders`
+turns the k-th placeholder into item k's run. Every item is encoded, in prompt order; a count or
+kind mismatch is a named 400. The prefix cache keys each item (`MediaSpan`), so a match stops at
+the first item that differs and history images restore from cache. Encoder outputs are cached by
+pixel hash (`EmbeddingCache`): re-encoding 20 history screenshots cost Flash ~7 s per turn. A
+tower-less model refuses only the latest user turn's media and leaves a note for the rest.
+Accepted cost: every history image is still base64/PNG-decoded and preprocessed each turn to key the
+cache (0.6 s at 24 1920x1200 screenshots, 55k image tokens); the cache skips the tower, not the decode.
+The embedding cache never evicts what the current request used (plain LRU on the history scan hit 0%).
+Guard: `media renders one template placeholder per item` (chat.zig, real Qwen3.8 template),
+the `expandMediaPlaceholders` tests (server.zig), `media spans bound the reusable prefix`
+(prefix_cache.zig), `EmbeddingCache serves a hit and evicts` (vision.zig), `tests/test_multi_image_history.sh`.
 
 ### A `seed` that only the synchronous sampler read (seeded replies flipped between identical requests)
 
@@ -87,6 +105,11 @@ Found 2026-07-19 by the integration run's SafeAllocator right after adding the `
 
 ### A READY model must never advertise LESS capability than its unloaded stub (empty-caps class, second bite)
 Live 2026-07-21 (two-Mac LAN session): the app tray showed "No models yet" while the user was actively chatting on the peer's DeepSeek-V4-Flash GGUF — the loaded model itself rendered `capabilities:[]` in `/v1/models`. The ready path gated `has_chat` on `chat_config.chat_template.len > 0`, but embedded-engine GGUFs (ds4/llama) can ship NO chat_template in the header and still serve chat via fallback formatting. Ironically the UNLOADED gguf stub path already advertised `["chat","tool_use","streaming","json_schema"]` unconditionally — only loading the model made it vanish from every capability-driven client (the tray's LAN chat count, the "On Your Network" pickers). Same class as the ready-path `.mesh`/"3d" hole the `ReadyCaps` comment documents. Fix: `readyHasChat(is_encoder_only, chat_template_len, has_embedded_lm)` — template presence is NOT the gate for ds4/llama entries; used by BOTH renderModelEntry and the index page. App side: `ModelInfo.lanAdvertises(capability)` treats an empty capabilities array on a `lan_peer` entry as chat (old-peer tolerance — media entries always advertise their modality, so empty == this bug). Guards: `readyHasChat` test (server.zig), `LanModelCapabilityTests` (app).
+
+### The LAN gate must resolve a model name exactly like dispatch (alias bypass)
+Found while adding Model Settings aliases (#520), before release. The keyless LAN gate read the body's `model` and, for any name that was not a registry id, checked the DEFAULT model against the share list. Dispatch then resolved the same name as an alias and served a different model. With the default shared and the aliased model not shared, a LAN client reached the unshared model by its alias (200, and the model cold-loaded).
+Fix: one resolver, `resolveRequestModelId` (exact id, path, then alias, then on `/api/` the untagged alias and Ollama's short-name match), called by dispatch, `lanShareDenial`, `/v1/load-model`, `/v1/unload-model` and `/api/show`. It also closes the older Ollama short-name case on the gate.
+Guard: `tests/test_model_alias.sh` [2] (a shared symlinked twin as the default; red on revert: 200 and the unshared model loaded) + the `resolveRequestModelId` alias unit test.
 
 ### @peer proxying is bounded by the TUNNEL MARKER, not by loopback-ness (sandbox 403 class)
 Live 2026-07-21: pi/hermes running in the Agent Sandbox VM got `403 "Remote (@peer) model ids are host-local"` for the model the host app was happily chatting on. The guest reaches the host over the VM NAT interface (`192.168.64.1`), so it is non-loopback BY CONSTRUCTION — and both the keyless LAN gate (`lanShareDenial`) and the proxy dispatch required loopback to initiate an @peer hop. Worse, with `--api-key` set the gate is skipped but dispatch still required loopback, so a keyed guest request naming @peer fell through to the unknown-id strip and would have been answered by the LOCAL default model silently. The loop/amplification bound never actually needed loopback: `lan.tunnel` has always stamped `X-MLX-LAN: 1` on every request it forwards, and the forwarded body carries the BARE id. New rule: any DIRECT client (loopback app, sandbox guest, phone on the LAN) may initiate exactly ONE hop; a request carrying the tunnel marker is never proxied again (`isTunneledRequest` at the gate AND at dispatch). Access-wise this exposes nothing new — the peer's own share gate still governs its models, and a LAN client could always ask the peer directly. Guards: `lanShareDenial` + `isTunneledRequest` tests (server.zig); `tests/test_lan_share.sh` "tunneled request never hops again" / "direct @peer id proxies" / "non-loopback client of B chats on @peer model".
@@ -1558,6 +1581,13 @@ First live run on qwen4_exp: `[hot-cache] hybrid miss (no checkpoint <= 514 of 5
 `scheduler.modelDiskBytes` summed every `*.safetensors` in the directory. A third-party gemma-4 E4B pack shipped two shards no `weight_map` entry references; the bill was 2x the loaded size, so loading a small image model evicted the chat model. The index is the truth when present: `indexShardSet` reads `model.safetensors.index.json` and only named shards count. Guard: `test "modelDiskBytes bills only the shards the index names (issue #274)"`.
 
 
+## The SSD tier outgrew `--prefix-cache-disk`: in-place commits under-billed their files (#573)
+
+**Defect.** Under an agent workload (Flash-Next, `--mtp`, `--prefix-cache-disk 40GB`) entries billed far less than the files they list, some down to 0, so `gcToBudget` never fired and the store grew past 300 GB until a restart re-scanned it.
+**Cause.** Two terms. The big one: `appendSsmOnly` billed a hand-rolled per-term delta that, in ReleaseFast builds, dropped the entry's whole checkpoint list from its bill on every spec/SSM-only append once the entry held 4+ checkpoints; Debug builds billed it correctly. The small one: `persistQsaHistory` reported 0 bytes for a commit that carried no QSA checkpoint while the entry's `qsa.safetensors` stayed on disk.
+**Fix.** `appendSsmOnly` bills by measure, `nonChunkBytes` after minus before; `persistQsaHistory` returns the held file when nothing new is written.
+**Guard.** `DiskTier: in-place commits keep an entry's bytes equal to the files it owns`, red only under `zig build test -Doptimize=ReleaseFast`, so run it in the mode that ships.
+
 ## The SSD tier refused a volume with 117 GB usable (2026-09-14)
 
 `kv_disk_cache.volumeSpace` read `statfs.f_bavail`, which is what `df` prints and which excludes the purgeable space macOS frees on demand. The release box showed 36 GB free by df and 117 GB by Finder, so the tier declined every persist under its 64 GiB reserve and the Flash-Next SSD-first soak restored nothing after a restart. Fix: one ObjC probe, `msv_volume_free_for_use(path)`, returns `volumeAvailableCapacityForImportantUsage`; `volumeSpace` reports that as `free` (statfs stays the fallback and the total) and the ANE compile-cache cap reads the same probe. Guard: `test "volumeSpace: free is what the OS grants"` (red on this box: 117 GB expected, 36 GB found).
@@ -2129,10 +2159,15 @@ was `\n`, the grammar accepted free whitespace without bound, and thirty of them
 tripped the exact-cycle loop guard: `finish_reason "length"`, empty content, valid
 JSON never produced. Cold requests were fine, and main and PR #407 behaved the same.
 
-Fix: `json_grammar` counts consecutive free-whitespace bytes (`ws_run`, carried by
-snapshots) and rejects past `MAX_FREE_WS` (16) between tokens and after the root, so
-the mask forces the next structural byte. Content is never constrained by it, only
-formatting. Guard: `free whitespace is capped so a masked model cannot idle forever`.
+Fix: the grammar admits no whitespace outside the root value (before or after it) and
+keeps the capped free whitespace inside it, so the mask forces `{` at once and the
+model's own layout stays. llmprobe (2026-09-16) had caught Flash Next at high effort
+answering `\r   \r   \r  {` with 2-space indentation streamed and 6-space non-streamed;
+the cause was the warm-restore prefill split (engine-mlx.md, same date), and a fully
+compact grammar shipped first as the symptom fix. Compact cost quality: on a 0.8B the
+forced `:"` boundary decoded the rare name `Olu` as `Ohu` in 4 of 30 extraction records
+(30/30 with its own layout, Flash Next 30/30 either way), so only the outside is
+compact. Guard: `grammar admits free whitespace inside the root value only`.
 
 ## ds4 sessions were per request; embeddings segfaulted on an engine-backed model (2026-09-14)
 
@@ -2192,3 +2227,192 @@ Fix: `server.encodeText` owns the branch (ds4 vocab, llama.cpp vocab, else BPE) 
 sites call it. Live on ds4 / llama.cpp / MLX: 196 / 590 / 67 reasoning tokens.
 
 Guard: the format matrix's `usage reasoning_tokens > 0` check on a GGUF arm.
+
+## Logprobs in the logits dtype; Responses dropped the budget (2026-09-18)
+
+- `computeLogprobs` ran `log(softmax(x))` in the logits dtype: bf16 rounded
+  every probability before the log (logprobs off by up to ~0.06 at -16), and
+  f16 logits underflowed to `-inf` plus a NaN, which is invalid JSON on
+  `/v1/completions`. Now `logits - logsumexp` in f32. Guard: unit test
+  `computeLogprobs: f16 logits keep finite, exact log-probabilities`.
+- `/v1/responses` parsed `reasoning.effort` and discarded the budget, so a
+  capped effort thought until `max_output_tokens` and ended `incomplete`. It
+  now takes chat's precedence (`reasoning_budget_tokens` > effort word >
+  `--reasoning-budget`, Qwen3.8 implicit low) and arms the decode-time bound.
+  Guard: `tests/test_reasoning_budget_stream.sh` (responses cases).
+
+## Cancel mid-tick read a freed ThinkBound (2026-09-18)
+
+Stopping a pi request while a second MTP stream decoded killed the server: SIGSEGV in
+`thinkBoundTick` under `runMtpGroups`, at a thread-stack address.
+
+Cause: `sampling.think_bound` (and `constraint`) point into the request handler's frame.
+`complete` removed the slot from `decoding` and returned; the handler freed its state, but
+the inference thread was already inside a tick whose snapshot held the slot, and the group
+fallback ticked it without re-checking `cancelled`.
+
+Fix: `Slot.in_pass` counts inference-thread passes holding the slot, taken under
+`queue_mu` wherever a pass takes it (prefill pop, the step-3 snapshot, `interleaveDecodeTick`).
+`complete` waits for zero before handing the slot to the cleanup queue.
+
+Guard: `tests/test_cancel_mid_tick.sh` (two MTP streams, kill one every 3 s):
+HEAD crashed on the 2nd cancel, the fix survived 15.
+
+## Concurrent long prompts were each admitted against the same free memory
+
+Defect: four 64K requests arriving together on a 27B under a 36 GB wired limit were all admitted
+(8.4 GB each against the same 19.9 GB available); the fourth prefill overran the limit. On macOS
+26.5 that was not a Metal OOM but an IOGPU kernel panic.
+
+Cause: the admission bill runs on the connection thread, before any sibling has allocated. The
+inference-thread re-ask that sees live memory was armed for `longCtxGated` archs only. A DFlash
+drafter's per-request context K/V (20 KB/token on the 27B pack) was in no bill at all.
+
+Fix: before each prefill the inference thread re-asks the cold bill against live memory
+(`scheduler.slotHoldsForMemory`). A request that does not fit while others are live goes back
+to the head of `pending` and waits for one to finish (`holdsForMemory`); alone it proceeds as
+before, so nothing can wait forever. `ModelConfig.drafter_ctx_bytes_per_token` is stamped at
+load and billed per prompt row.
+
+Guard: `tests/test_memory_pressure_4way.sh` (2B model under `MLX_SERVE_GPU_CEILING_MB`, which
+bounds the guards' arithmetic only) asserts served-or-named, an `[admission] held` line, and a
+live server. Rule: a transient or per-request state that scales with KV length is billed, or
+capped, before it is allocated.
+
+## A chunk boundary is the only yield point, so the chunk IS the stall (2026-09-20)
+
+Cold 4-way long prompts on the 27B starved the streams already decoding: client-side they
+saw one tick per prefill chunk. The fix attempted first (up to 8 ticks per boundary,
+`interleaveTicksFor`, a quarter of wall time) changed nothing at 8K because the pinned chunk
+is 8192 there: an 8K prompt has NO boundary, a 33 s stall. `companyPrefillChunk` narrows the
+prefill to 2048 while anyone decodes. What this buys is the inter-token GAP. It does not move
+4-way aggregate (28.4 vs 28.7 tok/s at 8K, 16.0 vs 15.9 at 16K, last TTFT flat): three
+serialized prefills sit inside the window, and the batched tail is the efficient place to
+decode anyway. Guard: `tests/test_prefill_interleave.sh`, unit tests on both pure functions.
+
+## A re-bill against live memory cannot see a sibling that has not allocated yet (2026-09-20)
+
+Round 1 re-billed every request against live memory before its prefill. Four 32K requests
+restored from the hot cache still overran a 36 GB limit (`Insufficient Memory` in the batched
+verify, all four "generation failed"), and the same build kernel-panicked a 16 GB M4 mini at
+8K x4 (15.4 GB wired, 14 MB free). The log shows why: each sibling read `needed=3027 MB
+available=9499 MB`. A restored prefix shares the cached buffers by refcount until its first
+append, so active memory does not move when it is admitted; the next bill sees the same free
+bytes, and all of them grow together during decode. Fix: `PromiseLedger` carries what admitted
+requests were promised and have not allocated (promised minus the growth of active memory since
+the first outstanding admit), and the hold reads `needed + outstanding <= available`. Second
+half: `physicalMemoryCeiling` counted ALL free RAM as ours; MLX wires what it allocates, so
+`osReserveBytes` (an eighth of RAM, 2..8 GB) stays out of the plan. A promise is dropped once its slot has decoded 64 tokens (the restored KV is copied on the first
+append, so the claim is in live memory by then), and a sibling keeps 2 GB of slack under the
+ceiling because a group's verify transients grow with its lanes. The failing cell now serves
+4/4 together after short holds (TTFT 3.6 / 7.6 s), peak 35.6 -> 33.2 GB, no Metal error.
+
+## The load preflight compared weights with free RAM, never the GPU limit (2026-09-20)
+
+Defect: with `iogpu.wired_limit_mb` lowered to 36 GB on a 128 GB Mac, the 70 GB Flash-Next pack
+passed preflight (98 GB free), hit `Insufficient Memory` nine times in warmup, pinned an 870-token
+context and then refused every request with "only ~0MB is available". Inkling (82 GB) and the
+42 GB ds4 GGUF failed the same way. The release smoke matrix found it.
+
+Cause: `effectiveAvailableBytes` read host/process free memory only. Metal's
+`max_recommended_working_set_size` follows the sysctl and is the real bound on what MLX can wire.
+
+Fix: the preflight's available figure is `min(free, mlx.maxRecommendedWorkingSet())` at both the
+text and the media site, so the load refuses by name with the 36 GB figure in the message.
+Guard: `effectiveAvailableBytes is capped by the GPU working-set limit` in `scheduler.zig`.
+Not covered: the embedded engines (ds4 / llama.cpp) keep their own open-time failure.
+
+## App-loaded models placed every image at the end of the prompt (2026-09-22)
+
+A pi session on Flash-Next kept thinking "the user attached the same image again" on every
+tool turn. The log showed each request inserting the image at `prompt_len - 5`: the silent
+end-anchored fallback of `userTurnInsertPos`, which fires when there is no user-turn marker.
+Cause: `populateUserTurnMarker` (and `populateLfm2ImageTokens`) ran only on the startup
+`--model` path in `main.zig`; the registry path (`scheduler.preloadCpuState`, used by the app's
+headless start + load) had copied main's EOS merge but not these, so the marker was empty and
+the image sat after the latest tool result on every turn.
+Fix: `ModelConfig.applyTokenizer` holds all tokenizer-derived setup and both paths call it.
+The marker itself is gone since 2026-09-23: placement comes from the template's placeholders.
+
+## An SSD restore held one file open per chunk, and its failure failed the fallback (#495)
+
+Defect: on Qwen3.8-Flash-Next, a 319k-token session restored from the SSD tier failed at chunk
+242 (`Failed to open file … c000242.safetensors`). The cold-prefill fallback then failed too
+(`prefill failed for slot: MlxFailure`), so the client got an error instead of a slow answer.
+
+Cause: `restoreKvInto` appended each chunk's lazy `mlx_load_safetensors` arrays and evaluated
+nothing until the final concat. A lazy load keeps its file open until it is evaluated, so a
+restore needed one descriptor per 1024 tokens, and macOS's default soft limit is 256. The
+restore paths swallow their error in `prefix_cache`, but they never dropped the MLX latch the
+failed load had set, so the fallback prefill's `checkError` picked it up.
+
+Fix: evaluate each chunk's arrays before loading the next one (one file open at a time; costs
+about 0.25 ms per chunk). `restorePrefixInto` and `restoreIntoHybrid` drop the latch they raised
+(`dropLatchedErrorUnless`), the same as the persist funnel does.
+Guards: `DiskTier: a restore wider than the fd limit closes each chunk as it goes`,
+`DiskTier: a failed restore drops the latch it raised and keeps a foreign one`, and
+`tests/test_prefix_cache_disk.sh` [7] (a restore under a lowered `ulimit -n`, plus a chunk
+made unreadable after boot).
+
+## A stop string inside the thought ended the whole reply (#549)
+
+Defect: `stop: ["```"]` (or any common word) on a thinking model ended the request at the first
+match inside `<think>`: reasoning cut mid-sentence, empty content, `finish_reason: "stop"`, on
+chat, messages and responses, streamed and not.
+
+Cause: every stop site searched the RAW generated text, reasoning included, before the split.
+
+Fix: `chat.answerStopIndex` accepts a match only where `splitThinkBlockKeepingMarkup` delivers
+it as content, judged on the text up to the match. Prefix-only judgment is what keeps the stream
+and the finished text on the same byte: text a later close turns into a thought (Gemma with
+thinking off) was still answer when the stop arrived, and a thought opened after the answer
+is dropped by a stop before it. `/v1/completions` keeps matching raw text.
+Guards: corpus `a stop string ends the answer, never the reasoning` (every word of every entry
+as a stop, plus a byte-by-byte stream replay), `tests/test_stop_in_reasoning.sh`.
+
+## Logprobs were null whenever `response_format` was set (#515)
+
+Defect: a `json_object` or `json_schema` request with `logprobs: true` returned `"logprobs": null`,
+streamed or not. The constrained answer was correct; only the entries were missing.
+
+Cause: `Generator.next` hands a constrained request to `nextConstrained`, and none of its arms
+(JSON body, reasoning, opener choice, forced recovery token) computed a logprob. The regular
+decode loop publishes through `pending_logprob` with a one-token delay; the constrained path
+samples and returns the same token in one call, so it never reached that code.
+
+Fix: `nextConstrained` keeps a handle to the position's logits, lets the arm pick or force the
+token, then computes that token's entry from the raw logits, before the grammar mask. The entries
+are the model's distribution, so the emitted token need not be rank 1 under a grammar.
+Guards: `constrained generation returns one logprob entry per token` (generate.zig, gated on
+`LOGPROBS_TEST_MODEL`) and `tests/test_logprobs.sh` [7].
+
+## Two servers listened on one port
+
+Defect: two `mlx-serve` processes on the same port both reached "Server listening". Clients
+reached whichever the kernel picked, so `/v1/models` and chat answers came from a server the
+app did not start or track.
+
+Cause: `main.portInUse` probes the port BEFORE the model load, and the bind happens AFTER it.
+A second instance started during that load passed the probe. std's `listen(.{ .reuse_address =
+true })` sets SO_REUSEPORT as well as SO_REUSEADDR, so both binds succeeded.
+
+Fix: `server.listenExclusive` clears SO_REUSEPORT on the bound socket. The kernel checks the
+flag on the socket already bound, so the later bind fails with `AddressInUse` and logs the
+same "Port N is already in use" line. SO_REUSEADDR stays for rebinding over TIME_WAIT.
+Guard: `listenExclusive: a second server cannot bind a port that is already listening`.
+
+## A model that failed to load was answered by the default model (#585)
+
+Defect: after a pack failed to load (`MissingWeight`), a chat request that named it by its
+absolute path got HTTP 200 from the model already resident, with the path echoed as `model`.
+Users read that as "the new pack works".
+
+Cause: `/v1/load-model` registers a path under an `org/name` id, but inference routes only
+`peek`ed the raw string. A path matched no key, so it took the "unknown id -> default model"
+branch meant for SDK names like `gpt-4`.
+
+Fix: `server.resolveRequestModelId` resolves a path through `peekByPath`, so a failed entry
+reaches `ensureLoaded` and its named 500. An unregistered path is a 404. The LAN gate reads
+the same helper. Startup was already loud: a failed `--model` load exits 1.
+Guards: `resolveRequestModelId: a path names its own entry, never the default model`,
+`tests/test_load_failure_no_fallback.sh`.

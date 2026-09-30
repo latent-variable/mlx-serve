@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import AppKit
 import AVFoundation
+@preconcurrency import AVFAudio
 import CoreVideo
 
 /// Runs LTX-Video 2.3 text-to-video via the native `mlx-serve` engine (no Python).
@@ -90,7 +91,7 @@ final class VideoGenService: ObservableObject {
         generationSeq += 1
         let gen = generationSeq
         livePreview = nil
-        phase = .running(step: 0, total: 3, message: "Loading model…")
+        phase = .running(step: 0, total: 3, message: L10n.text("Loading model…"))
         log = []
 
         let outputPath = Self.makeOutputPath(prompt: request.prompt)
@@ -143,7 +144,7 @@ final class VideoGenService: ObservableObject {
                 // while dropping one silently is exactly what the server's
                 // named 400s exist to prevent.
                 let refPayloads: VideoRefPayloads? = await Task.detached(priority: .userInitiated) {
-                    Self.refPayloads(for: request)
+                    await Self.refPayloads(for: request)
                 }.value
                 guard let refs = refPayloads else {
                     setPhase(.failed("Couldn't read one of the reference files. Images must be PNG or JPEG, clips a QuickTime/MP4 movie of at least 5 frames, and audio a WAV, MP3, M4A or AAC file."), for: gen)
@@ -186,9 +187,9 @@ final class VideoGenService: ObservableObject {
                     case "progress":
                         let step = ev["step"] as? Int ?? 0
                         let total = ev["total"] as? Int ?? steps
-                        let stage = ev["stage"] as? String ?? "Generating"
+                        let stage = ev["stage"] as? String ?? L10n.text("Generating")
                         clock.observe(step: step)
-                        var message = "\(stage)…"
+                        var message = L10n.format("%@…", L10n.text(stage))
                         if let eta = clock.eta(totalSteps: max(total, 1),
                                                floorPerStep: pricing.perStep, tail: pricing.tail),
                            eta > 0 {
@@ -202,7 +203,7 @@ final class VideoGenService: ObservableObject {
                         decoded = Self.decodeFrames(ev)
                     case "error":
                         await releaseIfNeeded()
-                        setPhase(.failed(ev["message"] as? String ?? "Generation failed."), for: gen)
+                        setPhase(.failed(ev["message"] as? String ?? L10n.text("Generation failed.")), for: gen)
                         return
                     default:
                         break
@@ -210,7 +211,7 @@ final class VideoGenService: ObservableObject {
                 }
                 await releaseIfNeeded()
                 guard let frames = decoded else {
-                    setPhase(.failed("Server returned no video frames."), for: gen)
+                    setPhase(.failed(L10n.text("Server returned no video frames.")), for: gen)
                     return
                 }
                 if Task.isCancelled { setPhase(.cancelled, for: gen); return }
@@ -221,7 +222,7 @@ final class VideoGenService: ObservableObject {
                 H3RunHistory.remember(model: request.model, width: request.width, height: request.height,
                                       frames: request.numFrames, steps: steps, fast: !request.bestQuality,
                                       measuredSeconds: ProcessInfo.processInfo.systemUptime - startedAt)
-                setPhase(.running(step: steps, total: steps, message: "Encoding mp4…"), for: gen)
+                setPhase(.running(step: steps, total: steps, message: L10n.text("Encoding mp4…")), for: gen)
                 let outFps = frames.fps > 0 ? frames.fps : fps
                 let settings = Self.settingsText(
                     request, modelId: modelId,
@@ -303,7 +304,7 @@ final class VideoGenService: ObservableObject {
                 }
             }
             guard let frames = decoded else {
-                throw MediaGenError.server("Server returned no video frames.")
+                throw MediaGenError.server(L10n.text("Server returned no video frames."))
             }
             report(steps, steps, "Encoding mp4")
             let outFps = frames.fps > 0 ? frames.fps : request.fps
@@ -714,9 +715,10 @@ final class VideoGenService: ObservableObject {
     /// Pull a reference clip apart into base64 JPEG frames at 24 fps plus its
     /// soundtrack. JPEG, not PNG: a reference is conditioning, not a pixel-exact
     /// input, and PNG frames blow through the request cap.
-    nonisolated static func videoFileToRefPayload(path: String, maxFrames: Int) -> VideoRefPayloads.Video? {
+    nonisolated static func videoFileToRefPayload(path: String, maxFrames: Int) async -> VideoRefPayloads.Video? {
         let asset = AVURLAsset(url: URL(fileURLWithPath: path))
-        let seconds = CMTimeGetSeconds(asset.duration)
+        guard let duration = try? await asset.load(.duration) else { return nil }
+        let seconds = CMTimeGetSeconds(duration)
         guard seconds.isFinite, seconds > 0 else { return nil }
         let fps = 24
         let available = Int(seconds * Double(fps))
@@ -733,7 +735,7 @@ final class VideoGenService: ObservableObject {
         frames.reserveCapacity(count)
         for t in refFrameTimes(count: count, fps: fps) {
             let time = CMTime(seconds: t, preferredTimescale: CMTimeScale(fps * 1000))
-            guard let cg = try? gen.copyCGImage(at: time, actualTime: nil) else { return nil }
+            guard let cg = try? await gen.image(at: time).image else { return nil }
             let rep = NSBitmapImageRep(cgImage: cg)
             guard let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.9])
             else { return nil }
@@ -747,7 +749,7 @@ final class VideoGenService: ObservableObject {
     /// Resolve a request's reference PATHS into wire payloads. Returns nil when
     /// something the user picked could not be read — the caller surfaces that
     /// rather than generating while quietly dropping a reference.
-    nonisolated static func refPayloads(for request: VideoGenRequest) -> VideoRefPayloads? {
+    nonisolated static func refPayloads(for request: VideoGenRequest) async -> VideoRefPayloads? {
         guard request.model.supportsReferences else { return VideoRefPayloads() }
         var out = VideoRefPayloads()
         for p in request.refImagePaths {
@@ -755,7 +757,7 @@ final class VideoGenService: ObservableObject {
             out.images.append(b64)
         }
         for p in request.refVideoPaths {
-            guard let v = videoFileToRefPayload(path: p, maxFrames: request.numFrames) else { return nil }
+            guard let v = await videoFileToRefPayload(path: p, maxFrames: request.numFrames) else { return nil }
             out.videos.append(v)
         }
         for p in request.refAudioPaths {

@@ -15,7 +15,7 @@ struct PlanCardView: View {
                 Image(systemName: "list.bullet.clipboard")
                     .foregroundStyle(.blue)
                 Text("Plan (\(plan.steps.count) steps)")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.app(.subheadline).weight(.semibold))
                 Spacer()
                 statusBadge
             }
@@ -29,10 +29,10 @@ struct PlanCardView: View {
                         .frame(width: 16)
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(step.description)
-                            .font(.caption)
-                        Text(step.tool.displayName)
-                            .font(.caption2)
+                        Text(L10n.text(step.description))
+                            .font(.app(.caption))
+                        Text(L10n.text(step.tool.displayName))
+                            .font(.app(.caption2))
                             .foregroundStyle(.tertiary)
                     }
                 }
@@ -41,14 +41,14 @@ struct PlanCardView: View {
             if plan.status == .pending {
                 HStack(spacing: 12) {
                     Button(action: onApprove) {
-                        Label("Approve", systemImage: "checkmark.circle.fill")
+                        Label("Approve", systemImage: "checkmark.circle.fill").font(.app(.body))
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.green)
                     .controlSize(.small)
 
                     Button(action: onReject) {
-                        Label("Reject", systemImage: "xmark.circle.fill")
+                        Label("Reject", systemImage: "xmark.circle.fill").font(.app(.body))
                     }
                     .buttonStyle(.bordered)
                     .tint(.red)
@@ -86,7 +86,7 @@ struct PlanCardView: View {
         case .failed: ("Failed", .red)
         }
         Text(text)
-            .font(.caption2.weight(.medium))
+            .font(.app(.caption2).weight(.medium))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(color.opacity(0.15))
@@ -103,14 +103,14 @@ struct PlanCardView: View {
                 .frame(width: 18, height: 18)
             if let result {
                 Image(systemName: result.status == .success ? "checkmark" : "xmark")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.app(.caption2, weight: .bold))
                     .foregroundStyle(.white)
             } else if currentStepIndex == index {
                 ProgressView()
                     .controlSize(.mini)
             } else {
                 Text("\(index + 1)")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.app(.caption2, weight: .semibold))
                     .foregroundStyle(.white)
             }
         }
@@ -135,8 +135,8 @@ struct ToolResultBlockView: View {
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             ScrollView {
-                Text(truncatedOutput)
-                    .font(.system(.caption, design: .monospaced))
+                Text(L10n.text(truncatedOutput))
+                    .font(.app(.caption, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -144,25 +144,25 @@ struct ToolResultBlockView: View {
 
             if let error = result.error, !error.isEmpty {
                 Text(error)
-                    .font(.caption)
+                    .font(.app(.caption))
                     .foregroundStyle(.red)
             }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: step.tool.icon)
                     .foregroundStyle(.secondary)
-                Text(step.description)
-                    .font(.caption)
+                Text(L10n.text(step.description))
+                    .font(.app(.caption))
                     .lineLimit(1)
                 Spacer()
                 if result.durationMs > 0 {
                     Text("\(result.durationMs)ms")
-                        .font(.caption2)
+                        .font(.app(.caption2))
                         .foregroundStyle(.tertiary)
                 }
                 Image(systemName: result.status == .success ? "checkmark.circle.fill" : "xmark.circle.fill")
                     .foregroundStyle(result.status == .success ? .green : .red)
-                    .font(.caption)
+                    .font(.app(.caption))
             }
         }
         .padding(8)
@@ -191,7 +191,7 @@ struct AgentModeToggle: View {
         }
         .toggleStyle(.button)
         .buttonStyle(.borderless)
-        .help("Tools — run a tool-calling loop")
+        .help("Tools — run a tool-calling loop").font(.app(.body))
     }
 }
 

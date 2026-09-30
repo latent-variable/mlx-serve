@@ -170,6 +170,48 @@ final class MediaDropTests: XCTestCase {
         XCTAssertEqual(placed.refs, refs)
     }
 
+    /// The source and the references are one numbered list to the model, so a
+    /// file already in it is not placed twice: the tiles key on the file, and
+    /// a duplicate would draw once and remove both.
+    func testAFileAlreadyAttachedIsNotPlacedAgain() {
+        let placed = ImageDropPlacement.place(
+            [u("source.png"), u("r1.png"), u("b.png")], source: u("source.png"),
+            editing: true, refs: [u("r1.png")], refLimit: 3)
+        XCTAssertEqual(placed.source, u("source.png"))
+        XCTAssertEqual(placed.refs, [u("r1.png"), u("b.png")])
+    }
+
+    // MARK: - Restoring the saved draft
+
+    /// Files that are gone are dropped, and the first survivor is the source:
+    /// the list is numbered by position, so a missing image 1 makes the next
+    /// picture image 1 rather than leaving references with no source.
+    func testRestorePromotesTheFirstSurvivorToSource() {
+        let exists: (String) -> Bool = { !$0.hasPrefix("/gone") }
+        let r = ImageDraftImages.restore(sourcePath: "/gone/source.png",
+                                         refPaths: ["/kept/r1.png", "/gone/r2.png", "/kept/r3.png"],
+                                         exists: exists)
+        XCTAssertEqual(r.source, URL(fileURLWithPath: "/kept/r1.png"))
+        XCTAssertEqual(r.refs, [URL(fileURLWithPath: "/kept/r3.png")])
+        XCTAssertTrue(r.dropped)
+    }
+
+    func testRestoreKeepsACompleteDraftAsSavedAndDedupes() {
+        let r = ImageDraftImages.restore(sourcePath: "/kept/source.png",
+                                         refPaths: ["/kept/r1.png", "/kept/source.png"],
+                                         exists: { _ in true })
+        XCTAssertEqual(r.source, URL(fileURLWithPath: "/kept/source.png"))
+        XCTAssertEqual(r.refs, [URL(fileURLWithPath: "/kept/r1.png")])
+        XCTAssertFalse(r.dropped)
+    }
+
+    func testRestoreWithNoSourceSavedRestoresNothing() {
+        let r = ImageDraftImages.restore(sourcePath: nil, refPaths: ["/kept/r1.png"], exists: { _ in true })
+        XCTAssertNil(r.source)
+        XCTAssertTrue(r.refs.isEmpty)
+        XCTAssertFalse(r.dropped, "a draft that never had a source has nothing to miss")
+    }
+
     /// …which is exactly why that pane must report NO room: the old limit
     /// (`1 + refLimit - refs.count`) said 1 with the source set and the
     /// references full, so the file animated in and landed nowhere.
@@ -202,6 +244,40 @@ final class MediaDropTests: XCTestCase {
         XCTAssertEqual(routed.images, [u("a.png")])
         XCTAssertEqual(routed.videos, [u("b.mov")])
         XCTAssertEqual(routed.audios, [u("c.wav")])
+    }
+
+    /// The reported case, as the two halves that produced it. A mixed drop
+    /// hands over EVERYTHING and lets the router spend the caps; truncating to
+    /// the room first threw away the files that would have been kept.
+    func testAMixedDropDeliversEveryFileAndLetsTheRouterSpendTheRoom() {
+        let dropped: [URL?] = (1...5).map { u("p\($0).png") } + [u("v1.mp4"), u("p6.png")]
+        // Three slots left, and the first three files are already attached.
+        XCTAssertEqual(MediaDrop.deliverable(dropped, kind: nil, limit: 3).count, dropped.count,
+                       "a mixed drop is not pre-truncated")
+        let attached = (1...3).map { u("p\($0).png") }
+        let routed = H3RefDrop.route(MediaDrop.deliverable(dropped, kind: nil, limit: 3),
+                                     images: attached, videos: [], audios: [])
+        XCTAssertEqual(routed.images, attached + [u("p4.png"), u("p5.png"), u("p6.png")],
+                       "the files not already attached are the ones that land")
+        XCTAssertEqual(routed.videos, [u("v1.mp4")])
+        // A TYPED slot still spends its room here: nothing downstream knows it.
+        XCTAssertEqual(MediaDrop.deliverable(dropped, kind: .image, limit: 2).count, 2)
+    }
+
+    /// A file already attached is not attached again. It would spend one of the
+    /// twelve on nothing, and it BROKE the tile grid outright: the tiles are
+    /// labelled by position, and a list whose identity is the URL renders one
+    /// tile per unique URL — so eight drops of five files drew five tiles
+    /// carrying numbers from the wrong positions. The picker deduped already;
+    /// only the drop path did not.
+    func testAFileAlreadyAttachedIsNotAttachedTwice() {
+        let routed = H3RefDrop.route([u("a.png"), u("a.png"), u("b.mov")],
+                                     images: [u("a.png")], videos: [], audios: [])
+        XCTAssertEqual(routed.images, [u("a.png")], "no second copy of an attached image")
+        XCTAssertEqual(routed.videos, [u("b.mov")], "a different file still lands")
+        // The same file twice inside ONE drop is the same question.
+        let fresh = H3RefDrop.route([u("c.png"), u("c.png")], images: [], videos: [], audios: [])
+        XCTAssertEqual(fresh.images, [u("c.png")])
     }
 
     /// Per-type cap and combined cap both bind, and a file no pane wants is

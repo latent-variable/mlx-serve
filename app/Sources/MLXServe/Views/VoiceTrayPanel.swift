@@ -55,7 +55,7 @@ struct VoiceTrayPanel: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
-                .disabled(appState.server.status != .running)
+                .disabled(appState.server.status != .running).font(.app(.body))
         }
         .help("Hands-free voice assistant — talk to the model with no chat window required. Speech-to-text and text-to-speech run locally on your Mac. When this popover is closed, feedback is audio-only; reopen it for status and controls.")
     }
@@ -83,21 +83,22 @@ struct VoiceTrayPanel: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.caption)
+                    .font(.app(.caption))
                     .foregroundStyle(.orange)
-                Text(VoicePreflight.shortMessage(for: issue))
-                    .font(.caption.weight(.semibold))
+                Text(L10n.text(VoicePreflight.shortMessage(for: issue)))
+                    .font(.app(.caption).weight(.semibold))
             }
-            Text(VoicePreflight.detail(for: issue))
-                .font(.caption2)
+            Text(L10n.text(VoicePreflight.detail(for: issue)))
+                .font(.app(.caption2))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button(VoicePreflight.actionLabel(for: issue)) {
+            Button {
                 if let url = URL(string: VoicePreflight.settingsURLString(for: issue)) {
                     NSWorkspace.shared.open(url)
                 }
-            }
-            .controlSize(.small)
+            } label: { Text(L10n.text(VoicePreflight.actionLabel(for: issue)))
+                .font(.app(.body)) }
+            .controlSize(.small).font(.app(.body))
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -119,12 +120,12 @@ struct VoiceTrayPanel: View {
             Circle()
                 .fill(dotColor)
                 .frame(width: 8, height: 8)
-            Text(statusText)
-                .font(.caption.weight(.medium))
+            Text(L10n.text(statusText))
+                .font(.app(.caption).weight(.medium))
                 .foregroundStyle(isError ? .red : .secondary)
             if !voice.partialTranscript.isEmpty {
                 Text("“\(voice.partialTranscript)”")
-                    .font(.caption2)
+                    .font(.app(.caption2))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -142,22 +143,23 @@ struct VoiceTrayPanel: View {
     private var agentPicker: some View {
         HStack(spacing: 6) {
             Image(systemName: activeAgent?.symbol ?? "person.crop.circle")
-                .font(.system(size: 11, weight: .medium))
+                .font(.app(.subheadline, weight: .medium))
                 .foregroundStyle(.secondary)
             Picker("", selection: Binding(get: { appState.defaultAgentId },
                                           set: { appState.defaultAgentId = $0 })) {
-                Text("None (app defaults)").tag(UUID?.none)
+                Text("None (app defaults)").font(.app(.body)).tag(UUID?.none)
                 ForEach(appState.agents.allAgents) { agent in
-                    Text(agentLabel(agent)).tag(UUID?.some(agent.id))
+                    Text(agentLabel(agent)).font(.app(.body)).tag(UUID?.some(agent.id))
                 }
             }
             .labelsHidden()
             .controlSize(.small)
             .fixedSize()
             Spacer(minLength: 0)
-            Button("Manage…") { openAgents() }
+            Button { openAgents() } label: { Text("Manage…")
+                .font(.app(.body)) }
                 .buttonStyle(.link)
-                .font(.caption2)
+                .font(.app(.caption2))
         }
         .help("Who you're talking to. An agent brings its own prompt, voice, tools, workspace and model; “None” uses the app's own settings, exactly as before. Say another agent's wake phrase to hand the conversation over mid-session.")
     }
@@ -211,14 +213,14 @@ struct VoiceTrayPanel: View {
                 Image(systemName: "shield.lefthalf.filled")
                     .foregroundStyle(.orange)
                 Text("Allow this tool call?")
-                    .font(.caption.weight(.semibold))
+                    .font(.app(.caption).weight(.semibold))
             }
-            Text(req.toolName)
-                .font(.caption2.monospaced())
+            Text(L10n.text(req.toolName))
+                .font(.app(.caption2).monospaced())
                 .foregroundStyle(.secondary)
             if !req.rawArguments.isEmpty {
-                Text(req.rawArguments)
-                    .font(.system(size: 10, design: .monospaced))
+                Text(L10n.text(req.rawArguments))
+                    .font(.app(.caption2, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(4)
                     .truncationMode(.tail)
@@ -226,13 +228,13 @@ struct VoiceTrayPanel: View {
             }
             HStack(spacing: 6) {
                 Button(role: .destructive) { voice.resolve(.deny) } label: {
-                    Text("Deny").frame(maxWidth: .infinity)
+                    Text("Deny").font(.app(.body)).frame(maxWidth: .infinity)
                 }
                 Button { voice.resolve(.allow, allowAll: true) } label: {
-                    Text("Always").frame(maxWidth: .infinity)
+                    Text("Always").font(.app(.body)).frame(maxWidth: .infinity)
                 }
                 Button { voice.resolve(.allow) } label: {
-                    Text("Allow").frame(maxWidth: .infinity)
+                    Text("Allow").font(.app(.body)).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -248,8 +250,8 @@ struct VoiceTrayPanel: View {
                                help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: system).font(.system(size: 11, weight: .medium))
-                Text(label).font(.caption2.weight(.medium))
+                Image(systemName: system).font(.app(.subheadline, weight: .medium))
+                Text(L10n.text(label)).font(.app(.caption2).weight(.medium))
             }
             .foregroundStyle(tint ?? .secondary)
         }

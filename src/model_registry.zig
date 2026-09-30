@@ -29,8 +29,8 @@ const token_mask_mod = @import("token_mask.zig");
 const rp_mod = @import("reasoning_protocol.zig");
 const model_discovery = @import("model_discovery.zig");
 const io_util = @import("io_util.zig");
-const arch_ds4 = if (@import("build_options").ios) @import("arch/ds4_stub.zig") else @import("arch/ds4.zig");
-const arch_llama = if (@import("build_options").ios) @import("arch/llama_stub.zig") else @import("arch/llama.zig");
+const arch_ds4 = if (@import("build_options").macos_engines) @import("arch/ds4.zig") else @import("arch/ds4_stub.zig");
+const arch_llama = if (@import("build_options").macos_engines) @import("arch/llama.zig") else @import("arch/llama_stub.zig");
 const gen_mod = @import("gen.zig");
 const generate_mod = @import("generate.zig");
 const log = @import("log.zig");
@@ -240,6 +240,9 @@ pub const LoadedModel = struct {
     /// `LlamaEngine` / `LlamaSession`. Mutually exclusive with the safetensors
     /// fields and `ds4_engine` (set for every `.gguf` except DeepSeek-V4-Flash).
     llama_engine: ?*arch_llama.LlamaEngine = null,
+    /// Whether lib/mlx-serve-gguf would claim this (unloaded) entry; answered
+    /// once, on the first `/v1/models` render.
+    mlx_gguf_claim: ?bool = null,
 
     /// Native media-generation engines, named by MODALITY (not by the FLUX/
     /// Qwen3-TTS/LTX implementations, which are swappable internals). When one
@@ -251,6 +254,7 @@ pub const LoadedModel = struct {
     audio_engine: ?*gen_mod.AudioEngine = null,
     video_engine: ?*gen_mod.VideoEngine = null,
     mesh_engine: ?*gen_mod.MeshEngine = null,
+    decision_engine: ?*gen_mod.DecisionEngine = null,
     /// Model-wide serialization gate for media generation — mirrors
     /// `session_busy`. A gen runs to completion on the inference thread
     /// (the sole mlx caller), so gen-vs-gen is already serial; this flag makes
@@ -404,6 +408,10 @@ pub const LoadedModel = struct {
         if (self.mesh_engine) |e| {
             e.deinit();
             self.mesh_engine = null;
+        }
+        if (self.decision_engine) |e| {
+            e.deinit();
+            self.decision_engine = null;
         }
         self.gen_busy = false;
         if (self.mtp) |h| {
@@ -571,6 +579,10 @@ pub const LoadedModel = struct {
             e.deinit();
             self.mesh_engine = null;
         }
+        if (self.decision_engine) |e| {
+            e.deinit();
+            self.decision_engine = null;
+        }
         self.gen_busy = false;
         if (self.mtp) |h| {
             // Only the Qwen sidecar is a separately allocated object; an
@@ -689,6 +701,9 @@ pub const ModelRegistry = struct {
     /// specifies the literal "mlx-serve"). Borrowed from the corresponding
     /// entry's `id`; valid for the registry's lifetime.
     default_id: []const u8,
+    /// The default came from a headless load, not `--model` or an explicit
+    /// `setDefault`, so it follows the latest chat-capable load.
+    default_promoted: bool = false,
 
     /// Cap on `.ready` entries. ensureLoaded evicts before exceeding.
     max_resident_models: u32,
@@ -853,19 +868,21 @@ pub const ModelRegistry = struct {
     ///
     /// Exists for models OUTSIDE the --model-dir scan: the app auto-downloads
     /// a small embedding encoder and registers it here no matter which org
-    /// dir the chat model (and thus --model-dir) points at.
-    pub fn registerByPath(self: *ModelRegistry, io: std.Io, abs_path: []const u8) ![]const u8 {
+    /// dir the chat model (and thus --model-dir) points at. `id` null names
+    /// the entry after the dir's basename.
+    pub fn registerByPath(self: *ModelRegistry, io: std.Io, abs_path: []const u8, id: ?[]const u8) ![]const u8 {
         var trimmed = abs_path;
         while (trimmed.len > 0 and trimmed[trimmed.len - 1] == '/') trimmed = trimmed[0 .. trimmed.len - 1];
         const base = std.fs.path.basename(trimmed);
         if (base.len == 0) return error.InvalidModelPath;
+        const reg_id = id orelse base;
 
         // Fast path: already registered (discovered, --model, or a previous
         // register-by-path). No filesystem touch.
         {
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
-            if (self.entries.get(base)) |existing| return existing.id;
+            if (self.entries.get(reg_id)) |existing| return existing.id;
         }
 
         // A discovery entry may hold this path under an org/name id whose
@@ -878,8 +895,8 @@ pub const ModelRegistry = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         // Re-check under the lock — another conn thread may have raced us.
-        if (self.entries.get(base)) |existing| return existing.id;
-        const stub = try self.registerStubWithArch(base, trimmed, probe.bytes_on_disk, probe.model_type);
+        if (self.entries.get(reg_id)) |existing| return existing.id;
+        const stub = try self.registerStubWithArch(reg_id, trimmed, probe.bytes_on_disk, probe.model_type);
         return stub.id;
     }
 
@@ -894,6 +911,7 @@ pub const ModelRegistry = struct {
         defer self.mutex.unlock(self.io);
         const entry = self.entries.get(id) orelse return error.UnknownModelId;
         self.default_id = entry.id;
+        self.default_promoted = false;
     }
 
     /// Look up an entry by its on-disk path (trailing slashes ignored).
@@ -923,24 +941,34 @@ pub const ModelRegistry = struct {
     /// Re-run discovery over the roots the server booted with and absorb NEW
     /// dirs as `.unloaded` stubs (`POST /v1/models/rescan` — the Model
     /// Browser downloads models while the server runs, and a boot-only scan
-    /// can't see them). Add-only: an id or path already registered wins
-    /// (first-wins, like boot) and live entries are never re-pointed or
-    /// removed. Returns the number of stubs added. No roots (a `--model`-only
-    /// server) rescans nothing.
+    /// can't see them). An id or path already registered wins (first-wins,
+    /// like boot) and live entries are never re-pointed or removed; a failed
+    /// load still found on disk goes back to `.unloaded` so the next load
+    /// re-reads its dir. Returns the number of stubs added. No roots (a
+    /// `--model`-only server) rescans nothing.
     pub fn rescan(self: *ModelRegistry) !u32 {
         const roots = if (self.discovery) |d| d.roots else &.{};
         if (roots.len == 0) return 0;
         var found = try model_discovery.discoverModelsMany(self.io, self.allocator, roots);
         defer found.deinit();
         var added: u32 = 0;
+        var cleared: u32 = 0;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         for (found.models) |m| {
-            if (self.entries.get(m.id) != null) continue;
+            if (self.entries.get(m.id)) |e| {
+                if (e.state == .error_state and std.mem.eql(u8, e.path, m.path)) {
+                    self.markUnloadedLocked(e);
+                    e.bytes_on_disk = m.bytes_on_disk;
+                    cleared += 1;
+                }
+                continue;
+            }
             if (self.peekByPathLocked(m.path) != null) continue;
             _ = try self.registerStubWithArch(m.id, m.path, m.bytes_on_disk, m.model_type);
             added += 1;
         }
+        if (cleared > 0) log.info("[registry] rescan cleared {d} failed load(s)\n", .{cleared});
         return added;
     }
 
@@ -1208,12 +1236,16 @@ pub const ModelRegistry = struct {
         // default, so requests addressing the "mlx-serve" alias (the app's
         // chat/avatar surfaces, Claude Code) 503 with no_model even after the
         // user loads a chat model via /v1/load-model — the live gen-first→
-        // chat-later hole (2026-07-05). The FIRST chat-capable model to finish
-        // loading becomes the default; media engines and embedding encoders
-        // never qualify, and an existing default is never stolen.
-        if (self.default_id.len == 0 and chatCapable(entry)) {
+        // chat-later hole (2026-07-05). The LATEST chat-capable load is the
+        // default, so a model-less request never swaps back to an older model;
+        // media engines and embedding encoders never qualify, and an explicit
+        // default (`--model`, `setDefault`) is never stolen.
+        if ((self.default_id.len == 0 or self.default_promoted) and chatCapable(entry) and
+            !std.mem.eql(u8, self.default_id, entry.id))
+        {
             self.default_id = entry.id;
-            log.info("[registry] default model -> {s} (first chat-capable load on a headless server)\n", .{entry.id});
+            self.default_promoted = true;
+            log.info("[registry] default model -> {s} (latest chat-capable load on a headless server)\n", .{entry.id});
         }
         self.state_cond.broadcast(self.io);
     }
@@ -1470,7 +1502,7 @@ test "ModelRegistry: registerByPath reuses an existing id without touching the f
     const stub = try reg.registerStubWithArch("bge-x", "/models/bge-x", 64, "bert");
     // The path's parent doesn't exist — proves the fast path resolves by
     // basename before any probe.
-    const id = try reg.registerByPath(io, "/nonexistent/parent/bge-x/");
+    const id = try reg.registerByPath(io, "/nonexistent/parent/bge-x/", null);
     try testing.expectEqualStrings("bge-x", id);
     try testing.expectEqual(stub.id.ptr, id.ptr);
 }
@@ -1492,7 +1524,7 @@ test "ModelRegistry: peekByPath dedupes org/name discovery ids against basename 
     try testing.expect(reg.peekByPath("/models/elsewhere") == null);
     // registerByPath also resolves through the path before creating a stub
     // (basename fast path misses, path match hits, no filesystem probe).
-    const id = try reg.registerByPath(io, "/models/mlx-community/gemma-x/");
+    const id = try reg.registerByPath(io, "/models/mlx-community/gemma-x/", null);
     try testing.expectEqualStrings("mlx-community/gemma-x", id);
     try testing.expectEqual(@as(usize, 1), reg.entries.count());
 }
@@ -1501,8 +1533,8 @@ test "ModelRegistry: registerByPath rejects a nonexistent directory" {
     const io = std.Io.Threaded.global_single_threaded.io();
     var reg = try ModelRegistry.init(testing.allocator, io, null, 3, 0, null);
     defer reg.deinit();
-    try testing.expectError(error.ModelDirNotFound, reg.registerByPath(io, "/nonexistent/parent/some-model"));
-    try testing.expectError(error.InvalidModelPath, reg.registerByPath(io, "/"));
+    try testing.expectError(error.ModelDirNotFound, reg.registerByPath(io, "/nonexistent/parent/some-model", null));
+    try testing.expectError(error.InvalidModelPath, reg.registerByPath(io, "/", null));
 }
 
 test "LoadedModel: a reload frees the CPU state the previous load left behind" {
@@ -2096,11 +2128,18 @@ test "ModelRegistry: first chat-capable ready load becomes the default on a head
     try testing.expectEqual(chat, via_alias);
     reg.release(via_alias);
 
-    // A LATER chat load never steals an existing default.
+    // A promoted default follows the latest chat load...
     const chat2 = try reg.registerStub("qwen", "/m/qwen", 64);
     var chat2_cfg = model_mod.ModelConfig{};
     chat2_cfg.model_type = "qwen3";
     chat2.config = &chat2_cfg;
+    reg.mutex.lockUncancelable(reg.io);
+    reg.markReadyLocked(chat2, 64);
+    reg.mutex.unlock(reg.io);
+    try testing.expectEqualStrings("qwen", reg.default_id);
+
+    // ...but an explicit default is never stolen.
+    try reg.setDefault("gemma");
     reg.mutex.lockUncancelable(reg.io);
     reg.markReadyLocked(chat2, 64);
     reg.mutex.unlock(reg.io);
@@ -2144,4 +2183,59 @@ test "ModelRegistry: rescan absorbs newly downloaded dirs as stubs (add-only, id
     // Idempotent: nothing new on disk, nothing added, the boot entry untouched.
     try testing.expectEqual(@as(u32, 0), try reg.rescan());
     try testing.expect(reg.peek("org/first") != null);
+}
+
+test "ModelRegistry: rescan clears a failed load so the completed dir can load again" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+
+    try tmp.dir.createDirPath(io, "org/broken");
+    try tmp.dir.writeFile(io, .{ .sub_path = "org/broken/config.json", .data = "{\"model_type\":\"llama\"}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "org/broken/model.safetensors", .data = "0123" });
+    try tmp.dir.createDirPath(io, "org/fine");
+    try tmp.dir.writeFile(io, .{ .sub_path = "org/fine/config.json", .data = "{\"model_type\":\"llama\"}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "org/fine/model.safetensors", .data = "0123" });
+
+    const discovery = try model_discovery.discoverModelsMany(io, testing.allocator, &.{root});
+    var reg = try ModelRegistry.init(testing.allocator, io, discovery, 3, 0, null);
+    defer reg.deinit();
+    const broken = reg.peek("org/broken") orelse return error.TestExpectedResult;
+    reg.mutex.lockUncancelable(io);
+    reg.markErrorLocked(broken, "FileNotFound");
+    reg.mutex.unlock(io);
+
+    // The download finishes after the failed load.
+    try tmp.dir.writeFile(io, .{ .sub_path = "org/broken/model.safetensors", .data = "01234567" });
+
+    try testing.expectEqual(@as(u32, 0), try reg.rescan());
+    try testing.expectEqual(LoadState.unloaded, broken.state);
+    try testing.expectEqual(@as(?[]const u8, null), broken.error_name);
+    try testing.expectEqual(@as(?u64, 8), broken.bytes_on_disk);
+    const fine = reg.peek("org/fine") orelse return error.TestExpectedResult;
+    try testing.expectEqual(LoadState.unloaded, fine.state);
+    try testing.expectEqual(@as(?u64, 4), fine.bytes_on_disk);
+}
+
+test "ModelRegistry: registerByPath registers under the caller's org/name id" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    try tmp.dir.createDirPath(io, "org/name");
+    try tmp.dir.writeFile(io, .{ .sub_path = "org/name/config.json", .data = "{\"model_type\":\"llama\"}" });
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/org/name", .{root_buf[0..root_len]});
+    defer testing.allocator.free(path);
+
+    var reg = try ModelRegistry.init(testing.allocator, io, null, 3, 0, null);
+    defer reg.deinit();
+    const id = try reg.registerByPath(io, path, "org/name");
+    try testing.expectEqualStrings("org/name", id);
+    try testing.expect(reg.peek("org/name") != null);
+    try testing.expectEqualStrings(id, try reg.registerByPath(io, path, "org/name"));
+    try testing.expectEqual(@as(usize, 1), reg.entries.count());
 }

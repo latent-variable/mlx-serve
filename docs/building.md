@@ -1,3 +1,5 @@
+[English](building.md) · [简体中文](zh-CN/building.md)
+
 # Building from source
 
 You only need this if you're hacking on mlx-serve. To just use it, grab [the app](https://github.com/ddalcu/mlx-serve/releases/latest) or `brew install mlx-serve`.
@@ -17,7 +19,7 @@ One script builds everything:
 git clone --recurse-submodules https://github.com/ddalcu/mlx-serve && cd mlx-serve
 brew bundle install --file=Brewfile
 ./app/build.sh
-open "app/MLX Core.app"
+open "app/MLX-Serve.app"
 ```
 
 `app/build.sh` snaps the pinned submodules back to their commits, stages llama.cpp and the Zig nightly, builds mlx + mlx-c with NAX kernels asserted, compiles the Swift app and the Zig server, then bundles and signs. With no signing identity in the environment it signs ad-hoc and skips notarization, so no Apple developer account is needed. Releases are cut by `.github/workflows/release.yml`.

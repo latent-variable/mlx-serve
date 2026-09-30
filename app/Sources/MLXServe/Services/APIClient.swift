@@ -199,7 +199,10 @@ class APIClient {
             capabilities: caps,
             drafterLoaded: meta["drafter_loaded"] as? Bool ?? false,
             drafterPath: meta["drafter_path"] as? String,
+            drafterStone: (meta["drafter_path"] as? String).flatMap { DrafterGems.readConfig($0) }.flatMap { DrafterGems.stone(drafterConfig: $0) },
             mtpLoaded: meta["mtp_loaded"] as? Bool ?? false,
+            mtpAvailable: meta["mtp_available"] as? Bool,
+            specExact: meta["spec_exact"] as? Bool,
             kvQuant: meta["kv_quant"] as? String ?? "",
             loaded: topLoaded,
             state: topState,
@@ -225,21 +228,20 @@ class APIClient {
     /// side-load must NOT carry it — it loads BESIDE the chat model, and
     /// stealing the default would re-route every aliased chat request to a
     /// model that 400s them.
-    static func loadModelBody(id: String, drafterPath: String?, setDefault: Bool) -> [String: Any] {
+    static func loadModelBody(id: String, setDefault: Bool) -> [String: Any] {
         var body: [String: Any] = ["model": id]
-        if let drafterPath { body["drafter_path"] = drafterPath }
         if setDefault { body["default"] = true }
         return body
     }
 
-    func loadModel(port: UInt16, id: String, drafterPath: String? = nil, setDefault: Bool = false) async throws -> ModelInfo {
+    func loadModel(port: UInt16, id: String, setDefault: Bool = false) async throws -> ModelInfo {
         let url = serverURL(port: port, path: "/v1/load-model")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // Load can take 10–60 s on a fresh model; raise above the default.
         request.timeoutInterval = 180
-        let body = Self.loadModelBody(id: id, drafterPath: drafterPath, setDefault: setDefault)
+        let body = Self.loadModelBody(id: id, setDefault: setDefault)
         // withoutEscapingSlashes: `id` may be an absolute path (the
         // auto-downloaded encoder registers by path) — keep it readable in
         // logs. The server unescapes either form.
@@ -405,6 +407,20 @@ class APIClient {
         return PropsSnapshot(memory: MemoryInfo.parse(mem), specCost: SpecCostInfo.parse(json), batching: BatchingInfo.parse(json))
     }
 
+    /// The whole `/props` document. Settings are per MODEL and the bare
+    /// route answers for the default one, so a benchmark names the model it
+    /// measures (with two chat models resident a row would otherwise record
+    /// the other's KV quant); nil is the bare route, for discovering that
+    /// default. Parsing lives in `BenchmarkSettings.flatten`; this hands
+    /// back raw JSON.
+    func fetchPropsRaw(port: UInt16, model: String? = nil) async throws -> [String: Any] {
+        var components = URLComponents(url: serverURL(port: port, path: "/props"), resolvingAgainstBaseURL: false)
+        components?.queryItems = model.map { [URLQueryItem(name: "model", value: $0)] }
+        let url = components?.url ?? serverURL(port: port, path: "/props")
+        let (data, _) = try await session.data(from: url)
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
     /// Live throughput feed. 503s when the server was launched without
     /// `--metrics`, which reads as nil (the tray hides the rows).
     func fetchThroughput(port: UInt16) async throws -> ThroughputSnapshot? {
@@ -413,6 +429,108 @@ class APIClient {
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return ThroughputSnapshot.parse(json, at: Date().timeIntervalSinceReferenceDate)
+    }
+
+    // MARK: - Benchmarking
+
+    /// The server's own measurement of one completion.
+    ///
+    /// A client cannot honestly time our stream: the SSE cadence is not the
+    /// decode cadence (and with `tools` present the server buffers everything
+    /// and flushes at the end, which is how the console once reported 937
+    /// tok/s on a 2B). The `timings` block is measured around the forward
+    /// passes, so it is the only defensible source for a published number.
+    struct CompletionTimings {
+        var promptTokens: Int
+        var cachedTokens: Int
+        var prefillMs: Double
+        var prefillTps: Double
+        var completionTokens: Int
+        var decodeMs: Double
+        var decodeTps: Double
+        var tokenizeMs: Double
+        var finishReason: String
+        /// The answer text, only when the caller asked for it.
+        var content: String
+
+        /// Server-side time to first token.
+        var ttftMs: Double { tokenizeMs + prefillMs }
+
+        // NOTE: deliberately no `reusedCache` here. `cachedTokens > 0` looks
+        // like the obvious test and is wrong — the chat-template header always
+        // matches, so it is never zero and every run gets thrown away. The
+        // judgement is benchmark methodology, not HTTP:
+        // `BenchmarkPrompt.prefillWasReused`.
+    }
+
+    /// One non-streaming benchmark request. Sampling is pinned (temp 0, top_p 1,
+    /// thinking off) so the workload is identical on every machine.
+    func benchmarkCompletion(
+        port: UInt16,
+        model: String,
+        prompt: String,
+        maxTokens: Int,
+        returnsContent: Bool = false,
+        timeout: TimeInterval = 900
+    ) async throws -> CompletionTimings {
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // A cold load on a large checkpoint is minutes, and a 128-token decode
+        // on a 235B is not fast either.
+        request.timeoutInterval = timeout
+
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [["role": "user", "content": prompt]],
+            "max_tokens": maxTokens,
+            "temperature": 0,
+            "top_p": 1,
+            "stream": false,
+            // Thinking would spend the token budget before any answer starts,
+            // making the decode figure depend on the model's mood.
+            "enable_thinking": false,
+        ]
+        // withoutEscapingSlashes: a LAN model id must not ship as `\/`.
+        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let snippet = String(data: data, encoding: .utf8)?.prefix(300) ?? ""
+            throw APIError.badStatus(code: code, detail: String(snippet))
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw URLError(.cannotParseResponse)
+        }
+        // No `timings` means the server measured nothing for us — publishing a
+        // client-side stopwatch instead would be the 937-tok/s bug.
+        guard let timings = json["timings"] as? [String: Any] else {
+            throw APIError.badStatus(code: 200, detail: "response carried no timings block")
+        }
+
+        func number(_ key: String) -> Double {
+            (timings[key] as? NSNumber)?.doubleValue ?? 0
+        }
+        let choice = (json["choices"] as? [[String: Any]])?.first
+        let finish = choice?["finish_reason"] as? String ?? ""
+        let content = returnsContent
+            ? ((choice?["message"] as? [String: Any])?["content"] as? String ?? "")
+            : ""
+
+        return CompletionTimings(
+            promptTokens: Int(number("prompt_n")),
+            cachedTokens: Int(number("cached_n")),
+            prefillMs: number("prompt_ms"),
+            prefillTps: number("prompt_per_second"),
+            completionTokens: Int(number("predicted_n")),
+            decodeMs: number("predicted_ms"),
+            decodeTps: number("predicted_per_second"),
+            tokenizeMs: number("tokenize_ms"),
+            finishReason: finish,
+            content: content
+        )
     }
 
     // MARK: - Agent Tool Calling

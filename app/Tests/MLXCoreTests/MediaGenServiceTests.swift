@@ -366,9 +366,14 @@ final class MediaGenServiceTests: XCTestCase {
     }
 
     func testHintAndTipsLinkAreSelectedPerBackend() {
-        // LTX keeps its own guidance verbatim, including the 15-word floor.
-        XCTAssertEqual(H3PromptExamples.hint(for: .ltx, prompt: "a cat"),
-                       "LTX-Video performs best with detailed 4–8 sentence prompts. Try Examples or Prompt tips above.")
+        // LTX's hint is a 15-word floor. The BAR, not the wording: pinning the
+        // sentence verbatim broke this test on every copy edit.
+        let short = H3PromptExamples.hint(for: .ltx, prompt: "a cat")
+        XCTAssertNotNil(short)
+        XCTAssertTrue(short!.contains("LTX"), "names the engine the advice is for")
+        let fourteen = Array(repeating: "word", count: 14).joined(separator: " ")
+        XCTAssertNotNil(H3PromptExamples.hint(for: .ltx, prompt: fourteen))
+        XCTAssertNil(H3PromptExamples.hint(for: .ltx, prompt: fourteen + " more"), "fifteen words is enough")
         XCTAssertNil(H3PromptExamples.hint(for: .ltx, prompt: H3PromptExamples.ltx[0].body))
         XCTAssertNil(H3PromptExamples.hint(for: .ltx, prompt: ""), "an empty field shows the placeholder, not a warning")
 
@@ -708,7 +713,7 @@ final class MediaGenServiceTests: XCTestCase {
         XCTAssertNil(decoded?.audioPCM)
     }
 
-    func testRefPayloadsBuildFromREALFilesOnDisk() throws {
+    func testRefPayloadsBuildFromREALFilesOnDisk() async throws {
         // Every other ref2va test constructs `VideoRefPayloads` by hand, so the
         // half a user actually exercises — picked file on disk → decode →
         // base64 on the wire — was covered nowhere. That half is the one with
@@ -744,7 +749,8 @@ final class MediaGenServiceTests: XCTestCase {
         req.refVideoPaths = [clip.path]
         req.refAudioPaths = [clip.path]      // audio is extracted from any AV-readable file
 
-        let refs = try XCTUnwrap(VideoGenService.refPayloads(for: req), "a readable picked file must not fail the build")
+        let built = await VideoGenService.refPayloads(for: req)
+        let refs = try XCTUnwrap(built, "a readable picked file must not fail the build")
 
         // Image rides through UNCHANGED — the server resizes, so re-encoding here
         // would only throw away what the "max" sizing mode exists to keep.
@@ -772,23 +778,26 @@ final class MediaGenServiceTests: XCTestCase {
         // Same picked files against an FL2VA preset resolve to NOTHING — the
         // capability gate, proven on real input rather than on a struct.
         var fl = req; fl.model = .minimaxH3
-        let none = try XCTUnwrap(VideoGenService.refPayloads(for: fl))
+        let flBuilt = await VideoGenService.refPayloads(for: fl)
+        let none = try XCTUnwrap(flBuilt)
         XCTAssertTrue(none.images.isEmpty && none.videos.isEmpty && none.audios.isEmpty)
     }
 
-    func testRefPayloadsFailRatherThanSilentlyDroppingAnUnreadableFile() throws {
+    func testRefPayloadsFailRatherThanSilentlyDroppingAnUnreadableFile() async throws {
         // "Generated, but quietly without your reference" is the worst outcome:
         // it looks like the feature not working rather than the file not being
         // readable, and it costs a full generation to find out.
         var req = VideoGenRequest(model: .minimaxH3Ref2VA, prompt: "p", width: 960, height: 544,
                                   numFrames: 124, fps: 24, mode: .oneStage, steps: 30, cfgScale: 1.0)
         req.refImagePaths = ["/nonexistent/\(UUID().uuidString).png"]
-        XCTAssertNil(VideoGenService.refPayloads(for: req))
+        let missing = await VideoGenService.refPayloads(for: req)
+        XCTAssertNil(missing)
 
         var bad = VideoGenRequest(model: .minimaxH3Ref2VA, prompt: "p", width: 960, height: 544,
                                   numFrames: 124, fps: 24, mode: .oneStage, steps: 30, cfgScale: 1.0)
         bad.refVideoPaths = ["/nonexistent/\(UUID().uuidString).mp4"]
-        XCTAssertNil(VideoGenService.refPayloads(for: bad))
+        let unreadable = await VideoGenService.refPayloads(for: bad)
+        XCTAssertNil(unreadable)
     }
 
     func testWriteMP4WithAudioProducesAnAudioTrack() async throws {
@@ -979,6 +988,32 @@ final class MediaGenServiceTests: XCTestCase {
         XCTAssertEqual(ServerManager.resolveModelDir(repo: "mlx-community/flux2-klein-9b-4bit", modelsRoot: root), dir)
     }
 
+    /// A media pack whose config.json is present but whose completeness
+    /// marker is not (the server's `requiredMediaMarker`) must not resolve:
+    /// a half-pulled copy in the first root shadowed the complete copy in a
+    /// later one and every load 400'd as an incomplete media pack.
+    func testResolveModelDirSkipsAnIncompleteMediaPack() throws {
+        let fm = FileManager.default
+        let base = NSTemporaryDirectory() + "resolvedir-partial-\(UUID().uuidString)"
+        defer { try? fm.removeItem(atPath: base) }
+        let repo = "ddalcu/ACE-Step-1.5-XL-Turbo-MLX-Serve-8bit"
+        let cfg = Data("{\"model_type\":\"acestep\"}".utf8)
+
+        let partialRoot = base + "/dl", fullRoot = base + "/models"
+        let partial = (partialRoot as NSString).appendingPathComponent(repo)
+        let full = (fullRoot as NSString).appendingPathComponent(repo)
+        try fm.createDirectory(atPath: partial, withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: full + "/text_encoder", withIntermediateDirectories: true)
+        for dir in [partial, full] {
+            fm.createFile(atPath: dir + "/config.json", contents: cfg)
+            fm.createFile(atPath: dir + "/model.safetensors", contents: Data([0, 1]))
+        }
+        fm.createFile(atPath: full + "/text_encoder/model.safetensors", contents: Data([0, 1]))
+
+        XCTAssertNil(ServerManager.resolveModelDir(repo: repo, roots: [partialRoot]))
+        XCTAssertEqual(ServerManager.resolveModelDir(repo: repo, roots: [partialRoot, fullRoot]), full)
+    }
+
     // MARK: - Residency default
 
     func testKeepResidentDefaultsOff() {
@@ -1019,6 +1054,26 @@ final class MediaGenServiceTests: XCTestCase {
             XCTAssertTrue(p.supportsLoRA)
             XCTAssertFalse(p.stepsAreFixed)
             XCTAssertGreaterThan(p.condWeightCount, 0)
+        }
+    }
+
+    /// Each flag mirrors `gen.zig`'s `.qwen_image` arm.
+    func testQwenImagePresetsOfferOnlyWhatTheBackendHonors() {
+        for p in [ImageModelPreset.qwenImage21_8bit, .qwenImage21_4bit] {
+            XCTAssertTrue(p.supportsImg2Img, "\(p.id): VAE encoder loads on first use")
+            XCTAssertTrue(p.supportsGuidance, "\(p.id): undistilled, real CFG")
+            XCTAssertFalse(p.supportsLoRA, "\(p.id): 0 matched modules -> 400")
+            XCTAssertFalse(p.supportsReferenceEdit)
+            XCTAssertEqual(p.condWeightCount, 0)
+            XCTAssertFalse(p.stepsAreFixed)
+            XCTAssertEqual(p.settings(.quality).steps, 40, "\(p.id): the checkpoint's own default")
+            XCTAssertEqual(p.resolutionGrid.alignment, 16)
+            for r in p.resolutions {
+                XCTAssertEqual(r.width % 16, 0)
+                XCTAssertEqual(r.height % 16, 0)
+            }
+            XCTAssertTrue(ImageModelPreset.all.contains(p))
+            XCTAssertTrue(p.bundle.components[0].readyMarkers.contains("processor"))
         }
     }
 

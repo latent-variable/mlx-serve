@@ -47,8 +47,8 @@ final class AgentsWorkspaceModel: ObservableObject {
            WakeWord.collides(phrase, with: store.takenWakePhrases(excluding: d.id)) {
             d.wakePhrase = nil
             draft = d
-            message("That wake phrase is taken",
-                    "Another agent (or the app's own phrase) already answers to that name, so both would be unreachable. Pick a different one.")
+            message(L10n.text("That wake phrase is taken"),
+                    L10n.text("Another agent (or the app's own phrase) already answers to that name, so both would be unreachable. Pick a different one."))
         }
         store.update(d)
         // A live tab talking to this agent picks the change up on its next
@@ -112,7 +112,7 @@ struct AgentListPane: View {
 
     private var paneTitleOnly: some View {
         Text("Agents")
-            .font(.headline)
+            .font(.app(.headline))
             .foregroundStyle(.primary)
             .padding(.leading, 4)
     }
@@ -125,7 +125,7 @@ struct AgentListPane: View {
                 Button {
                     newAgent(basedOn: starter)
                 } label: {
-                    Label(starter.name, systemImage: starter.symbol)
+                    Label(starter.name, systemImage: starter.symbol).font(.app(.body))
                 }
             }
         }
@@ -133,13 +133,16 @@ struct AgentListPane: View {
         Button {
             newAgent(basedOn: nil)
         } label: {
-            Label("Blank agent", systemImage: "square.dashed")
+            Label("Blank agent", systemImage: "square.dashed").font(.app(.body))
         }
     }
 
     private var list: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
+                if let kept = store.undecodableIndexURL {
+                    unreadableIndexNotice(kept)
+                }
                 sectionLabel("Your agents")
                 createRow
                 ForEach(store.sortedAgents) { agent in
@@ -156,9 +159,24 @@ struct AgentListPane: View {
         }
     }
 
+    /// An empty column has two very different causes; this one names the file the
+    /// agents are still in, rather than leaving the list unexplained.
+    private func unreadableIndexNotice(_ url: URL) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Label(L10n.text("Saved agents couldn't be read"), systemImage: "exclamationmark.triangle")
+                .font(.app(.caption).weight(.semibold))
+                .foregroundStyle(.orange)
+            Text(L10n.format("The file is kept at %@.", url.lastPathComponent))
+                .font(.app(.caption2))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 6)
+    }
+
     private func sectionLabel(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(.caption2.weight(.semibold))
+        Text(L10n.text(title).uppercased())
+            .font(.app(.caption2).weight(.semibold))
             .foregroundStyle(.secondary)
             .kerning(0.5)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -175,10 +193,10 @@ struct AgentListPane: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.app(.callout, weight: .semibold))
                     .frame(width: 18)
                 Text("Create New Agent")
-                    .font(.subheadline)
+                    .font(.app(.subheadline))
                 Spacer(minLength: 0)
             }
             .foregroundStyle(.secondary)
@@ -241,13 +259,17 @@ struct AgentDetailPane: View {
                                 appState.startChat(withAgent: draft.id)
                             },
                             onDuplicate: { duplicate(draft) },
-                            onDelete: { model.alert = .init(title: "Delete “\(draft.name)”?",
+                            // The format runs at the producer: the title is
+                            // rendered verbatim in the alert, so building the
+                            // sentence first would leave the key unreachable.
+                            onDelete: { model.alert = .init(title: L10n.format("Delete “%@”?", draft.name),
                                                             kind: .confirmDelete(draft)) },
                             onNotify: { model.message($0, $0) })
             } else {
                 ContentUnavailableView("No agent selected",
                                        systemImage: "person.crop.circle.badge.questionmark",
-                                       description: Text("Pick an agent, or create one from a type."))
+                                       description: Text("Pick an agent, or create one from a type.")
+                                                          .font(.app(.callout)))
             }
         }
         .onChange(of: model.selectedId) { _, newValue in
@@ -317,8 +339,8 @@ struct AgentDetailPane: View {
         guard var d = model.draft, !d.isBuiltIn else { return }
         let brief = d.brief.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !brief.isEmpty else {
-            model.message("Describe the agent first",
-                          "Write a line or two about the assistant you want, then let the model turn it into a prompt.")
+            model.message(L10n.text("Describe the agent first"),
+                          L10n.text("Write a line or two about the assistant you want, then let the model turn it into a prompt."))
             return
         }
         model.isWriting = true
@@ -329,8 +351,9 @@ struct AgentDetailPane: View {
                 result = try await AgentComposer.draftAgent(brief: brief, appState: appState)
             } catch {
                 result = AgentWriter.fallbackDraft(brief: brief)
-                model.message("Wrote it from your description",
-                              "\(error.localizedDescription)\n\nYour description was saved as the prompt — edit it directly, or try again once a model is running.")
+                model.message(L10n.text("Wrote it from your description"),
+                              L10n.format("%@\n\nYour description was saved as the prompt — edit it directly, or try again once a model is running.",
+                                          error.localizedDescription))
             }
             d.systemPrompt = result.systemPrompt
             if d.name.isEmpty || d.name == "New Agent" { d.name = result.name }
@@ -361,16 +384,17 @@ private struct AgentListRow: View {
         Button(action: select) {
             HStack(spacing: 8) {
                 Image(systemName: agent.symbol)
-                    .font(.system(size: 12))
+                    .font(.app(.callout))
                     .frame(width: 18)
                     .foregroundStyle(selectable ? Color.accentColor : .secondary)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(agent.name)
-                        .font(.subheadline)
+                    Text(agent.isBuiltIn ? L10n.text(agent.name) : agent.name)
+                        .font(.app(.subheadline))
                         .foregroundStyle(selected ? Color.accentColor : .primary)
                         .lineLimit(1)
                     if let sub = subtitle {
-                        Text(sub).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        Text(agent.isBuiltIn ? L10n.text(sub) : sub)
+                            .font(.app(.caption2)).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 0)
@@ -400,18 +424,18 @@ private struct AgentListRow: View {
         if hovering || selected {
             Button(action: startChat) {
                 Image(systemName: "bubble.left.and.bubble.right")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.app(.subheadline, weight: .medium))
                     .foregroundStyle(selected ? Color.accentColor : .secondary)
                     .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(!selectable)
-            .help("Start a chat with \(agent.name)")
+            .help(L10n.format("Start a chat with %@", agent.isBuiltIn ? L10n.text(agent.name) : agent.name))
             .padding(.trailing, 6)
         } else if agent.isBuiltIn {
             Image(systemName: "lock")
-                .font(.caption2)
+                .font(.app(.caption2))
                 .foregroundStyle(.tertiary)
                 .padding(.trailing, 10)
                 .help("Built-in — duplicate it to make changes")
@@ -542,7 +566,7 @@ private struct AgentEditor: View {
     private var nameField: some View {
         TextField("Name", text: $agent.name)
             .textFieldStyle(.plain)
-            .font(.title3.weight(.medium))
+            .font(.app(.title3).weight(.medium))
             .disabled(readOnly)
     }
 
@@ -559,9 +583,10 @@ private struct AgentEditor: View {
                 HStack(spacing: 8) {
                     Image(systemName: "lock.fill").foregroundStyle(.secondary)
                     Text("This is one of the built-in agents. Duplicate it to make it yours.")
-                        .font(.callout)
+                        .font(.app(.callout))
                     Spacer(minLength: 8)
-                    Button("Duplicate", action: onDuplicate)
+                    Button(action: onDuplicate, label: { Text("Duplicate")
+                        .font(.app(.body)) })
                 }
             }
         }
@@ -576,7 +601,7 @@ private struct AgentEditor: View {
                   axis: .vertical)
             .textFieldStyle(.plain)
             .lineLimit(1...3)
-            .disabled(readOnly)
+            .disabled(readOnly).font(.app(.body))
     }
 
     /// Duplicate and Delete, as icons. Delete is HIDDEN on a built-in rather
@@ -608,7 +633,7 @@ private struct AgentEditor: View {
     /// primary action is how the wrong one gets clicked.
     private var startChatButton: some View {
         Button(action: onStartChat) {
-            Label("Start Chat with this Agent", systemImage: "bubble.left.and.bubble.right")
+            Label("Start Chat with this Agent", systemImage: "bubble.left.and.bubble.right").font(.app(.body))
                 .frame(maxWidth: AgentEditorMetrics.primaryMaxWidth)
         }
         .buttonStyle(.borderedProminent)
@@ -620,7 +645,7 @@ private struct AgentEditor: View {
         Menu {
             ForEach(AgentSymbol.pickerChoices, id: \.self) { symbol in
                 Button { agent.symbol = symbol } label: {
-                    Label(symbol, systemImage: symbol)
+                    Label(L10n.text(symbol), systemImage: symbol)
                 }
             }
         } label: {
@@ -635,7 +660,7 @@ private struct AgentEditor: View {
 
     private var symbolBadge: some View {
         Image(systemName: agent.symbol)
-            .font(.system(size: 19, weight: .medium))
+            .font(.app(.title2, weight: .medium))
             .foregroundStyle(Color.accentColor)
             .frame(width: AgentEditorMetrics.avatarSize, height: AgentEditorMetrics.avatarSize)
             .background(Circle().fill(Color.accentColor.opacity(0.16)))
@@ -647,7 +672,7 @@ private struct AgentEditor: View {
     private var symbolEditHint: some View {
         if !readOnly {
             Image(systemName: "pencil.circle.fill")
-                .font(.system(size: 14))
+                .font(.app(.body))
                 .symbolRenderingMode(.palette)
                 .foregroundStyle(Color.white, Color.accentColor)
         }
@@ -668,7 +693,7 @@ private struct AgentEditor: View {
 
     private var wakePhraseRow: some View {
         AgentEditorRow("Wake phrase",
-                       caption: "Say this to hand the conversation to \(agent.name). Blank uses the app's own phrase.") {
+                       caption: L10n.format("Say this to hand the conversation to %@. Blank uses the app's own phrase.", agent.name)) {
             // `prompt:`, not the title argument — a TextField's title is a
             // LABEL, so passing the app phrase there parked it beside the
             // field permanently instead of showing through an empty one.
@@ -678,7 +703,7 @@ private struct AgentEditor: View {
                 .textFieldStyle(.plain)
                 .multilineTextAlignment(.trailing)
                 .frame(maxWidth: 220)
-                .disabled(readOnly)
+                .disabled(readOnly).font(.app(.body))
         }
     }
 
@@ -699,15 +724,15 @@ private struct AgentEditor: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: showMoreOptions ? "chevron.down" : "chevron.right")
-                    .font(.caption.weight(.semibold))
+                    .font(.app(.caption).weight(.semibold))
                     .foregroundStyle(.secondary)
-                Text("More options").font(.headline)
+                Text("More options").font(.app(.headline))
                 Spacer(minLength: 8)
                 // What's set behind the row while it's shut, so a collapsed
                 // non-default isn't a setting nobody can find again.
                 if !showMoreOptions, let summary = AgentAdvancedSummary.text(for: agent) {
-                    Text(summary)
-                        .font(.subheadline)
+                    Text(L10n.text(summary))
+                        .font(.app(.subheadline))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -737,7 +762,7 @@ private struct AgentEditor: View {
 
     private var promptEditor: some View {
         TextEditor(text: $agent.systemPrompt)
-            .font(.body)
+            .font(.app(.body))
             .scrollContentBackground(.hidden)
             .frame(minHeight: AgentEditorMetrics.promptMinHeight)
             .padding(AgentEditorMetrics.wellPadding)
@@ -758,12 +783,12 @@ private struct AgentEditor: View {
             // with two fields on one screen, which is confusing even when (as
             // here, sharing a binding) they cannot disagree.
             Text("Written from the description under the name.")
-                .font(.subheadline).foregroundStyle(.secondary)
+                .font(.app(.subheadline)).foregroundStyle(.secondary)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             Text("\(agent.systemPrompt.count)/\(AgentWriter.maxPromptCharacters)")
-                .font(.subheadline).foregroundStyle(.tertiary)
+                .font(.app(.subheadline)).foregroundStyle(.tertiary)
                 .monospacedDigit()
         }
     }
@@ -793,7 +818,7 @@ private struct AgentEditor: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .disabled(readOnly || showAdvancedTools)
-                .help("The tool-calling loop: shell, files, search, tasks, media generation.")
+                .help("The tool-calling loop: shell, files, search, tasks, media generation.").font(.app(.body))
         }
         AgentEditorRow("MCP") {
             Toggle("", isOn: Binding(get: { agent.capabilities.mcp },
@@ -801,7 +826,7 @@ private struct AgentEditor: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .disabled(readOnly)
-                .help("Add the tools from every enabled Model Context Protocol server.")
+                .help("Add the tools from every enabled Model Context Protocol server.").font(.app(.body))
         }
         AgentEditorRow("Web") {
             Toggle("", isOn: Binding(get: { agent.capabilities.web },
@@ -809,27 +834,27 @@ private struct AgentEditor: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .disabled(readOnly || showAdvancedTools)
-                .help("Browse pages and search the web (browse + webSearch).")
+                .help("Browse pages and search the web (browse + webSearch).").font(.app(.body))
         }
         AgentEditorRow("Thinking") {
             Picker("", selection: tristate($agent.enableThinking)) {
-                Text("App default").tag(TriChoice.appDefault)
-                Text("On").tag(TriChoice.on)
-                Text("Off").tag(TriChoice.off)
+                Text("App default").font(.app(.body)).tag(TriChoice.appDefault)
+                Text("On").font(.app(.body)).tag(TriChoice.on)
+                Text("Off").font(.app(.body)).tag(TriChoice.off)
             }
             .labelsHidden()
             .frame(width: Self.triPickerWidth)
-            .disabled(readOnly)
+            .disabled(readOnly).font(.app(.body))
         }
         AgentEditorRow("Approve tools") {
             Picker("", selection: tristate($agent.autoApproveTools)) {
-                Text("App default").tag(TriChoice.appDefault)
-                Text("Automatically").tag(TriChoice.on)
-                Text("Ask every time").tag(TriChoice.off)
+                Text("App default").font(.app(.body)).tag(TriChoice.appDefault)
+                Text("Automatically").font(.app(.body)).tag(TriChoice.on)
+                Text("Ask every time").font(.app(.body)).tag(TriChoice.off)
             }
             .labelsHidden()
             .frame(width: Self.triPickerWidth)
-            .disabled(readOnly)
+            .disabled(readOnly).font(.app(.body))
         }
     }
 
@@ -843,7 +868,7 @@ private struct AgentEditor: View {
         DisclosureGroup(isExpanded: $showAdvancedTools) {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Pick exactly which tools this agent may call. Turning this on freezes the coarse switches above.")
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .font(.app(.caption2)).foregroundStyle(.secondary)
                     // The chat's Tools menu's own groups (`AgentToolGroup`) —
                     // one grouping for both surfaces, and SessionToolDisableTests
                     // pins that the groups cover exactly the toggleable set. A
@@ -853,13 +878,13 @@ private struct AgentEditor: View {
                               alignment: .leading, spacing: 16) {
                         ForEach(AgentToolGroup.allCases, id: \.self) { group in
                             VStack(alignment: .leading, spacing: 6) {
-                                Text(group.title.uppercased())
-                                    .font(.caption2.weight(.semibold))
+                                Text(L10n.text(group.title).uppercased())
+                                    .font(.app(.caption2).weight(.semibold))
                                     .foregroundStyle(.secondary)
                                     .kerning(0.5)
                                 ForEach(group.tools, id: \.self) { tool in
                                     Toggle(isOn: toolBinding(tool)) {
-                                        Label(tool.displayName, systemImage: tool.icon)
+                                        Label(L10n.text(tool.displayName), systemImage: tool.icon).font(.app(.body))
                                     }
                                     .disabled(readOnly || !showAdvancedTools)
                                 }
@@ -867,10 +892,11 @@ private struct AgentEditor: View {
                         }
                     }
                     if showAdvancedTools {
-                        Button("Back to the simple switches") {
+                        Button {
                             agent.capabilities.closeAdvanced()
                             showAdvancedTools = false
-                        }
+                        } label: { Text("Back to the simple switches")
+                            .font(.app(.body)) }
                         .disabled(readOnly)
                     }
                 }
@@ -881,7 +907,7 @@ private struct AgentEditor: View {
                 // string label, so the word "Advanced" was dead. The label holds
                 // no buttons of its own, so a tap gesture here is safe (a parent
                 // gesture around embedded Buttons is what swallows child clicks).
-                Text("Advanced")
+                Text("Advanced").font(.app(.body))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                     .onTapGesture { showAdvancedTools.toggle() }
@@ -919,12 +945,12 @@ private struct AgentEditor: View {
         AgentEditorRow("Model") {
             Picker("", selection: Binding(get: { agent.modelPath ?? "" },
                                           set: { agent.modelPath = $0.isEmpty ? nil : $0 })) {
-                Text("Current").tag("")
+                Text("Current").font(.app(.body)).tag("")
                 ForEach(appState.localModels.filter(\.isChatPickable), id: \.path) { model in
-                    Text(model.name).tag(model.path)
+                    Text(model.name).font(.app(.body)).tag(model.path)
                 }
                 ForEach(appState.server.lanModels(capability: "chat"), id: \.name) { info in
-                    Text("\(info.name) (network)").tag(info.name)
+                    Text("\(info.name) (network)").font(.app(.body)).tag(info.name)
                 }
             }
             .labelsHidden()
@@ -939,19 +965,21 @@ private struct AgentEditor: View {
         case .needsDownload(let path):
             HStack {
                 Label("Not downloaded", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange).font(.subheadline)
+                    .foregroundStyle(.orange).font(.app(.subheadline))
                 Spacer(minLength: 8)
-                Button("Open Model Browser") {
+                Button {
                     appState.showModels()
-                }
+                } label: { Text("Open Model Browser")
+                    .font(.app(.body)) }
                 .controlSize(.small)
-                .help("This agent can't answer until \((path as NSString).lastPathComponent) is on disk. Nothing is downloaded automatically.")
+                .help(L10n.format("This agent can't answer until %@ is on disk. Nothing is downloaded automatically.",
+                                  (path as NSString).lastPathComponent))
             }
         case .unavailable(let reason):
-            Label(reason, systemImage: "wifi.slash").foregroundStyle(.orange).font(.subheadline)
+            Label(L10n.text(reason), systemImage: "wifi.slash").foregroundStyle(.orange).font(.app(.subheadline))
         case .noChange, .load, .lan:
             Text("Selecting this agent loads its model; “Current” leaves whatever is running alone.")
-                .font(.subheadline).foregroundStyle(.secondary)
+                .font(.app(.subheadline)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -963,8 +991,8 @@ private struct AgentEditor: View {
             AgentCard(spacing: 12) {
                 AgentEditorRow("Folder",
                                caption: "Where this agent's file and shell tools run. Several agents may share a folder.") {
-                    Text(agent.workingDirectory ?? "App default")
-                        .font(.subheadline.monospaced())
+                    Text(L10n.text(agent.workingDirectory ?? "App default"))
+                        .font(.app(.subheadline).monospaced())
                         .lineLimit(1).truncationMode(.head)
                         .foregroundStyle(agent.workingDirectory == nil ? .secondary : .primary)
                 }
@@ -975,7 +1003,7 @@ private struct AgentEditor: View {
 
     private var workspaceActions: some View {
         HStack(spacing: 8) {
-            Button("Choose…") {
+            Button {
                 guard let picked = WorkspacePicker.pickDirectory() else { return }
                 agent.workingDirectory = picked
                 // Per-agent folders need per-agent bookmarks under the
@@ -983,14 +1011,16 @@ private struct AgentEditor: View {
                 SecurityScopedBookmark.store(URL(fileURLWithPath: picked),
                                              name: SecurityScopedBookmark.agentWorkspaceName(agent.id))
                 onSave()
-            }
+            } label: { Text("Choose…")
+                .font(.app(.body)) }
             .disabled(readOnly)
             if agent.workingDirectory != nil {
-                Button("Reset") {
+                Button {
                     SecurityScopedBookmark.clear(name: SecurityScopedBookmark.agentWorkspaceName(agent.id))
                     agent.workingDirectory = nil
                     onSave()
-                }
+                } label: { Text("Reset")
+                    .font(.app(.body)) }
                 .disabled(readOnly)
             }
             Spacer(minLength: 0)
@@ -1016,8 +1046,8 @@ private struct AgentEditor: View {
         // just quietly speak in the system voice — say so instead.
         if case .clone = agent.voice, !ttsDownloaded,
            let reason = VoiceCloneMenuModel.cloneUnavailableReason(ttsModelDownloaded: false) {
-            Label(reason, systemImage: "exclamationmark.triangle.fill")
-                .font(.subheadline).foregroundStyle(.orange)
+            Label(L10n.text(reason), systemImage: "exclamationmark.triangle.fill")
+                .font(.app(.subheadline)).foregroundStyle(.orange)
         }
         voiceActions
     }
@@ -1030,13 +1060,15 @@ private struct AgentEditor: View {
 
     private var voiceActions: some View {
         HStack(spacing: 8) {
-            Button("Preview") { previewVoice() }
+            Button { previewVoice() } label: { Text("Preview")
+                .font(.app(.body)) }
                 .disabled(previewer.active != nil || agent.voice == nil)
-            Button("Add Voice…") { addVoiceClip() }
+            Button { addVoiceClip() } label: { Text("Add Voice…")
+                .font(.app(.body)) }
                 .disabled(readOnly)
                 .help("Add a recording of a voice to clone. It's normalized and kept in ~/.mlx-serve/voice-clips so any agent can use it later.")
             if let error = previewer.error ?? clipError {
-                Text(error).font(.subheadline).foregroundStyle(.orange)
+                Text(L10n.text(error)).font(.app(.subheadline)).foregroundStyle(.orange)
             }
             Spacer(minLength: 0)
         }
@@ -1142,7 +1174,7 @@ private struct AgentEditor: View {
             get: { value.wrappedValue == nil },
             set: { value.wrappedValue = $0 ? nil : seed }))
             .toggleStyle(.checkbox)
-            .disabled(readOnly)
+            .disabled(readOnly).font(.app(.body))
     }
 
     private func sliderRow(_ title: String, value: Binding<Double?>, seed: Double,
@@ -1160,7 +1192,7 @@ private struct AgentEditor: View {
                 }
                 .frame(width: 160)
                 Text(String(format: "%.2f", value.wrappedValue ?? seed))
-                    .font(.caption.monospaced())
+                    .font(.app(.caption).monospaced())
                     .foregroundStyle(isDefault ? .secondary : .primary)
                     .frame(width: Self.valueColumnWidth, alignment: .trailing)
                 appDefaultToggle(value: value, seed: seed)
@@ -1192,8 +1224,8 @@ private struct AgentEditor: View {
                     endLabels(ends, dimmed: isDefault)
                 }
                 .frame(width: 160)
-                Text(label(effective))
-                    .font(.caption.monospaced())
+                Text(L10n.text(label(effective)))
+                    .font(.app(.caption).monospaced())
                     .foregroundStyle(isDefault ? .secondary : .primary)
                     .frame(width: Self.valueColumnWidth, alignment: .trailing)
                 appDefaultToggle(value: value, seed: seed)
@@ -1204,11 +1236,11 @@ private struct AgentEditor: View {
     /// The one-word meaning of each end of a slider, tucked under the track.
     private func endLabels(_ ends: (String, String), dimmed: Bool) -> some View {
         HStack {
-            Text(ends.0)
+            Text(L10n.text(ends.0))
             Spacer()
-            Text(ends.1)
+            Text(L10n.text(ends.1))
         }
-        .font(.caption2)
+        .font(.app(.caption2))
         .foregroundStyle(dimmed ? .tertiary : .secondary)
     }
 
@@ -1231,7 +1263,7 @@ private struct AgentEditor: View {
                                                         ?? appState.serverOptions.defaultReasoningBudget) },
                     set: { agent.reasoningBudget = $0.budgetTokens })) {
                     ForEach(AgentReasoningEffort.allCases, id: \.self) { level in
-                        Text(level.label).tag(level)
+                        Text(L10n.text(level.label)).font(.app(.body)).tag(level)
                     }
                 }
                 // A MENU picker, like the Model row above it. As a segmented
@@ -1303,7 +1335,7 @@ private struct AgentVoiceMenu: View {
                 Divider()
                 Menu("Kokoro") {
                     ForEach(KokoroVoiceCatalog.grouped(), id: \.language) { group in
-                        Menu(group.language) {
+                        Menu(L10n.text(group.language)) {
                             ForEach(group.voices, id: \.self) { v in
                                 choice(KokoroVoiceCatalog.displayName(for: v),
                                        isOn: voice == .kokoro(v)) { voice = .kokoro(v) }
@@ -1313,7 +1345,7 @@ private struct AgentVoiceMenu: View {
                 }
                 Menu("Your voices") {
                     if !globalClipPath.isEmpty {
-                        choice(globalClipLabel.isEmpty ? "Settings clip" : "\(globalClipLabel) (Settings)",
+                        choice(globalClipLabel.isEmpty ? "Settings clip" : L10n.format("%@ (Settings)", globalClipLabel),
                                isOn: voice == .clone(globalClipPath)) { voice = .clone(globalClipPath) }
                             .disabled(!cloneAvailable)
                     }
@@ -1325,11 +1357,13 @@ private struct AgentVoiceMenu: View {
                         Text("No clips yet")
                     }
                     if let reason = VoiceCloneMenuModel.cloneUnavailableReason(ttsModelDownloaded: cloneAvailable) {
-                        Text(reason)
+                        Text(L10n.text(reason))
                     }
                     Divider()
-                    Button("Add Voice…", action: onAddClip)
-                    Button("Open Voices Folder", action: onRevealClips)
+                    Button(action: onAddClip, label: { Text("Add Voice…")
+                        .font(.app(.body)) })
+                    Button(action: onRevealClips, label: { Text("Open Voices Folder")
+                        .font(.app(.body)) })
                 }
                 Menu("System") {
                     ForEach(systemVoices) { v in
@@ -1338,7 +1372,7 @@ private struct AgentVoiceMenu: View {
                     if systemVoices.isEmpty { Text("No voices installed") }
                 }
             } label: {
-                Text(label)
+                Text(L10n.text(label))
             }
             .fixedSize()
     }
@@ -1347,7 +1381,7 @@ private struct AgentVoiceMenu: View {
     @ViewBuilder
     private func choice(_ title: String, isOn: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            if isOn { Label(title, systemImage: "checkmark") } else { Text(title) }
+            if isOn { Label(L10n.text(title), systemImage: "checkmark").font(.app(.body)) } else { Text(L10n.text(title)).font(.app(.body)) }
         }
     }
 

@@ -16,6 +16,8 @@ struct MusicGenView: View {
 
     @State private var prompt: String = ""
     @State private var lyrics: String = ""
+    /// Height of the lyrics editor — dragged by `lyricsResizeHandle`, sticky.
+    @State private var lyricsHeight: Double = PromptEditorHeight.defaultHeight
     @State private var model: MusicModelPreset = .acestepXLTurbo8bit
     /// Selected network model's routing id (`<model>@<peer>`); nil = local.
     @State private var lanModel: String? = nil
@@ -54,6 +56,9 @@ struct MusicGenView: View {
     // switch never reaches a server that refuses it.
     @State private var task: MusicTask = .text2music
     @State private var srcAudioURL: URL? = nil
+    /// The clip's length, read from its header once when it arrives — the file
+    /// runs to ~100 MB, so this is never re-read while the pane redraws.
+    @State private var srcSeconds: Double? = nil
     @State private var srcError: String? = nil
     @State private var isSrcDropTargeted: Bool = false
     @State private var srcBusy: Bool = false
@@ -99,19 +104,23 @@ struct MusicGenView: View {
         }
         .alert("Save style prompt", isPresented: $showSaveStyle) {
             TextField("Name", text: $saveTitle)
-            Button("Save") { library.saveStyle(title: saveTitle, body: prompt) }
+            Button { library.saveStyle(title: saveTitle, body: prompt) } label: { Text("Save")
+                .font(.app(.body)) }
                 .keyboardShortcut(.defaultAction)
-            Button("Cancel", role: .cancel) {}
+            Button(role: .cancel) {} label: { Text("Cancel")
+                .font(.app(.body)) }
         } message: {
-            Text("Give this style a name to reuse it from the Examples menu.")
+            Text("Give this style a name to reuse it from the Templates menu.").font(.app(.body))
         }
         .alert("Save lyrics", isPresented: $showSaveLyrics) {
             TextField("Name", text: $saveTitle)
-            Button("Save") { library.saveLyrics(title: saveTitle, body: lyrics) }
+            Button { library.saveLyrics(title: saveTitle, body: lyrics) } label: { Text("Save")
+                .font(.app(.body)) }
                 .keyboardShortcut(.defaultAction)
-            Button("Cancel", role: .cancel) {}
+            Button(role: .cancel) {} label: { Text("Cancel")
+                .font(.app(.body)) }
         } message: {
-            Text("Give these lyrics a name to reuse them from the Examples menu.")
+            Text("Give these lyrics a name to reuse them from the Templates menu.").font(.app(.body))
         }
         .sheet(item: $rewriteKind) { kind in
             PromptRewriteSheet(
@@ -131,18 +140,31 @@ struct MusicGenView: View {
     private var readyView: some View {
         HSplitView {
             ScrollView {
+                // The model decides what the rest of the pane means — whether
+                // there are source-audio modes at all, what Advanced holds,
+                // how long a track may be — so it is read first.
                 VStack(alignment: .leading, spacing: 14) {
+                    modelSection
                     if model.supportsSourceAudio { modeSection }
                     if sourceTask { sourceSection }
                     promptSection
                     lyricsSection
                     if model.supportsReferenceAudio { referenceSection }
-                    modelSection
-                    if sourceTask { sourceLengthNote } else { durationSection }
-                    if showAdvanced { advancedSection } else { advancedToggle }
-                    actionRow
+                    // No Duration in a source task: the clip is the length, and
+                    // the Source well already says how long that is.
+                    if !sourceTask { durationSection }
+                    // The 8 is a compensation, not a taste: a drop-target
+                    // section carries `.padding(6)` for its dashed highlight
+                    // whether or not a drag is in the air, so the Voice pane's
+                    // well opens this gap for free and Duration does not.
+                    advancedSection.padding(.top, 8)
+                    // Generate stands apart from the settings it acts on.
+                    actionRow.padding(.top, 14)
                 }
+                // Full-width, leading-aligned frame OUTSIDE the padding — see
+                // AudioGenView.
                 .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(minWidth: 340, idealWidth: 380)
 
@@ -162,13 +184,15 @@ struct MusicGenView: View {
             .frame(minWidth: 280)
         }
         .alert("Model exceeds your Mac's RAM", isPresented: $showRAMWarning) {
-            Button("Cancel", role: .cancel) { pendingRequest = nil }
-            Button("Generate Anyway", role: .destructive) {
+            Button(role: .cancel) { pendingRequest = nil } label: { Text("Cancel")
+                .font(.app(.body)) }
+            Button(role: .destructive) {
                 if let req = pendingRequest { service.generate(req, server: server, downloads: downloads) }
                 pendingRequest = nil
-            }
+            } label: { Text("Generate Anyway")
+                .font(.app(.body)) }
         } message: {
-            Text(ramWarningMessage)
+            Text(L10n.text(ramWarningMessage)).font(.app(.body))
         }
     }
 
@@ -177,64 +201,83 @@ struct MusicGenView: View {
     private var promptSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Text("Style prompt").font(.subheadline.weight(.semibold))
+                Text("Style prompt").font(.app(.headline).weight(.semibold))
                 Spacer()
                 rewriteButton(.style, text: prompt)
                 styleExamplesMenu
             }
             TextEditor(text: $prompt)
-                .font(.body)
+                .font(.app(.body))
                 .frame(height: 80)
                 .overlay(
                     RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
                 )
             Text("Genre, mood, instruments — e.g. \"upbeat synthwave with driving bass and dreamy pads\".")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.app(.caption2)).foregroundStyle(.secondary)
         }
     }
 
     private var lyricsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Text(model.requiresLyrics ? "Lyrics" : "Lyrics (optional)")
-                    .font(.subheadline.weight(.semibold))
+                Text("Lyrics").font(.app(.headline).weight(.semibold))
+                // The instrumental switch. Both engines can make a wordless
+                // track, but only ACE-Step ever said so (empty lyrics) and
+                // Music 3 refused outright — the server 400s an empty lyric
+                // block there, so this needed the `instrumental` field before a
+                // checkbox could work.
+                Toggle("Instrumental", isOn: $instrumental)
+                    .font(.app(.caption))
+                    .fixedSize()
+                    .help(L10n.text(model.family == .minimaxMusic3
+                          ? "Asks for a track with no singing. This model has no dedicated instrumental switch, so it is requested in text — it may still add wordless vocals."
+                          : "Generate music with no singing. The lyrics below are not used."))
                 Spacer()
                 rewriteButton(.lyrics, text: lyrics)
                 lyricsExamplesMenu
             }
-            // The instrumental switch. Both engines can make a wordless track,
-            // but only ACE-Step ever said so (empty lyrics) and Music 3 refused
-            // outright — the server 400s an empty lyric block there, so this
-            // needed the `instrumental` field before a checkbox could work.
-            // Honest label on Music 3: the open weights expose no
-            // `is_instrumental` equivalent, and every text arm tried so far
-            // still produced wordless vocal texture. ACE-Step's marker is its
-            // own documented convention and does work, so it is not hedged.
-            Toggle(model.family == .minimaxMusic3
-                   ? "Instrumental (no vocals) — experimental"
-                   : "Instrumental (no vocals)", isOn: $instrumental)
-                .font(.caption)
-                .help(model.family == .minimaxMusic3
-                      ? "Asks for a track with no singing. This model has no dedicated instrumental switch, so it is requested in text — it may still add wordless vocals."
-                      : "Generate music with no singing. The lyrics below are not used.")
-            TextEditor(text: $lyrics)
-                .font(.body)
-                .frame(height: 90)
-                .disabled(instrumental)
-                .opacity(instrumental ? 0.45 : 1)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
-                )
-            // Say the words are being ignored rather than deleting them: a
-            // sticky checkbox silently discarding a typed verse is the failure
-            // mode the server's named 400 exists to prevent.
-            Text(instrumental
-                 ? "Not used while Instrumental is on. Your lyrics are kept if you turn it off."
-                 : (model.requiresLyrics
-                    ? "This model sings your lyrics. Section tags go on their own lines: \(MusicOptions.sectionTagHint)"
-                    : "Leave empty, or tick Instrumental, for a track with no vocals. Section tags: \(MusicOptions.sectionTagHint)"))
-                .font(.caption2).foregroundStyle(.secondary)
+            if instrumental {
+                // The box goes away, the words do not: `lyrics` is untouched
+                // and still persisted, so turning the switch back off returns
+                // the verse. Deleting it here is the failure mode the server's
+                // named 400 exists to prevent. Music 3 is hedged because its
+                // open weights expose no `is_instrumental` equivalent and every
+                // text arm tried so far still produced wordless vocal texture;
+                // ACE-Step's marker is its own documented convention.
+                Text(L10n.text(model.family == .minimaxMusic3
+                     ? "In instrumental mode, lyrics are not used. This model has no instrumental switch of its own, so it is asked in text and may still add wordless vocals. This is an experimental feature."
+                     : "In instrumental mode, lyrics are not used."))
+                    .font(.app(.caption2)).foregroundStyle(.secondary)
+            } else {
+                ZStack(alignment: .topLeading) {
+                    TextEditor(text: $lyrics)
+                        .font(.app(.body))
+                        .frame(height: lyricsHeight)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
+                        )
+                    if lyrics.isEmpty {
+                        Text(model.requiresLyrics
+                             ? L10n.format("This model sings your lyrics. Section tags go on their own lines: %@", MusicOptions.sectionTagHint)
+                             : L10n.format("Leave empty, or tick Instrumental, for a track with no vocals. Section tags: %@", MusicOptions.sectionTagHint))
+                            .font(.app(.body))
+                            .foregroundStyle(.secondary.opacity(0.6))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 8)
+                            .allowsHitTesting(false)
+                    }
+                }
+                lyricsResizeHandle
+            }
         }
+    }
+
+    /// A verse is a document, and 90pt of it is a keyhole. The height sticks,
+    /// clamped both ways so one dragged on a tall window cannot come back
+    /// unusable.
+    private var lyricsResizeHandle: some View {
+        EditorResizeHandle(height: $lyricsHeight, onCommit: persist,
+                           help: "Drag to resize the lyrics box.")
     }
 
     /// The task actually in force: the mode control only exists on models
@@ -251,16 +294,18 @@ struct MusicGenView: View {
                 // label, so the reason is readable before the mode is even
                 // selected — the whole point of #269.
                 ForEach(MusicTask.allCases, id: \.self) { t in
-                    Text(CoverWeightsFetch.modeLabel(t, decision: t == .cover ? coverWeights : .ready)).tag(t)
+                    Text(L10n.text(CoverWeightsFetch.modeLabel(t, decision: t == .cover ? coverWeights : .ready))).tag(t)
                 }
             }
             .labelsHidden().pickerStyle(.segmented)
-            Text(task == .cover
+            Text(L10n.text(
+                 task == .cover
                  ? "Re-sings an existing track in the style you describe: melody and structure stay, the caption and lyrics decide the rest."
                  : (task == .complete
                     ? "Builds an arrangement around a vocal stem (or any part): pick the instruments to add, or leave them all off to let the model decide."
-                    : "A new track from the style prompt and lyrics."))
-                .font(.caption2).foregroundStyle(.secondary)
+                    : "A new track from the style prompt and lyrics.")
+))
+                .font(.app(.caption2)).foregroundStyle(.secondary)
             coverWeightsNotice
         }
     }
@@ -285,7 +330,7 @@ struct MusicGenView: View {
     private var coverWeightsNotice: some View {
         if task == .cover, let text = CoverWeightsFetch.notice(coverWeights) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(text).font(.caption2).foregroundStyle(.secondary)
+                Text(text).font(.app(.caption2)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                 switch coverWeights {
@@ -298,7 +343,7 @@ struct MusicGenView: View {
                     } label: {
                         Label("Download \(CoverWeightsFetch.fileName) (\(CoverWeightsFetch.approxMB) MB)",
                               systemImage: "arrow.down.circle")
-                            .font(.caption)
+                            .font(.app(.caption))
                     }
                     .buttonStyle(.bordered)
                 case .downloading:
@@ -306,11 +351,12 @@ struct MusicGenView: View {
                         ProgressView(value: downloads.downloads[model.repo]?.progress ?? 0)
                             .progressViewStyle(.linear)
                         Text(downloads.downloads[model.repo]?.percentFormatted ?? "")
-                            .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                            .font(.app(.caption2).monospacedDigit()).foregroundStyle(.secondary)
                         // Cancels ONLY this single-file fetch — a full pack
                         // download for the same repo is never touched.
-                        Button("Cancel") { downloads.cancelPackFile(repoId: model.repo) }
-                            .buttonStyle(.borderless).font(.caption)
+                        Button { downloads.cancelPackFile(repoId: model.repo) } label: { Text("Cancel")
+                            .font(.app(.body)) }
+                            .buttonStyle(.borderless).font(.app(.caption))
                     }
                 default:
                     EmptyView()
@@ -327,72 +373,84 @@ struct MusicGenView: View {
     private var sourceSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(task == .cover ? "Source track" : "Source stem").font(.subheadline.weight(.semibold))
+                Text(L10n.text(task == .cover ? "Source track" : "Source stem")).font(.app(.subheadline).weight(.semibold))
                 Spacer()
             }
             if let url = srcAudioURL {
-                HStack(spacing: 8) {
-                    Image(systemName: "waveform.circle.fill").foregroundStyle(.blue)
-                    Text(url.lastPathComponent)
-                        .font(.caption).lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                    if clipPlayer.playingPath == url.path {
-                        Button { clipPlayer.stop() } label: { Image(systemName: "stop.circle.fill") }
-                            .buttonStyle(.borderless).help("Stop preview")
-                    } else {
-                        Button { clipPlayer.play(url.path) } label: { Image(systemName: "play.circle") }
-                            .buttonStyle(.borderless).help("Preview source")
+                MediaDropWellFilled(isTargeted: isSrcDropTargeted) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "waveform.circle.fill").foregroundStyle(.blue)
+                            Text(url.lastPathComponent)
+                                .font(.app(.caption)).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            if clipPlayer.playingPath == url.path {
+                                Button { clipPlayer.stop() } label: { Image(systemName: "stop.circle.fill") }
+                                    .buttonStyle(.borderless).help("Stop preview")
+                            } else {
+                                Button { clipPlayer.play(url.path) } label: { Image(systemName: "play.circle") }
+                                    .buttonStyle(.borderless).help("Preview source")
+                            }
+                            Button { clearSource() } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.borderless).foregroundStyle(.secondary).help("Clear source")
+                        }
+                        // A header we cannot read leaves the pane with nothing
+                        // to say about length, which is the one thing a source
+                        // task decides for you.
+                        Text(srcSeconds.map { "The new track will be \(SourceTrackLength.spoken(seconds: $0)) long." }
+                             ?? "The new track will be exactly as long as this clip.")
+                            .font(.app(.caption2)).foregroundStyle(.secondary)
                     }
-                    Button { clearSource() } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.borderless).foregroundStyle(.secondary).help("Clear source")
                 }
             } else if srcBusy {
-                converting
+                MediaDropWellFilled(isTargeted: isSrcDropTargeted) { converting }
             } else {
-                Button { chooseSourceFile() } label: {
-                    Label("Choose file…", systemImage: "folder")
-                        .font(.caption).frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
+                MediaDropWell(title: "Choose file…",
+                              systemImage: "waveform.badge.plus",
+                              caption: "10 seconds to 10 minutes. The new track will have the same length.",
+                              isTargeted: isSrcDropTargeted,
+                              action: chooseSourceFile)
             }
-            Text("10 seconds to 10 minutes. The new track is exactly as long as this clip.")
-                .font(.caption2).foregroundStyle(.secondary)
             if let err = srcError {
-                Text(err).font(.caption2).foregroundStyle(.orange)
+                Text(err).font(.app(.caption2)).foregroundStyle(.orange)
             }
             if task == .cover {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text("Cover strength").font(.caption)
+                        Text("Cover strength").font(.app(.rowTitle))
                         Spacer()
-                        Text(String(format: "%.2f", coverStrength)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        Text(String(format: "%.2f", coverStrength)).font(.app(.caption).monospacedDigit()).foregroundStyle(.secondary)
                     }
                     Slider(value: $coverStrength, in: 0...1, step: 0.05)
                     Text("How many of the steps follow the source. 1 keeps it all the way; lower lets the caption take over for the last steps.")
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .font(.app(.caption2)).foregroundStyle(.secondary)
                 }
+                // The knobs under the clip are their own step, not a caption
+                // of the well above them.
+                .padding(.top, 6)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text("Noise strength").font(.caption)
+                        Text("Noise strength").font(.app(.rowTitle))
                         Spacer()
-                        Text(String(format: "%.2f", coverNoiseStrength)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        Text(String(format: "%.2f", coverNoiseStrength)).font(.app(.caption).monospacedDigit()).foregroundStyle(.secondary)
                     }
                     Slider(value: $coverNoiseStrength, in: 0...1, step: 0.05)
                     Text("0 starts from pure noise (the default). Higher starts closer to the original audio, so more of it comes through.")
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .font(.app(.caption2)).foregroundStyle(.secondary)
                 }
+                .padding(.top, 6)
             }
             if task == .complete {
-                Text("Add").font(.caption)
+                Text("Add").font(.app(.caption)).padding(.top, 6)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), alignment: .leading)], alignment: .leading, spacing: 4) {
                     ForEach(MusicTask.trackClasses, id: \.self) { name in
-                        Toggle(name.replacingOccurrences(of: "_", with: " "),
+                        Toggle(L10n.text(name.replacingOccurrences(of: "_", with: " ")),
                                isOn: Binding(get: { trackClasses.contains(name) },
                                              set: { on in
                                                  if on { if !trackClasses.contains(name) { trackClasses.append(name) } }
                                                  else { trackClasses.removeAll { $0 == name } }
                                              }))
-                            .font(.caption)
+                            .font(.app(.caption))
                     }
                 }
             }
@@ -400,11 +458,6 @@ struct MusicGenView: View {
         .mediaDrop(.audio, isTargeted: $isSrcDropTargeted) { urls in
             if let url = urls.first { acceptSource(url) }
         }
-    }
-
-    private var sourceLengthNote: some View {
-        Text("Length: same as the source clip.")
-            .font(.caption2).foregroundStyle(.secondary)
     }
 
     private func chooseSourceFile() {
@@ -425,7 +478,9 @@ struct MusicGenView: View {
         transcode(url, maxSeconds: 600) { result in
             srcBusy = false
             switch result {
-            case .success(let wav): srcAudioURL = wav
+            case .success(let wav):
+                srcAudioURL = wav
+                srcSeconds = SourceTrackLength.seconds(ofWavAt: wav)
             case .failure(let err): srcError = err.localizedDescription
             }
         }
@@ -443,6 +498,7 @@ struct MusicGenView: View {
     private func clearSource() {
         if let url = srcAudioURL { try? FileManager.default.removeItem(at: url) }
         srcAudioURL = nil
+        srcSeconds = nil
     }
 
     /// ACE-Step's timbre slot (#259): a clip whose style the track follows.
@@ -451,38 +507,38 @@ struct MusicGenView: View {
     private var referenceSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Reference audio (optional)").font(.subheadline.weight(.semibold))
+                Text("Reference audio (optional)").font(.app(.headline).weight(.semibold))
                 Spacer()
             }
             if let url = refAudioURL {
-                HStack(spacing: 8) {
-                    Image(systemName: "waveform.circle.fill").foregroundStyle(.green)
-                    Text(url.lastPathComponent)
-                        .font(.caption).lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                    if clipPlayer.playingPath == url.path {
-                        Button { clipPlayer.stop() } label: { Image(systemName: "stop.circle.fill") }
-                            .buttonStyle(.borderless).help("Stop preview")
-                    } else {
-                        Button { clipPlayer.play(url.path) } label: { Image(systemName: "play.circle") }
-                            .buttonStyle(.borderless).help("Preview reference")
+                MediaDropWellFilled(isTargeted: isRefDropTargeted) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "waveform.circle.fill").foregroundStyle(.blue)
+                        Text(url.lastPathComponent)
+                            .font(.app(.caption)).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        if clipPlayer.playingPath == url.path {
+                            Button { clipPlayer.stop() } label: { Image(systemName: "stop.circle.fill") }
+                                .buttonStyle(.borderless).help("Stop preview")
+                        } else {
+                            Button { clipPlayer.play(url.path) } label: { Image(systemName: "play.circle") }
+                                .buttonStyle(.borderless).help("Preview reference")
+                        }
+                        Button { clearReference() } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.borderless).foregroundStyle(.secondary).help("Clear reference")
                     }
-                    Button { clearReference() } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.borderless).foregroundStyle(.secondary).help("Clear reference")
                 }
             } else if refBusy {
-                converting
+                MediaDropWellFilled(isTargeted: isRefDropTargeted) { converting }
             } else {
-                Button { chooseReferenceFile() } label: {
-                    Label("Choose file…", systemImage: "folder")
-                        .font(.caption).frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
+                MediaDropWell(title: "Choose file…",
+                              systemImage: "music.note",
+                              caption: "A light touch: the model takes the overall feel and timbre from up to 30 seconds of the clip, it does not recreate the song.",
+                              isTargeted: isRefDropTargeted,
+                              action: chooseReferenceFile)
             }
-            Text("A light touch: the model takes the overall feel and timbre from up to 30 seconds of the clip, it does not recreate the song.")
-                .font(.caption2).foregroundStyle(.secondary)
             if let err = refError {
-                Text(err).font(.caption2).foregroundStyle(.orange)
+                Text(err).font(.app(.caption2)).foregroundStyle(.orange)
             }
         }
         .mediaDrop(.audio, isTargeted: $isRefDropTargeted) { urls in
@@ -493,7 +549,7 @@ struct MusicGenView: View {
     private var converting: some View {
         HStack(spacing: 8) {
             ProgressView().controlSize(.small)
-            Text("Converting…").font(.caption).foregroundStyle(.secondary)
+            Text("Converting…").font(.app(.caption)).foregroundStyle(.secondary)
         }
     }
 
@@ -530,8 +586,36 @@ struct MusicGenView: View {
     }
 
     /// Best-per-capability up front, everything else behind "Other Models", and
-    /// the Download button ON the model — see `MediaModelChooser`.
+    /// the Download button ON the model — see `MediaModelChooser`. The transfer
+    /// bar and residency both belong to the model, not to the track, so they
+    /// sit with it rather than beside Generate.
     private var modelSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            modelChooser
+            if lanModel == nil && !downloads.bundleReady(model.bundle) {
+                // Local-only models have no HF download yet — steer the user to
+                // the on-device conversion instead of a Download button.
+                if model.isLocalOnly { convertHint } else { BundleDownloadBar(bundle: model.bundle, showsStartButton: false) }
+            }
+        }
+    }
+
+    /// Residency rides the switcher's row: it is a property of the model, and
+    /// the only thing about it the pane still has to say once it is picked.
+    private var keepResidentToggle: AnyView {
+        AnyView(
+            Toggle(isOn: $keepResident) {
+                Text("Keep model loaded after generating")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+                .font(.app(.caption))
+                .controlSize(.small)
+                .help("On: the model stays resident so the next generation is instant. Off (default): it's unloaded to free GPU memory.")
+        )
+    }
+
+    private var modelChooser: some View {
         MediaModelChooser.pane(
             all: MusicModelPreset.all,
             onThisMac: CustomMediaModels.musicPresets(from: server.allModels),
@@ -544,7 +628,8 @@ struct MusicGenView: View {
             bundleOf: { $0.bundle },
             downloads: downloads,
             onDownloadFinished: { appState.refreshModels() },
-            persist: persist)
+            persist: persist,
+            accessory: keepResidentToggle)
     }
 
     private var durationSection: some View {
@@ -553,7 +638,7 @@ struct MusicGenView: View {
             // against the pane margin puts a number and its name at opposite
             // ends of a wide row with nothing between them to tie the two.
             HStack(spacing: 6) {
-                Text("Duration").font(.subheadline.weight(.semibold))
+                Text("Duration").font(.app(.headline).weight(.semibold))
                 // Typed entry beside the slider: the slider steps by 5 and
                 // landing on 95 s by dragging is not a thing anyone should do.
                 NumberField(range: durationRangeInt,
@@ -561,36 +646,27 @@ struct MusicGenView: View {
                                            set: { durationSeconds = Double($0) }),
                             width: 52,
                             help: "Seconds. \(durationRangeInt.lowerBound)–\(durationRangeInt.upperBound) for this model.")
-                Text("sec · \(formattedDuration)").font(.caption2).foregroundStyle(.secondary)
+                Text("sec · \(formattedDuration)").font(.app(.caption2)).foregroundStyle(.secondary)
                 Spacer()
             }
             Slider(value: $durationSeconds, in: model.durationRange, step: 5)
             if model.family == .minimaxMusic3 {
                 Text("An upper bound — the model may end the song earlier.")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.app(.caption2)).foregroundStyle(.secondary)
             }
         }
     }
 
-    /// Every dropdown in Advanced is this wide. They were 110 / 130 / 90,
-    /// which made a row of three menus look like a mistake, and Key needed the
-    /// room once its labels carried the key's character. Sized for the longest
-    /// entry it will ever hold ("C# major", "A minor — plain sad") with slack,
-    /// because a menu that truncates its own options is worse than a bare one —
-    /// `.frame(width:)` on a Picker clips, it does not wrap or shrink.
-    private var menuWidth: CGFloat { 210 }
-    /// Label over control, pinned to the cell's leading edge: a picker is
-    /// intrinsic-width and was centring itself inside the column.
+    /// Label over control, pinned to the cell's leading edge.
     private func advancedCell<C: View>(_ label: String, @ViewBuilder control: () -> C) -> some View {
+        // No `maxWidth: .infinity`: that stretched every cell across its whole
+        // grid column, which reads as an arbitrary gap between two controls.
+        // The cell hugs its content and the grid sets it at the leading edge.
         VStack(alignment: .leading, spacing: 2) {
-            Text(label).font(.caption)
+            Text(L10n.text(label)).font(.app(.caption))
             control()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
-    /// Advanced rows lay out as many `menuWidth` cells as fit, then wrap —
-    /// never widening the pane (see the tempo row's comment).
-    private var advancedColumns: [GridItem] { [GridItem(.adaptive(minimum: menuWidth), spacing: 10, alignment: .bottomLeading)] }
 
     /// The model's server-valid duration bounds as integers, for the typed box.
     private var durationRangeInt: ClosedRange<Int> {
@@ -602,7 +678,7 @@ struct MusicGenView: View {
     /// through to -1 and rolled a RANDOM seed — the user believed they had
     /// reproduced a track and had not.
     private var seedControl: some View {
-        SeedField(label: "Seed", placeholder: "random",
+        SeedField(label: "Seed", placeholder: "Random",
                   range: -1...Int(UInt32.max), value: $seed)
     }
 
@@ -611,31 +687,22 @@ struct MusicGenView: View {
         return String(format: "%d:%02d", s / 60, s % 60)
     }
 
-    private var advancedToggle: some View {
-        Button {
-            withAnimation { showAdvanced = true }
-        } label: {
-            Label("Advanced options", systemImage: "chevron.right").font(.caption)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
-    }
-
     private var advancedSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Advanced").font(.caption.weight(.semibold))
-                Spacer()
-                Button { withAnimation { showAdvanced = false } } label: { Image(systemName: "chevron.down") }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
-            }
+            FoldingSectionHeader(title: "Advanced options", isExpanded: $showAdvanced)
+            if showAdvanced { advancedBody }
+        }
+    }
+
+    private var advancedBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
             // Refinement passes. Music 3 only: ACE-Step Turbo is distillation-
             // fixed at 8 and the server ignores the field, so a control there
             // would visibly do nothing.
             if model.supportsSteps {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text("Quality passes").font(.caption)
+                        Text("Quality passes").font(.app(.caption))
                         NumberField(range: model.stepsRange,
                                     value: Binding(get: { steps ?? model.fixedSteps },
                                                    set: { steps = $0 }),
@@ -648,7 +715,7 @@ struct MusicGenView: View {
                            in: Double(model.stepsRange.lowerBound)...Double(model.stepsRange.upperBound),
                            step: 1)
                     Text("More passes means more detail and a slower render.")
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .font(.app(.caption2)).foregroundStyle(.secondary)
                 }
             }
             // Dropdowns only — every choice is a value the server accepts,
@@ -661,11 +728,12 @@ struct MusicGenView: View {
             // acestep-only block. Hiding them on Music 3 read as "this model
             // cannot do tempo", which its own model card contradicts.
             // Tempo, key and seed share a row when the pane is wide enough and
-            // WRAP when it is not: a fixed-width HStack here set the left
-            // pane's minimum width (~540 pt) above what the default window
-            // gives it, and the HSplitView pushed the whole column under the
-            // sidebar (live 2026-08-22, Music tab clipped at default size).
-            LazyVGrid(columns: advancedColumns, alignment: .leading, spacing: 10) {
+            // WRAP when it is not. Never a fixed-width HStack: that set the
+            // left pane's minimum width (~540 pt) above what the default
+            // window gives it, and the HSplitView pushed the whole column
+            // under the sidebar (live 2026-08-22). `FlowLayout` reports no
+            // more width than it is offered, which is what holds that line.
+            FlowLayout(spacing: 14, rowSpacing: 10) {
                 if model.supportsTempoAndKey {
                     advancedCell("Tempo (BPM)") {
                         // Typed, because the server takes 30–300 and the ten
@@ -676,83 +744,77 @@ struct MusicGenView: View {
                                                 placeholder: "Auto", width: 64,
                                                 help: "\(MusicOptions.bpmRange.lowerBound)–\(MusicOptions.bpmRange.upperBound), or leave empty to let the model decide.")
                             Menu {
-                                Button("Auto") { bpm = nil }
+                                Button { bpm = nil } label: { Text("Auto")
+                                    .font(.app(.body)) }
                                 ForEach(MusicOptions.bpms, id: \.bpm) { opt in
-                                    Button(opt.label) { bpm = opt.bpm }
+                                    Button { bpm = opt.bpm } label: { Text(L10n.text(opt.label))
+                                        .font(.app(.body)) }
                                 }
-                            } label: { Image(systemName: "chevron.down") }
-                            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                            } label: {
+                                Image(systemName: "chevron.down").modifier(PaneChip(square: true))
+                            }
+                            .modifier(PaneChipMenu())
                             .help("Common tempos")
                         }
                     }
                     advancedCell("Key") {
                         Picker("", selection: $keyscale) {
-                            Text("Auto").tag("")
+                            Text("Auto").font(.app(.body)).tag("")
                             ForEach(MusicOptions.keyscales, id: \.self) { key in
-                                Text(MusicOptions.keyLabel(key)).tag(key)
+                                Text(MusicOptions.keyLabel(key)).font(.app(.body)).tag(key)
                             }
                         }
-                        .labelsHidden().pickerStyle(.menu).frame(width: menuWidth, alignment: .leading)
+                        .labelsHidden().pickerStyle(.menu).fixedSize()
                     }
                 }
                 if model.supportsMusicalMeta {
                     advancedCell("Vocal language") {
                         Picker("", selection: $vocalLanguage) {
                             ForEach(MusicOptions.languages, id: \.code) { opt in
-                                Text(opt.label).tag(opt.code)
+                                Text(L10n.text(opt.label)).font(.app(.body)).tag(opt.code)
                             }
                         }
-                        .labelsHidden().pickerStyle(.menu).frame(width: menuWidth, alignment: .leading)
+                        .labelsHidden().pickerStyle(.menu).fixedSize()
                     }
                     advancedCell("Time signature") {
                         Picker("", selection: $timesignature) {
-                            Text("Auto").tag("")
+                            Text("Auto").font(.app(.body)).tag("")
                             ForEach(MusicOptions.timeSignatures, id: \.value) { opt in
-                                Text(opt.label).tag(opt.value)
+                                Text(L10n.text(opt.label)).font(.app(.body)).tag(opt.value)
                             }
                         }
-                        .labelsHidden().pickerStyle(.menu).frame(width: menuWidth, alignment: .leading)
+                        .labelsHidden().pickerStyle(.menu).fixedSize()
                     }
                 }
-                seedControl.frame(maxWidth: .infinity, alignment: .leading)
+                seedControl
             }
             if model.supportsTempoAndKey && model.family == .minimaxMusic3 {
                 Text("Tempo and key are written into the style prompt for this model — it has no separate fields for them.")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.app(.caption2)).foregroundStyle(.secondary)
             }
             Text("Same seed + prompt reproduces the track.")
-                .font(.caption2).foregroundStyle(.secondary)
-            Toggle("Keep model loaded after generating", isOn: $keepResident)
-                .font(.caption)
-                .help("On: the model stays resident so the next generation is instant. Off (default): it's unloaded to free GPU memory.")
+                .font(.app(.caption2)).foregroundStyle(.secondary)
         }
     }
 
     private var actionRow: some View {
-        VStack(spacing: 8) {
-            if lanModel == nil && !downloads.bundleReady(model.bundle) {
-                // Local-only models have no HF download yet — steer the user to
-                // the on-device conversion instead of a Download button.
-                if model.isLocalOnly { convertHint } else { BundleDownloadBar(bundle: model.bundle, showsStartButton: false) }
-            }
-            HStack {
-                if service.isRunning {
-                    Button(role: .destructive) { service.cancel() } label: {
-                        Label("Cancel", systemImage: "stop.circle").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                } else {
-                    Button { tryGenerate() } label: {
-                        Label("Generate", systemImage: "music.note").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.return, modifiers: [.command])
-                    .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                              || !MusicGenRequest.lyricsSatisfied(model: model, lyrics: lyrics,
-                                                                  instrumental: instrumental)
-                              || (sourceTask && srcAudioURL == nil)
-                              || (lanModel == nil && !downloads.bundleReady(model.bundle)))
+        HStack {
+            if service.isRunning {
+                Button(role: .destructive) { service.cancel() } label: {
+                    Label("Cancel", systemImage: "stop.circle").font(.app(.body)).frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.bordered)
+            } else {
+                Button { tryGenerate() } label: {
+                    Label("Generate", systemImage: "music.note").font(.app(.body)).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: [.command])
+                .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                          || !MusicGenRequest.lyricsSatisfied(model: model, lyrics: lyrics,
+                                                              instrumental: instrumental)
+                          || (sourceTask && srcAudioURL == nil)
+                          || (lanModel == nil && !downloads.bundleReady(model.bundle)))
             }
         }
     }
@@ -760,9 +822,9 @@ struct MusicGenView: View {
     private var convertHint: some View {
         VStack(alignment: .leading, spacing: 5) {
             Label("Weights not found", systemImage: "wrench.and.screwdriver")
-                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                .font(.app(.caption).weight(.semibold)).foregroundStyle(.secondary)
             Text("\(model.name) has no download yet — convert the weights on-device with the matching script in the repo (see its README). They install to ~/.mlx-serve/models/local/.")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.app(.caption2)).foregroundStyle(.secondary)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -776,7 +838,7 @@ struct MusicGenView: View {
                 switch service.phase {
                 case .idle:
                     ContentUnavailableView("No music yet", systemImage: "music.note",
-                                           description: Text("Describe a style, optionally add lyrics, and press Generate."))
+                                           description: Text("Describe a style, optionally add lyrics, and press Generate.").font(.app(.body)))
                 case .running(let step, let total, let message):
                     VStack(spacing: 12) {
                         if total == 0 {
@@ -785,17 +847,18 @@ struct MusicGenView: View {
                             ProgressView(value: Double(step), total: max(1, Double(total)))
                                 .progressViewStyle(.linear).frame(width: 240)
                         }
-                        Text(message).font(.footnote).foregroundStyle(.secondary)
+                        Text(message).font(.app(.footnote)).foregroundStyle(.secondary)
                     }
                 case .completed(let path):
                     completedPreview(path: path)
                 case .failed(let msg):
                     ContentUnavailableView {
-                        Label("Failed", systemImage: "exclamationmark.triangle")
+                        Label("Failed", systemImage: "exclamationmark.triangle").font(.app(.body))
                     } description: {
                         Text(msg)
                     } actions: {
-                        Button("Show log") { showLogWindow() }
+                        Button { showLogWindow() } label: { Text("Show log")
+                            .font(.app(.body)) }
                     }
                 }
             }
@@ -804,24 +867,23 @@ struct MusicGenView: View {
     }
 
     private func completedPreview(path: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "music.note.list")
-                .font(.system(size: 64)).foregroundStyle(.tint)
-            HStack(spacing: 10) {
-                Button { clipPlayer.play(path) } label: {
-                    Label("Play", systemImage: "play.fill")
-                }
-                .buttonStyle(.bordered)
-                Button { clipPlayer.pause() } label: {
-                    Label("Pause", systemImage: "pause.fill")
-                }
-                .buttonStyle(.bordered)
+        // One control, two states: pausing left the shelf lit under a clip
+        // that had stopped making sound, so there is no pause any more.
+        let playing = clipPlayer.playingPath == path
+        return VStack(spacing: 12) {
+            trackGlyph(playing: playing)
+            Button {
+                playing ? clipPlayer.stop() : clipPlayer.play(path)
+            } label: {
+                Label(playing ? "Stop" : "Play", systemImage: playing ? "stop.fill" : "play.fill").font(.app(.body))
             }
+            .buttonStyle(.bordered)
+            // The name and the way to reach the file belong together, centred
+            // under the track they describe.
             HStack(spacing: 8) {
                 Text(URL(fileURLWithPath: path).lastPathComponent)
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.app(.caption)).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
-                Spacer()
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
                 } label: { Image(systemName: "folder") }
@@ -829,6 +891,23 @@ struct MusicGenView: View {
             }
         }
         .padding(16)
+    }
+
+    /// There is no note-in-a-circle symbol, so the disc is drawn and the note
+    /// is PUNCHED out of it: `.destinationOut` clears what it covers, which
+    /// needs the stack to composite as one layer first. The hole is what
+    /// bounces.
+    private func trackGlyph(playing: Bool) -> some View {
+        ZStack {
+            Circle()
+                .fill(.tint)
+                .frame(width: 64, height: 64)
+            Image(systemName: "music.note.list")
+                .font(.app(.largeTitle))
+                .blendMode(.destinationOut)
+                .symbolEffect(.bounce.down.byLayer, options: .repeat(.continuous), isActive: playing)
+        }
+        .compositingGroup()
     }
 
     private func showLogWindow() {
@@ -839,7 +918,7 @@ struct MusicGenView: View {
         Button {
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: MediaStorage.musicRoot)])
         } label: {
-            Label("Open output folder in Finder", systemImage: "folder").font(.caption)
+            Label("Open output folder in Finder", systemImage: "folder").font(.app(.caption))
         }
         .buttonStyle(.borderless)
         .foregroundStyle(.secondary)
@@ -864,9 +943,11 @@ struct MusicGenView: View {
         showAdvanced = s.showAdvanced
         prompt = s.prompt
         lyrics = s.lyrics
+        lyricsHeight = PromptEditorHeight.clamp(s.lyricsHeight)
         refAudioURL = s.refAudioPath.flatMap { FileManager.default.fileExists(atPath: $0) ? URL(fileURLWithPath: $0) : nil }
         task = s.task
         srcAudioURL = s.srcAudioPath.flatMap { FileManager.default.fileExists(atPath: $0) ? URL(fileURLWithPath: $0) : nil }
+        srcSeconds = srcAudioURL.flatMap { SourceTrackLength.seconds(ofWavAt: $0) }
         coverStrength = s.coverStrength
         coverNoiseStrength = s.coverNoiseStrength
         trackClasses = s.trackClasses
@@ -889,6 +970,7 @@ struct MusicGenView: View {
         s.showAdvanced = showAdvanced
         s.prompt = prompt
         s.lyrics = lyrics
+        s.lyricsHeight = PromptEditorHeight.clamp(lyricsHeight)
         s.refAudioPath = refAudioURL?.path
         s.task = task
         s.srcAudioPath = srcAudioURL?.path
@@ -906,77 +988,107 @@ struct MusicGenView: View {
     /// The wand: asks the chat model to rewrite the field like the current
     /// family's examples. Disabled until there is something to rewrite.
     private func rewriteButton(_ kind: MusicPromptRewriter.Kind, text: String) -> some View {
-        Button { rewriteKind = kind } label: {
-            Image(systemName: "wand.and.stars")
+        let off = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || (kind == .lyrics && instrumental)
+        return Button { rewriteKind = kind } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "wand.and.sparkles")
+                Text("Enhance…").font(.app(.body))
+            }
+            .modifier(PaneChip())
         }
-        .buttonStyle(.borderless)
-        .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                  || (kind == .lyrics && instrumental))
+        .buttonStyle(.plain)
+        .disabled(off)
+        // A `.plain` button over our own background does not dim itself.
+        .opacity(off ? 0.4 : 1)
         .help("Rewrite with the chat model")
     }
 
-    /// Style-prompt Examples menu: Save current + your saved styles (with a
+    /// Style-prompt Templates menu: Save current + your saved styles (with a
     /// Delete submenu) + the built-in genre starters.
     private var styleExamplesMenu: some View {
-        Menu("Examples") {
-            Button("Save current…") {
+        Menu {
+            Button {
                 saveTitle = MusicPromptStore.autoTitle(from: prompt)
                 showSaveStyle = true
-            }
+            } label: { Text("Save current…")
+                .font(.app(.body)) }
             .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             if !library.savedStyles.isEmpty {
                 Section("Saved") {
                     ForEach(library.savedStyles) { p in
-                        Button(p.title) { prompt = p.body }
+                        Button { prompt = p.body } label: { Text(L10n.text(p.title))
+                            .font(.app(.body)) }
                     }
                 }
                 Menu("Delete saved…") {
                     ForEach(library.savedStyles) { p in
-                        Button(p.title, role: .destructive) { library.deleteStyle(title: p.title) }
+                        Button(role: .destructive) { library.deleteStyle(title: p.title) } label: {
+                            Label(L10n.text(p.title), systemImage: "trash")
+                        }
                     }
                 }
             }
-            Section("Examples") {
+            // Named after the engine, because the two sets are not
+            // interchangeable: ACE-Step reads a one-line genre description and
+            // Music 3 a structured caption.
+            Section("Example templates for \(model.family == .minimaxMusic3 ? "MiniMax Music 3" : "ACE-Step")") {
                 ForEach(MusicPrompt.builtinStyles(for: model.family)) { p in
-                    Button(p.title) { prompt = p.body }
+                    Button { prompt = p.body } label: { Text(L10n.text(p.title))
+                        .font(.app(.body)) }
                 }
             }
+        } label: {
+            templatesChip
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .font(.caption)
+        .modifier(PaneChipMenu())
     }
 
-    /// Lyrics Examples menu: Save current + your saved lyrics (with a Delete
+    /// The menu's own button face: the system indicator is hidden so the
+    /// chevron sits INSIDE the chip, beside the word.
+    private var templatesChip: some View {
+        HStack(spacing: 5) {
+            Text("Templates").font(.app(.body))
+            Image(systemName: "chevron.down")
+        }
+        .modifier(PaneChip())
+    }
+
+    /// Lyrics Templates menu: Save current + your saved lyrics (with a Delete
     /// submenu) + built-in ORIGINAL lyric templates to start from.
     private var lyricsExamplesMenu: some View {
-        Menu("Examples") {
-            Button("Save current…") {
+        Menu {
+            Button {
                 saveTitle = MusicPromptStore.autoTitle(from: lyrics)
                 showSaveLyrics = true
-            }
+            } label: { Text("Save current…")
+                .font(.app(.body)) }
             .disabled(lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             if !library.savedLyrics.isEmpty {
                 Section("Saved") {
                     ForEach(library.savedLyrics) { p in
-                        Button(p.title) { lyrics = p.body }
+                        Button { lyrics = p.body } label: { Text(L10n.text(p.title))
+                            .font(.app(.body)) }
                     }
                 }
                 Menu("Delete saved…") {
                     ForEach(library.savedLyrics) { p in
-                        Button(p.title, role: .destructive) { library.deleteLyrics(title: p.title) }
+                        Button(role: .destructive) { library.deleteLyrics(title: p.title) } label: {
+                            Label(L10n.text(p.title), systemImage: "trash")
+                        }
                     }
                 }
             }
-            Section("Templates") {
+            Section("Example templates") {
                 ForEach(MusicPrompt.builtinLyrics) { p in
-                    Button(p.title) { lyrics = p.body }
+                    Button { lyrics = p.body } label: { Text(L10n.text(p.title))
+                        .font(.app(.body)) }
                 }
             }
+        } label: {
+            templatesChip
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .font(.caption)
+        .modifier(PaneChipMenu())
     }
 
     // MARK: - Generate
@@ -1036,25 +1148,28 @@ struct PromptRewriteSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(title).font(.headline)
+                Text(L10n.text(title)).font(.app(.headline))
                 Spacer()
                 if isWriting { ProgressView().controlSize(.small) }
             }
             TextEditor(text: $text)
-                .font(.body)
+                .font(.app(.body))
                 .frame(minHeight: 220)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3), lineWidth: 0.5))
             if let error {
-                Text(error).font(.caption).foregroundStyle(.red)
+                Text(error).font(.app(.caption)).foregroundStyle(.red)
             } else {
                 Text("Edit the result, then Apply to replace your text.")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.app(.caption2)).foregroundStyle(.secondary)
             }
             HStack {
-                Button("Try again") { start() }.disabled(isWriting)
+                Button { start() } label: { Text("Try again")
+                    .font(.app(.body)) }.disabled(isWriting)
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Apply") { onApply(text); dismiss() }
+                Button { dismiss() } label: { Text("Cancel")
+                    .font(.app(.body)) }.keyboardShortcut(.cancelAction)
+                Button { onApply(text); dismiss() } label: { Text("Apply")
+                    .font(.app(.body)) }
                     .keyboardShortcut(.defaultAction)
                     .disabled(isWriting || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }

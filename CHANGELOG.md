@@ -1,5 +1,164 @@
 # Changelog
 
+## v26.9.7 — Faster Small Models - Prefill That Shares - Qwen-Image Editing - UNRELEASED
+
+### Highlights
+
+- **Small dense and MoE models decode faster, same bytes out.** The per-layer op chains are fused into single kernels that reproduce MLX's arithmetic exactly, so greedy output is byte-identical to 26.9.6 on all 18 model packs we checked (Llama, Mistral, Qwen3, Qwen3.5/3.6, K2, Muse, Gemma 3/4, LFM2.5 text/vision/MoE, Ling, Flash Next). Prefill speed is unchanged everywhere. Decode tok/s vs the shipped 26.9.6 app, M4 Max:
+
+  | Model | 0.5k | 4k | 8k | 16k |
+  |---|---|---|---|---|
+  | Gemma 4 26B-A4B 4-bit | +8% | +11% | +9% | +9% |
+  | Gemma 4 E4B 4-bit | +7% | +8% | +7% | +7% |
+  | LFM2.5 2.6B | +3% | +2% | +2% | +4% |
+  | Spark-X2.5 4B 4-bit | +10% | · | · | · |
+
+- **Decoding streams keep moving through another request's prefill.** `--prefill-decode-share` gives decoders a share of wall time while a long prompt prefills, instead of freezing them for seconds on a 32k prompt (#568). Thanks @STRML.
+- **Qwen3.8 Flash Next MTP rounds on every chip.** Verify widths of 2 to 8 rows take the fused MoE rows kernel on all Apple Silicon, not only Ultra chips: on an M4 Max a 2-row verify forward drops from 26.9 to 23.5 ms and MTP decode gains 5-8% (code 101.7 -> 109.2 tok/s, greedy chat 83.6 -> 90.4).
+- **Qwen3.8 Flash Next after long prompts.** Decode past 32k is about 12% faster with the default bf16 KV, concurrent streams share the fused sparse-attention kernel, a long agent session stays in the hot cache instead of re-prefilling every turn, and MTP rounds draft the next chain before the host read. `--ple-gpu` (or the app toggle) runs the n-gram gather on the GPU, prefill 2-4% faster and decode +15% at 128k, but it's off by default now since it wants the whole table resident (#555, #539, #545, #554, #556, #575, #580, #584). Thanks @STRML and @cowboycoderhq.
+- **Nemotron-H prefill is 9x faster.** The Mamba2 step runs fused over the whole prompt chunk (#574). Thanks @sbusso.
+- **A drafter per model, and Check for Updates.** Every model gets a drafter socket in the app, a pack's own `drafter/` loads with it, and 27B 6-bit and 8-bit packs get the exact DFlash tree too. My Models can check every model against Hugging Face and asks before replacing files (#590).
+- **Qwen-Image-2.1 instruction editing.** One checkpoint serves text-to-image and `mode:"edit"` with an image plus up to 10 references (#512). Thanks @codysk.
+- **Console in Simplified Chinese with a light theme**, and the app's alerts and hints are translated (#487, #485, #463). Thanks @LXD-8.
+- **Sushi packs and GGUF join the model lineup.** Qwen3.8 Flash Next packs quantized with Sushi's EXL3 format now serve directly; a GGUF checkpoint can optionally run on the same fast MLX path instead of a slower fallback engine (Settings > Engines). MTP drafting is on by default for every model with a head, MoE included.
+- **Bonsai 2 gets an optional lossy speed boost.** A new "Int8 prefill" setting speeds up prompt processing on 2-bit Bonsai 2 packs at a small accuracy cost (off by default), and verification on M5 Macs now runs on the tensor unit too (#619, #615). Thanks @h9q2cyxvgm-ui.
+- **Kev joins Laya on `/v1/decisions`**, the typed-decision endpoint for fast yes/no and multiple-choice style answers (#603). Thanks @alinselea.
+- **Recommended models refreshed:** MiMo 9B replaces Qwen 3.5 9B as the small pick, Qwen 3.6 27B is retired in favor of 3.8, and tier-list pages get one-click Run buttons (#577). Thanks @Fe2-O3.
+
+### Fixes
+- Model config files with the wrong field type or an out-of-range value are rejected with a clear error instead of loading a broken model (#608). Thanks @alinselea.
+- Prompt-lookup drafting (when the reply quotes the prompt back) no longer gets stuck repeating itself under typical acceptance — a long-standing cause of agent loops — and can now draft more tokens sooner after a shorter match (#614). Thanks @STRML.
+- The SSD cache tier's disk usage accounting matches what it actually stores (#601). Thanks @brandondyal.
+- A rare crash affecting older Apple Silicon Macs (M1/M2) during verification is fixed.
+- DFlash2 refuses to load a drafter with an unsupported quantized selector instead of misbehaving (#624). Thanks @brandondyal.
+
+### Changes
+- A model can have a short alias (Model Settings, or `"alias"` in model-settings.json) that works wherever a request names a model, including Ollama, load and unload; `/v1/models` lists it beside the full id (#520, #612). Thanks @lborloz.
+- DFlash on Nemotron-H and dense Qwen3.5/3.8 emits exactly what serial decoding would, sampled requests included, on 4, 6 and 8-bit packs; seeded output with a DFlash drafter differs from earlier versions.
+- A seeded request gives the same text whether or not its prompt hit the prefix cache.
+- Qwen3.8-27B with a DFlash2 drafter verifies a tree of drafts each round instead of one path.
+- Nemotron-H 3.5 MoE checkpoints load (#559). Thanks @sbusso.
+- Qwen-Image-2.1 packs whose text or vision embedding tables are quantized at a group size other than 64 load them at the right width instead of misreading them silently (#496).
+- Qwen-Image-2.1 packs that store their VAE in MLX layout, like `mlx-community/Qwen-Image-2.1-MLX-4bit`, generate and edit instead of failing at the first VAE conv (#496).
+- A second server refuses a port already in use instead of silently sharing it (#569). Thanks @sbusso.
+- A request that names a model by its path no longer gets another model's answer: a pack that failed to load returns its load error, and an unknown path returns 404 (#585, #607). Thanks @lborloz.
+- Qwen3.8 Flash Next GGUFs route to the engine that can load them (#546). Thanks @zeeshanhaque21.
+- `--mtp-greedy-tail` (or `"mtp_greedy_tail": true` for one model in model-settings.json) drafts only the first speculative token of a sampled request by sampling and the rest by argmax, which lets `--mtp-typical` accept longer runs; off by default (#602). Thanks @beamivalice.
+- Sidebar groups put chats, agent threads and terminals into named folders, and terminal sessions come back where you left them.
+- Agents launched from the app or `mlx-serve launch` get an `mlx-serve` skill for wiring code to the local APIs.
+- The tray's memory meter splits weights, KV cache and the rest, and the KV figure counts live requests too.
+- The Image pane is laid out like the other Create panes and keeps its draft across panes and relaunches; app text never drops below 12pt (#587, #572). Thanks @lojza3d and @LXD-8.
+- Models from `mlx-serve pull` register under their org/name id, and Ollama's `/api/show` reports thinking and vision on models that aren't loaded yet (#578, #579). Thanks @brandondyal.
+
+## v26.9.6 — Every Image Seen - Laya Decisions - Steady Qwen3.8 Agents
+
+### Highlights
+
+- **Qwen3.8 Flash Next reaches up to ~243-300+ tok/s decode and 3,362 tok/s prefill, on an M5 Ultra.** MTP drafts from the conversation itself when the reply copies it, so file rewrites and edits decode 1.3-1.5x faster (on by default, `MLX_SERVE_MTP_LOOKUP=0` turns it off); GDN layers run as one GPU dispatch (a few percent on every Mac, 27B included); Ultra chips verify through the fused MoE kernel (+14%); and M5 Ultra fuses the verify across 2 or more streams (+13% at 4 streams). Peak on M5 Ultra, Flash Next mixed 4-8 bit with `--mtp`: 219 tok/s decode, 227 tok/s across 4 streams, 3,150 tok/s prefill on an 8k prompt. Thanks @STRML MVP of this release! (#517, #519, #523, #533, #534).
+
+- **Laya typed decisions.** `POST /v1/decisions` answers score, yes/no and choice questions about a game or app state with Laya checkpoints (`aac6fef/laya-multilingual-mlx`), and concurrent requests are answered in one pass. Thanks @sbusso (#475, #511).
+
+- **Every image in a conversation reaches the model.** Earlier turns and images returned by tools (pi, Claude Code's Read) are seen where they were sent; before, only the latest turn's images were, so an agent that read three pages saw only the last one. An image already seen is not re-encoded on later turns.
+
+- **Qwen3.8 agents stop going in circles.** Earlier turns' thinking is no longer replayed into the prompt, so long agent sessions use about half the context. The cost is a short pause when you send a new instruction; tool rounds are unaffected. `chat_template_kwargs: {"preserve_thinking": true}` in Model Settings restores the old behaviour.
+
+- **Steer a running agent.** Press Return while an agent chat works to queue a note; the agent picks it up at its next tool round as your next message. Thanks @lojza3d (#497, #537).
+
+- **Redesigned Create panes.** Image, Voice, Music, Video and 3D share one layout with the model first, the Video and 3D panes keep your prompt and files when you switch away, and file pickers open over the window. Thanks @lojza3d (#445, #521).
+
+- **The app is now MLX-Serve.app** and the download is MLX-Serve.dmg. Settings carry over; an app updated in place from 26.9.5 keeps its old folder name until the next update renames it.
+
+### Changes
+- Claude Code shows thinking as it streams when tools are on.
+- A long prompt that does not fit in memory clears other chats' cache to make room instead of failing. Thanks @celestial-rose.
+- Long agent sessions keep their cache when memory is tight (#518), and a short chat no longer pushes out a long one that starts the same way.
+- Fixed a crash on a repeated one-token prompt in `/v1/completions`.
+- A stop string ends the answer, not the thinking: a match inside the reasoning no longer cuts the reply short (#549).
+- `chat_template_kwargs` in a request is honoured, so `{"enable_thinking": false}` turns thinking off.
+- Mistral 7B v0.3 and similar models keep newlines and tabs in the prompt.
+- App chats and agents resend earlier images every turn (Qwen, LFM2-VL, Muse), and LFM2-VL handles images and agent tool calls correctly.
+- Text-only models tell the agent when a tool returned an image they cannot see.
+- opencode launchers turn thinking on, and Claude Code launched from the app skips permission prompts.
+- A request without tools gets the model's reply exactly as written, like other engines.
+- Qwen-Image-2.1 is about 10% faster and can return transparent PNGs. Thanks @mrv777 (#510) and @ChadCSong (#481).
+- Bonsai 2 decodes faster, up to 20% with several chats at once, and Bonsai 1 packs get the fast kernel too. Thanks @jasontitus (#530).
+- The sidebar shows which chats are working, finished or stopped on an error. Thanks @lojza3d (#536).
+- The model browser and Settings no longer freeze while the library rescans. Thanks @LXD-8 (#480).
+- Hand edits to `mcp.json`, `providers.json` and the agents list survive a save from the app. Thanks @LXD-8 (#482, #483).
+- Codex sees its MCP tools. Thanks @kmahara (#479).
+- `mlx-serve pull` downloads everything Kokoro and Qwen3-TTS need to speak. Thanks @brandondyal (#526).
+- Very long sessions (250k+ tokens) restore reliably from the SSD cache. Thanks @brandondyal (#527).
+- `logprobs` work with `response_format` (JSON mode and JSON schema). Thanks @brandondyal (#552).
+- A model that failed to load can be loaded again after its files are fixed, without restarting the server. Thanks @brandondyal (#550).
+- The web console has a new icon toolbar, and its media tools can be turned off.
+
+## v26.9.5 — Bonsai - Qwen-Image 2.1 - Concurrency & Speed
+
+### Highlights
+- **Prism Bonsai 2 runs.** `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit` (Hadamard-rotated 2-bit Qwen3.8-27B, text + vision) loads and serves like any Qwen 27B.
+
+- **Qwen-Image-2.1 image generation.** Text-to-image, image-to-image and negative-prompt guidance from two quantized packs: `ddalcu/Qwen-Image-2.1-MLX-Serve-8bit` for 32 GB Macs and `-4bit` for 16 GB. On smaller Macs the text encoder is loaded per request and freed before the denoise.
+
+- **Four chats at once, much faster.** Four MTP streams share one verify forward and draft together (Qwen3.8-27B 4-bit, M4 Max: 72 to 119 tok/s aggregate), batched decode past 1k tokens of context no longer copies every stream's KV per step (4 streams at 28k: 26 to 64 tok/s), and with a DFlash drafter loaded concurrent requests switch to the MTP head so they batch (64 to 122 tok/s).
+
+- **8-bit KV is as fast as bf16 KV at long context.** Quantized attention runs through Apple's matmul2d tensor op (Qwen and Spark models).
+
+- **Linux.** The server builds and serves against the mlx-omarchy Vulkan MLX fork (`scripts/build-mlx-linux.sh`); Apple-only engines (ds4, llama.cpp, ANE) are left out. Thanks @joshuaswarren (#473).
+
+### Changes
+- Bonsai 2 with MTP decodes at 73.5 tok/s on an M4 Max (exact 2-bit verify kernel).
+- Benchmarks: the screen loads the picked model itself, ds4/GGUF models report only what their engine runs, and quantized packs no longer read as lossy; the LOSSY badge is gone from the app and website.
+- More of the app is translated to Simplified Chinese.
+- The model browser's RAM estimate for Qwen3.8 Flash Next is corrected.
+- Codex on `/v1/responses` with Qwen models: a system message that is not first no longer drops the request to the fallback prompt, which doubled the tool schema and lost the stop token. Thanks @kmahara (#461).
+- Qwen3.8 Flash Next accepts an unquantized BF16 `ngram_table.bin` (#476).
+- The app uses far less CPU while a reply streams (74% to about 41% on an M4 Max).
+- Bonsai 2 is the recommended pack for Macs under 16 GB
+- The sandbox terminal keeps 20k lines of scrollback.
+- A model larger than the GPU memory limit (a lowered `iogpu.wired_limit_mb`) is refused at load with a clear message; it used to load, fail in warmup and then refuse every request.
+- Downloads into a model folder on an exFAT, NTFS or network drive no longer fail with "only 0 B available" (#474).
+- The app is now called MLX-Serve everywhere in its UI, same as the server; the welcome screen shows the new app icon.
+- Several long requests restored from the prefix cache at once no longer overrun GPU memory (a failed generation, or a kernel panic on a 16 GB Mac): each is billed against what the others were promised, and the server now leaves the OS a memory reserve (`--os-reserve-gib`, a toggle in Settings).
+- Concurrent long prompts that do not fit in GPU memory together now wait their turn instead of overrunning it (a crash, or a kernel panic on macOS 26.5); a DFlash drafter's context is part of the memory bill.
+- A long prompt arriving while other requests stream no longer freezes them for a whole 8192-token chunk: prefill narrows to 2048 and runs several decode ticks per chunk boundary.
+- The first request of a burst no longer stays on the DFlash drafter beside the batched group; it joins the group.
+- MTP on sidecar-head models can fall back to plain decode when measured rounds cost more per token (32k+ context).
+- Qwen3.8 family: a thinking request that names no `reasoning_effort` renders as low and now gets low's 2048-token budget on chat, messages and responses; an explicit effort or `--reasoning-budget` still wins.
+- `/v1/responses` enforces the reasoning budget (effort word or `reasoning_budget_tokens`) like chat; a capped thought used to run until `max_output_tokens`.
+- Logprobs are computed in f32: f16-logit models returned `-inf`/NaN (invalid JSON) and bf16 ones were rounded.
+- 2-bit packs take the dequant+GEMM prefill route from 384-token chunks (was 2048): +7-8% prefill on prompts under 2k tokens.
+- `mlx-serve launch pi` sends the picked thinking level as `reasoning_effort` (was `enable_thinking` only, which dropped low/medium).
+- Stopping a request while another one was decoding could crash the server.
+- MTP auto draft depth settles closer to the best depth for the content at short context and no longer pauses mid-round to read draft confidences (Qwen3.8-27B 4-bit, M4 Max: code +2%, prose +2%, short echo +3%); `MLX_SERVE_MTP_DEPTH_POLICY=legacy` restores the old planner.
+- Special thanks to Zhijian Liu & IncoAI for finding concurrency bugs and their matmul2d packed-KV attention kernel !
+- ⚠️ Next release, MLX Core.app will become MLX-Serve.app, this will reset your app settings & updates ⚠️
+
+## v26.9.4 — Correctness Fixes, Chinese Translation, Benchmarks
+
+### Highlights
+
+- **Benchmark your Mac from the menu bar.** Run a standardized context-and-coding benchmark against the loaded model using the server's own timings. Results stay local, with optional anonymous sharing to the community benchmarks at mlxserve.com/benchmarks.
+
+- **Qwen3.8 Flash Next now handles 32 concurrent streams.** Fixed a crash that occurred when running more than 10 streams. On an M4 Max, 32 streams can now decode at **185 tok/s aggregate**.
+
+- **`top_p: 0` is now greedy.** It behaves like `top_k: 1`, selecting only the highest-probability token.
+
+- **Invalid images now return useful errors.** Unreadable images, bad base64, and unsupported image payloads now return a clear **400 error** instead of silently disappearing from the prompt.
+
+- **More reliable structured output.** Invalid `json_schema` requests are rejected properly, empty stop sequences no longer terminate responses immediately, and JSON output now starts and ends cleanly at the root value.
+
+- **Better Ollama and embeddings compatibility.** Ollama's model-load handshake now works correctly, and empty embedding requests return a proper 400 instead of a server error.
+
+- **`/props` now reports active serving settings.** Inspect the effective KV quantization, MTP, drafter, PLD, attention quantization, prefill chunking, and other settings used by the loaded model.
+
+- **Model-less requests now use the latest loaded model.** Requests without a `model` no longer accidentally reload an older model and evict the one currently loaded.
+
+- **Prompt-cache hits now produce identical greedy output.** Fixed a hybrid-model issue where warm and cold requests could produce different tokens due to different kernel tiling.
+
+- **Concurrent speculative decoding is more reliable.** Fixed `generation failed` errors when sampled requests with different draft lengths shared a Qwen 3.5/3.8 verification pass.
+
+---
+
 ## v26.9.3 — Flash Next on 64 GB, speculation for everyone, Neural Engine media
 
 ### Highlights

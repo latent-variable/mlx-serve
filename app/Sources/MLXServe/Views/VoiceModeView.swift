@@ -89,8 +89,8 @@ struct VoiceOrbView: View {
     /// talking, otherwise the state — which is also where a mic-permission
     /// failure becomes visible (the old sheet's status text did that job).
     private var caption: some View {
-        Text(controller.partialTranscript.isEmpty ? statusText : controller.partialTranscript)
-            .font(.caption)
+        Text(L10n.text(controller.partialTranscript.isEmpty ? statusText : controller.partialTranscript))
+            .font(.app(.caption))
             .foregroundStyle(isError ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
             .multilineTextAlignment(.center)
             .lineLimit(2)
@@ -155,7 +155,7 @@ struct VoiceComposerToggle: View {
             }
         } label: {
             Image(systemName: "waveform")
-                .font(.system(size: 13, weight: .medium))
+                .font(.app(.body, weight: .medium))
                 .foregroundStyle(ownedHere ? Color.white : Color.secondary)
                 .frame(width: ChatMetrics.composerIconSize, height: ChatMetrics.composerIconSize)
                 .background(ownedHere ? Color.accentColor : Color.secondary.opacity(0.15))
@@ -164,6 +164,9 @@ struct VoiceComposerToggle: View {
         .buttonStyle(.plain)
         .frame(width: ChatMetrics.composerControlSize, height: ChatMetrics.composerControlSize)
         .disabled(disabled)
-        .help("Voice mode (\(ownedHere ? "ON in this chat" : controller.isActive ? "ON in another chat — click to move it here" : "OFF")) — talk to the model hands-free. Speech-to-text and text-to-speech run locally on your Mac; the model only handles text (and tools/thinking if enabled).")
+        .help(L10n.format(
+            "Voice mode (%@) — talk to the model hands-free. Speech-to-text and text-to-speech run locally on your Mac; the model only handles text (and tools/thinking if enabled).",
+            L10n.text(ownedHere ? "ON in this chat" : controller.isActive ? "ON in another chat — click to move it here" : "OFF")
+        ))
     }
 }

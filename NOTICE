@@ -65,6 +65,27 @@ that mlx-serve does not use. Those notices are omitted here as permitted by
 Apache-2.0 section 4(d).
 
 --------------------------------------------------------------------------------
+laya-mlx
+https://github.com/mizorewww/laya-mlx
+Copyright laya-mlx contributors
+Licensed under the Apache License, Version 2.0.
+
+src/laya.zig is an op-for-op port of the laya_mlx runtime: prompt and sequence
+construction, the ModernBERT encoder, decision head, marker scorer, action head
+and calibration, so /v1/decisions answers match the reference.
+
+--------------------------------------------------------------------------------
+Inco Splash
+https://github.com/incoai/splash
+Licensed under the Apache License, Version 2.0.
+
+The matmul2d packed-KV attention kernel (msv_qkv_mpp in src/transformer.zig)
+follows the structure of Splash's q8 attention tile
+(runtime/metal/kernels/common/q8_attention_tile.h): per-page QK and PV through
+the MetalPerformancePrimitives tensor op with an online softmax and split-KV
+partials. Re-implemented over MLX's affine group-quantized cache.
+
+--------------------------------------------------------------------------------
 dflash-mlx
 https://github.com/bstnxbt/dflash-mlx
 Copyright dflash-mlx contributors
@@ -92,6 +113,9 @@ Used in mlx-serve (`src/transformer.zig`):
     (`qsa_fast.py`, `qwen4_qsa_sparse_gqa`). The `msv_attn_qsa256` kernel
     body itself derives from our own `msv_attn_p256`, not from their source.
     thank you Jonathan Spangler.
+  * The segmented sorted NAX gather_qmm tile scan and affine matmul schedules,
+    with row-mapped inputs and paired gate/up SwiGLU epilogue, ported from
+    `omlx/patches/m5_gather_qmm_nax.py` at d6b2b92.
     
 Used in mlx-serve (`lib/ane/`, `src/ane.zig`):
 
@@ -208,12 +232,17 @@ variant) so a fused kernel stays bit-identical to the op chain it replaces.
 Those are our own implementations written against MLX's observable behaviour,
 not copies of its source.
 
-`src/kernels/qsa_nax_header.metal` adapts the cooperative NAX fragment layout
-and MMA helpers from MLX's `steel/attn/nax.h` (Copyright (c) 2025 Apple
-Inc., MIT License, the same license as this project's LICENSE), and
-`src/kernels/qsa_nax.metal` adapts the split-head-dimension attention
-algorithm to per-query sparse block selection with a two-term bf16 PV.
-Contributed by Nikolai V.
+The original QSA NAX kernel adapted MLX's `steel/attn/nax.h` (Copyright
+(c) 2025 Apple Inc., MIT License). The current `src/kernels/qsa_nax.metal`
+and `src/kernels/qsa_nax_header.metal` port oMLX's occupancy-tuned QSA
+kernel from `omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/
+qwen4_exp/qsa_nax.py` at d6b2b92 (Apache-2.0).
+https://github.com/jundot/omlx/pull/4020
+Original mlx-serve QSA NAX implementation contributed by Nikolai V.
+
+`src/kernels/gather_qmm_nax_header.metal` adapts the NAX matmul fragment and
+MMA helpers from MLX's `steel/gemm/nax.h` (Copyright (c) 2025 Apple Inc., MIT
+License).
 
 --------------------------------------------------------------------------------
 mlx-lm
@@ -337,6 +366,26 @@ head requantization uses our existing per-weight quantization path, and the
 crossrow kernel is emitted by comptime codegen with our own host dispatch
 (paired input groups instead of their idle-odd-threadgroup reuse).
 
+--------------------------------------------------------------------------------
+TensorFold
+https://github.com/ashhart/TensorFold
+Copyright (c) 2026 TensorFold contributors
+Licensed under the MIT License.
+
+Ported into mlx-serve:
+  - `src/rowqmv.zig`: the row-exact 4-bit matvec, routed-expert and router
+    kernels of `rows.py` (one simdgroup per input row, MLX's qmv_fast loop).
+  - `src/simd_qmm.zig`: the `simd_qmm` fixed-order matmul kernels.
+  - `src/row_attn.zig`: the fixed-split row attention of `row_attention`.
+  - `src/keyed_sample.zig`: the keyed Gumbel-max GPU sampler of
+    `gpu_sampling.py` (Metal source reproduced unchanged).
+  - `src/dflash.zig`: the best-first draft-tree parameters and the
+    lattice/tree construction scheme.
+
+Modifications by mlx-serve: reimplemented in Zig against mlx-c with our own
+host dispatch; `simd_qmm` gains a 2-3 row `rows` kind; draft trees verify
+through our GDN fold kernel and path attention.
+
 
 ================================================================================
 Other licenses
@@ -372,6 +421,30 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+--------------------------------------------------------------------------------
+Lucide icons
+https://github.com/lucide-icons/lucide
+Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part
+of Feather (MIT). All other copyright (c) for Lucide are held by Lucide
+Contributors 2022.
+Licensed under the ISC License.
+
+The web console's icons (`src/html/index.html`: cpu, brain, wrench,
+audio-lines, paperclip, square-pen, code-xml) are Lucide's SVG paths,
+unmodified.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 --------------------------------------------------------------------------------
 stb_image / stb_image_write
@@ -427,6 +500,18 @@ and they are listed because they made that work possible.
     delta-sigma at low step counts (`minimax_h3.audioStepFactor`). The Turbo
     LoRA weights it loads (larryvrh/MiniMax-H3-Turbo-Lora, Apache-2.0) are
     downloaded at runtime and not redistributed here.
+  * Layr-Labs/mlxfast-bonsai2-27b-engine (MIT), the reference for the few-row
+    2-bit tensor path in `src/qmv_nax2.zig`: its `qmm_m16_block` fragment
+    coordinate mapping, the 256-k weight line loaded across a fragment quad and
+    exchanged with `simd_shuffle`, the dequantize-into-the-right-operand
+    arrangement, and the two-slice threadgroup reduction. Transcribed into a
+    JIT `metal_kernel` here, not shipped as their source.
+  * Layr-Labs/mlxfast-bonsai2-27b-engine (MIT), the reference for the opt-in
+    int8 prefill in `src/qmm_int8.zig`: its register-staged prompt matmul (2-bit
+    codes expanded to int8 straight into the tensor op's operand, signed
+    per-group activation codes quantized with the rotation) and the factored
+    ternary epilogue. Written as a JIT `metal_kernel` here, not shipped as their
+    source.
   * filipstrand/mflux (MIT), the reference for stacking several LoRA adapters
     at once — summing per-adapter deltas at forward time rather than merging
     them into the base weight, the `lora_paths`/`lora_scales` request shape,

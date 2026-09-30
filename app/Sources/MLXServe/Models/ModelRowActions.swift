@@ -24,14 +24,25 @@ enum ModelRowActions {
     /// True when the trash is offered right now. A broken folder never needs
     /// unlocking: it is junk, not somebody's model (see `ModelDefect`).
     static func showsTrash(_ model: LocalModel, unlocked: Bool) -> Bool {
-        model.isDeletable || unlocked
+        !model.isDownloading && (model.isDeletable || unlocked)
+    }
+
+    /// The live transfer filling this row's folder, keyed the way the pill
+    /// joins a download to a path (`ChatModelPill.isTransfer`).
+    static func transfer(for model: LocalModel,
+                         in downloads: [String: DownloadManager.DownloadState])
+        -> (repoId: String, state: DownloadManager.DownloadState)? {
+        downloads
+            .filter { $0.value.status == .downloading && ChatModelPill.isTransfer(of: $0.key, for: model.path) }
+            .min { $0.key < $1.key }
+            .map { ($0.key, $0.value) }
     }
 
     /// True when the row shows a lock instead. Mutually exclusive with the
     /// trash — they occupy the same slot, and a row showing both is a row where
     /// one of them is lying.
     static func showsLock(_ model: LocalModel, unlocked: Bool) -> Bool {
-        !showsTrash(model, unlocked: unlocked)
+        !model.isDownloading && !showsTrash(model, unlocked: unlocked)
     }
 
     /// Tooltip for the lock. Names the owning app AND says what clicking does —
@@ -42,40 +53,42 @@ enum ModelRowActions {
         // this read "a folder you added's folder".
         let where_: String
         switch model.source {
-        case .mlxServe: where_ = "in MLX Core\u{2019}s own models folder"
+        case .mlxServe: where_ = "in MLX-Serve\u{2019}s own models folder"
         case .lmStudio: where_ = "in LM Studio\u{2019}s models folder"
         case .huggingFace: where_ = "in the Hugging Face cache, where models share files"
         case .mtplx: where_ = "in MTPLX\u{2019}s models folder"
         case .osaurus: where_ = "in Osaurus\u{2019}s models folder"
         case .custom: where_ = "in a custom folder you added"
         }
-        return "This model is \(where_). Click to unlock and delete it."
+        return L10n.format("This model is %@. Click to unlock and delete it.", L10n.text(where_))
     }
 
     /// Confirmation text. A foreign row names the PATH, because "Delete org/m?"
     /// does not say which of four tools' copies is about to go.
     static func deleteMessage(_ model: LocalModel) -> String {
+        // Producer-side formats: the row renders this verbatim, so the key has
+        // to be completed here rather than looked up afterwards.
         if let defect = model.defect {
-            return "\(defect.explanation)\n\nDelete \(model.path)?"
+            return L10n.format("%@\n\nDelete %@?", L10n.text(defect.explanation), model.path)
         }
         if model.quantFile != nil {
-            return "Delete \(model.displayLabel)? Other quants of this model stay on disk."
+            return L10n.format("Delete %@? Other quants of this model stay on disk.", model.displayLabel)
         }
         switch model.source {
         case .mlxServe:
-            return "Delete \(model.name)? This will remove all downloaded files."
+            return L10n.format("Delete %@? This will remove all downloaded files.", model.name)
         case .huggingFace:
             // The one tree where deleting damages models we are NOT deleting:
             // snapshots hard-link shared blobs. Allowed — it is the user's disk
             // — but never silently.
-            return """
+            return L10n.format("""
             This is in the Hugging Face cache, where models share downloaded files. \
             Deleting it can break other models that share the same files.
 
-            Delete \(model.path)?
-            """
+            Delete %@?
+            """, model.path)
         default:
-            return "This is in another app\u{2019}s models folder.\n\nDelete \(model.path)?"
+            return L10n.format("This is in another app\u{2019}s models folder.\n\nDelete %@?", model.path)
         }
     }
 

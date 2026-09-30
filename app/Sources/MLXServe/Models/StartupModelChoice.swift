@@ -2,7 +2,7 @@ import Foundation
 
 /// What launch does with the server, and which model, if any, it loads. Two
 /// decisions: `--model` is an eager, blocking load, so auto-start alone comes
-/// up headless and only "Load a model at start" adds one.
+/// up headless and only "Preload the model when the server starts" adds one.
 enum StartupModelChoice {
 
     /// Which model start loads, stored apart from any path so a rule is never

@@ -30,10 +30,10 @@ struct ModelDownloadRow: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(option.displayName)
-                        .font(.caption.weight(.medium))
-                    Text(option.sizeEstimate)
-                        .font(.caption2)
+                    Text(L10n.text(option.displayName))
+                        .font(.app(.caption).weight(.medium))
+                    Text(L10n.text(option.sizeEstimate))
+                        .font(.app(.caption2))
                         .foregroundStyle(.tertiary)
                 }
                 Spacer()
@@ -41,14 +41,14 @@ struct ModelDownloadRow: View {
                 if isReady {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
-                        .font(.caption)
+                        .font(.app(.caption))
                 } else if let state, state.status == .downloading {
                     HStack(spacing: 6) {
                         VStack(alignment: .trailing, spacing: 1) {
                             ProgressView(value: state.progress)
                                 .frame(width: 60)
                             Text("\(state.percentFormatted) \(state.speedFormatted)")
-                                .font(.system(size: 8).monospacedDigit())
+                                .font(.app(.caption2).monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
                         Button {
@@ -56,7 +56,7 @@ struct ModelDownloadRow: View {
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundStyle(.secondary)
-                                .font(.caption)
+                                .font(.app(.caption))
                         }
                         .buttonStyle(.plain)
                         .help("Cancel download")
@@ -64,18 +64,20 @@ struct ModelDownloadRow: View {
                 } else if let state, state.status == .completed {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
-                        .font(.caption)
+                        .font(.app(.caption))
                 } else if let state, state.status == .failed {
-                    Button(downloads.hasPartialDownload(option.repoId) ? "Resume" : "Retry") {
+                    Button {
                         startDownload()
-                    }
-                    .font(.caption)
+                    } label: { Text(L10n.text(downloads.hasPartialDownload(option.repoId) ? "Resume" : "Retry"))
+                        .font(.app(.body)) }
+                    .font(.app(.caption))
                     .controlSize(.mini)
                 } else {
-                    Button(downloads.hasPartialDownload(option.repoId) ? "Resume" : "Download") {
+                    Button {
                         startDownload()
-                    }
-                    .font(.caption)
+                    } label: { Text(L10n.text(downloads.hasPartialDownload(option.repoId) ? "Resume" : "Download"))
+                        .font(.app(.body)) }
+                    .font(.app(.caption))
                     .controlSize(.mini)
                 }
             }
@@ -83,14 +85,14 @@ struct ModelDownloadRow: View {
             // Status text for active downloads
             if let state, state.status == .downloading, !state.statusText.isEmpty {
                 Text("[\(state.fileIndex)/\(state.fileCount)] \(state.statusText)")
-                    .font(.system(size: 9))
+                    .font(.app(.caption2))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
             if let state, state.status == .failed, let error = state.error {
                 Text(error)
-                    .font(.system(size: 9))
+                    .font(.app(.caption2))
                     .foregroundStyle(.red)
                     .lineLimit(2)
             }

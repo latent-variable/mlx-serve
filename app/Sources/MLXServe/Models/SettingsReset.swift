@@ -55,10 +55,6 @@ enum SettingsReset {
                 f("enableMetrics") { $0.enableMetrics = $1.enableMetrics },
                 f("apiKey") { $0.apiKey = $1.apiKey },
                 f("toolAutocorrect") { $0.toolAutocorrect = $1.toolAutocorrect },
-                f("skipMemPreflight") { $0.skipMemPreflight = $1.skipMemPreflight },
-                f("maxResidentMemGB") { $0.maxResidentMemGB = $1.maxResidentMemGB },
-                f("maxResidentModels") { $0.maxResidentModels = $1.maxResidentModels },
-                f("idleEvictSecs") { $0.idleEvictSecs = $1.idleEvictSecs },
             ]
 
         case .lanSharing:
@@ -75,13 +71,22 @@ enum SettingsReset {
                 f("enablePLD") { $0.enablePLD = $1.enablePLD },
                 f("pldDraftLen") { $0.pldDraftLen = $1.pldDraftLen },
                 f("pldKeyLen") { $0.pldKeyLen = $1.pldKeyLen },
-                f("drafterPath") { $0.drafterPath = $1.drafterPath },
-                f("drafterOptOut") { $0.drafterOptOut = $1.drafterOptOut },
-                f("draftBlockSize") { $0.draftBlockSize = $1.draftBlockSize },
                 f("enableMTP") { $0.enableMTP = $1.enableMTP },
                 f("mtpDepth") { $0.mtpDepth = $1.mtpDepth },
-                f("mtpOnMoE") { $0.mtpOnMoE = $1.mtpOnMoE },
                 f("enableDSpark") { $0.enableDSpark = $1.enableDSpark },
+            ]
+
+        case .memory:
+            return [
+                f("skipMemPreflight") { $0.skipMemPreflight = $1.skipMemPreflight },
+                f("osMemoryReserve") { $0.osMemoryReserve = $1.osMemoryReserve },
+                f("maxResidentMemGB") { $0.maxResidentMemGB = $1.maxResidentMemGB },
+                f("maxResidentModels") { $0.maxResidentModels = $1.maxResidentModels },
+                f("idleEvictSecs") { $0.idleEvictSecs = $1.idleEvictSecs },
+                f("kvQuant") { $0.kvQuant = $1.kvQuant },
+                f("prefixCacheEntries") { $0.prefixCacheEntries = $1.prefixCacheEntries },
+                f("prefixCacheMem") { $0.prefixCacheMem = $1.prefixCacheMem },
+                f("pleGpu") { $0.pleGpu = $1.pleGpu },
             ]
 
         // One section, so one reset: the universal knob and the MLX-only ones.
@@ -90,9 +95,6 @@ enum SettingsReset {
                 f("tokenizeCacheEntries") { $0.tokenizeCacheEntries = $1.tokenizeCacheEntries },
                 f("maxConcurrent") { $0.maxConcurrent = $1.maxConcurrent },
                 f("decodeAttnQuantChoice") { $0.decodeAttnQuantChoice = $1.decodeAttnQuantChoice },
-                f("kvQuant") { $0.kvQuant = $1.kvQuant },
-                f("prefixCacheEntries") { $0.prefixCacheEntries = $1.prefixCacheEntries },
-                f("prefixCacheMem") { $0.prefixCacheMem = $1.prefixCacheMem },
                 f("enablePrefixCacheDisk") { $0.enablePrefixCacheDisk = $1.enablePrefixCacheDisk },
                 f("prefixCacheDisk") { $0.prefixCacheDisk = $1.prefixCacheDisk },
             ]
@@ -105,14 +107,11 @@ enum SettingsReset {
                 f("aneAudio") { $0.aneAudio = $1.aneAudio },
             ]
 
-        case .ggufPerformance:
+        case .engines:
             return [
+                f("mlxGguf") { $0.mlxGguf = $1.mlxGguf },
                 f("llamaKvQuant") { $0.llamaKvQuant = $1.llamaKvQuant },
                 f("llamaCacheEntries") { $0.llamaCacheEntries = $1.llamaCacheEntries },
-            ]
-
-        case .ds4:
-            return [
                 f("ssdStreaming") { $0.ssdStreaming = $1.ssdStreaming },
             ]
 

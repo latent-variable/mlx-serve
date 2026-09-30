@@ -26,12 +26,20 @@ struct MediaModelChooser<P: MediaModelSizing>: View {
     let onDownload: (P) -> Void
     /// The LAN rows, if this pane has any peers offering the modality.
     let lanCapability: String
+    /// What the pane wants said about the model, immediately after the
+    /// switcher: live residency, where a pane has it. Reads as part of the
+    /// sentence the row makes, which is why it is not in the trailing slot.
+    var status: AnyView? = nil
+    /// Anything the PANE wants on the switcher's row, trailing edge. What
+    /// belongs there is the pane's own business (residency, for the ones that
+    /// unload after generating), so it is handed in rather than built here.
+    var accessory: AnyView? = nil
 
     @EnvironmentObject var server: ServerManager
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Model").font(.subheadline.weight(.semibold))
+            Text("Model").font(.app(.headline).weight(.semibold))
 
             // ONE row: the model that will run. A stack of radio rows read as
             // a multi-select and grew with the catalogue; what the pane has to
@@ -46,7 +54,12 @@ struct MediaModelChooser<P: MediaModelSizing>: View {
                         .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
                 )
 
-            switcherMenu
+            HStack(spacing: 8) {
+                switcherMenu
+                status
+                Spacer(minLength: 8)
+                accessory
+            }
         }
     }
 
@@ -94,19 +107,19 @@ struct MediaModelChooser<P: MediaModelSizing>: View {
         return HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(cur.name)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.app(.subheadline).weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 if !cur.detail.isEmpty || cur.ram != nil {
                     HStack(spacing: 4) {
                         if !cur.detail.isEmpty {
-                            Text(cur.detail)
-                                .font(.caption)
+                            Text(L10n.text(cur.detail))
+                                .font(.app(.caption))
                                 .foregroundStyle(.secondary)
                         }
                         if let ram = cur.ram {
-                            Text(ram)
-                                .font(.caption)
+                            Text(L10n.text(ram))
+                                .font(.app(.caption))
                                 .foregroundStyle(.tertiary)
                         }
                     }
@@ -115,7 +128,7 @@ struct MediaModelChooser<P: MediaModelSizing>: View {
                     // Warn, don't block: it may still run, slowly.
                     Label("Needs more memory than this Mac has",
                           systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2)
+                        .font(.app(.caption2))
                         .foregroundStyle(.orange)
                 }
             }
@@ -134,7 +147,7 @@ struct MediaModelChooser<P: MediaModelSizing>: View {
                         onDownload(preset)
                     } label: {
                         Text(downloadLabel(preset))
-                            .font(.caption.weight(.medium))
+                            .font(.app(.caption).weight(.medium))
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -175,9 +188,9 @@ struct MediaModelChooser<P: MediaModelSizing>: View {
                             onSelectLan(m.name)
                         } label: {
                             if lanModel == m.name {
-                                Label(m.lanDisplayName, systemImage: "checkmark")
+                                Label(L10n.text(m.lanDisplayName), systemImage: "checkmark")
                             } else {
-                                Text(m.lanDisplayName)
+                                Text(L10n.text(m.lanDisplayName))
                             }
                         }
                     }
@@ -199,9 +212,9 @@ struct MediaModelChooser<P: MediaModelSizing>: View {
             onSelect(preset)
         } label: {
             if lanModel == nil && preset.id == selectedId {
-                Label(title, systemImage: "checkmark")
+                Label(L10n.text(title), systemImage: "checkmark").font(.app(.body))
             } else {
-                Text(title)
+                Text(L10n.text(title)).font(.app(.body))
             }
         }
     }
@@ -221,7 +234,9 @@ extension MediaModelChooser {
                      bundleOf: @escaping (P) -> MediaBundle,
                      downloads: DownloadManager,
                      onDownloadFinished: @escaping () -> Void,
-                     persist: @escaping () -> Void) -> MediaModelChooser<P> {
+                     persist: @escaping () -> Void,
+                     status: AnyView? = nil,
+                     accessory: AnyView? = nil) -> MediaModelChooser<P> {
         let featured = MediaModelPicks.featured(
             all,
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
@@ -234,7 +249,7 @@ extension MediaModelChooser {
             lanModel: lanModel.wrappedValue,
             capabilityOf: capabilityOf,
             isDownloaded: { downloads.bundleReady(bundleOf($0)) },
-            downloadLabel: { "Download \(bundleOf($0).approxSizeLabel)" },
+            downloadLabel: { L10n.format("Download %@", bundleOf($0).approxSizeLabel) },
             onSelect: { preset in
                 lanModel.wrappedValue = nil
                 selected.wrappedValue = preset
@@ -252,6 +267,8 @@ extension MediaModelChooser {
                 downloads.startBundle(bundleOf(preset)) { onDownloadFinished() }
             },
             lanCapability: capability,
+            status: status,
+            accessory: accessory,
             onSelectLan: { id in
                 lanModel.wrappedValue = id
                 // Adopt the preset the request will be SHAPED by: catalogue

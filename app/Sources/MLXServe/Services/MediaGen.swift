@@ -36,8 +36,23 @@ struct ResolutionOption: Hashable, Identifiable {
     let width: Int
     let height: Int
     let label: String   // e.g. "1024 × 1024 (square)"
+    /// How the shape is NAMED, not computed: 704 x 448 reduces to 11:7 and
+    /// everybody calls it 14:9. Optional because only the video pane groups
+    /// and re-labels its rows; elsewhere `label` is the whole answer.
+    var ratio: String? = nil
+    /// What the row costs, in the words the label already used ("fastest",
+    /// "recommended", "2.9x slower").
+    var note: String? = nil
 
     var id: String { "\(width)x\(height)" }
+
+    /// Landscape, square or portrait. The video pane's Presets menu groups by
+    /// it, so the orientation never has to be repeated in every row's text.
+    enum Orientation { case landscape, square, portrait }
+    var orientation: Orientation {
+        if width == height { return .square }
+        return width > height ? .landscape : .portrait
+    }
 
     /// Sentinel: send NO `size`, so the server keeps the reference image's own
     /// resolution (the edit pipeline's `max_size = source size` default). An
@@ -66,17 +81,24 @@ struct ResolutionOption: Hashable, Identifiable {
 /// Documented duplication in the `isMediaModelType` / `modalityFromType`
 /// mould; `CustomResolutionTests` is what keeps the two from drifting.
 struct ResolutionGrid: Hashable {
+    /// Image backends REWRITE an off-grid size up, so the pane rounds up too
+    /// or its hint names a size the server does not generate. Video backends
+    /// REFUSE an off-grid canvas, so the pane's snap is the one that counts,
+    /// and nearest is the one a user can predict.
+    enum Rounding: Hashable { case up, nearest }
+
     /// Every dimension must be a multiple of this.
     let alignment: Int
     let minDim: Int
     let maxDim: Int
+    var rounding: Rounding = .up
 
-    /// Round onto the grid the way the server does — UP, never to nearest
-    /// (`((v + 31) / 32) * 32`). Rounding the friendly way would print a hint
-    /// naming a size the server does not generate.
     func snap(_ v: Int) -> Int {
         guard v > 0 else { return minDim }
-        return ((v + alignment - 1) / alignment) * alignment
+        switch rounding {
+        case .up:      return ((v + alignment - 1) / alignment) * alignment
+        case .nearest: return ((v + alignment / 2) / alignment) * alignment
+        }
     }
 
     /// Classify a typed size. In-range-but-off-grid is a CORRECTION (the model
@@ -85,15 +107,15 @@ struct ResolutionGrid: Hashable {
     /// requested size with nothing explaining why.
     func resolve(width: Int, height: Int) -> CustomResolution {
         for v in [width, height] where v <= 0 {
-            return .invalid(message: "Width and height must be whole numbers above zero.")
+            return .invalid(message: L10n.text("Width and height must be whole numbers above zero."))
         }
         for v in [width, height] where v < minDim || v > maxDim {
-            return .invalid(message: "This model samples between \(minDim) and \(maxDim) px per side. \(v) is outside that.")
+            return .invalid(message: L10n.formatUngrouped("This model samples between %lld and %lld px per side. %lld is outside that.", minDim, maxDim, v))
         }
         let w = snap(width), h = snap(height)
         guard w != width || h != height else { return .ok(width: width, height: height) }
         return .corrected(width: w, height: h,
-                          note: "Rounded to \(w) × \(h) — this model samples in steps of \(alignment) px.")
+                          note: L10n.formatUngrouped("Rounded to %lld × %lld — this model samples in steps of %lld px.", w, h, alignment))
     }
 }
 
@@ -139,6 +161,7 @@ enum FluxVariant: String, Hashable, Codable {
     case krea2Turbo       // Krea-2-Turbo single-stream MMDiT — served by the krea image backend
     case mageFlowTurbo    // Microsoft Mage-Flow-Turbo double-stream flow DiT — served by the mage_flow backend
     case mageFlowEditTurbo // Microsoft Mage-Flow-Edit-Turbo — same arch, edit-trained; multi-reference in-context editor
+    case qwenImage21      // Qwen-Image-2.1 block-causal DiT — served by the qwen_image backend; undistilled (40 steps, optional real CFG)
 }
 
 struct ImageQualitySettings: Hashable {
@@ -439,6 +462,60 @@ struct ImageModelPreset: Identifiable, Hashable {
         description: "Microsoft's native-resolution image EDITOR, quantized to 8-bit — change or compose from one or more references in 4 steps, at half the download and memory. Open (MIT)."
     )
 
+    /// Qwen-Image-2.1 is undistilled and ~1 MP-trained: a step costs the same
+    /// at any shape, so the menu stays at the sizes a 40-step run finishes in
+    /// reasonable time on a laptop.
+    private static let qwenImageResolutions: [ResolutionOption] = [
+        .init(width: 1024, height: 1024, label: "1024 × 1024 (square)"),
+        .init(width: 768,  height: 768,  label: "768 × 768 (square, fast)"),
+        .init(width: 512,  height: 512,  label: "512 × 512 (fastest)"),
+        .init(width: 832,  height: 1248, label: "832 × 1248 (portrait 2:3)"),
+        .init(width: 1248, height: 832,  label: "1248 × 832 (landscape 3:2)"),
+        .init(width: 1344, height: 768,  label: "1344 × 768 (landscape 16:9)"),
+        .init(width: 768,  height: 1344, label: "768 × 1344 (portrait 9:16)"),
+    ]
+
+    private static let qwenImageQuality: [QualityPreset: ImageQualitySettings] = [
+        .fast:         .init(steps: 20),
+        .good:         .init(steps: 30),
+        .quality:      .init(steps: 40),
+        .superQuality: .init(steps: 50),
+    ]
+
+    /// Qwen-Image-2.1, DiT + text encoder 8-bit (`tests/convert_qwen_image21_weights.py
+    /// --preset 32gb`). On a 32 GB Mac the server stages the text encoder per
+    /// request, so the resident set is the DiT + VAE.
+    static let qwenImage21_8bit = ImageModelPreset(
+        id: "ddalcu/qwen-image-2.1-8bit",
+        name: "Qwen-Image 2.1 8-bit (~18 GB)",
+        variant: .qwenImage21,
+        configName: "qwen_image21",
+        repo: "ddalcu/Qwen-Image-2.1-MLX-Serve-8bit",
+        approxDownloadGB: 18,
+        approxRAMGB: 22,
+        resolutions: qwenImageResolutions,
+        defaultResolution: qwenImageResolutions[0],
+        qualityProfiles: qwenImageQuality,
+        defaultQuality: .quality,
+        description: "Alibaba's second-generation image model — strong prompt understanding and in-image text, in English and Chinese. Undistilled: 40 steps by default, so it is slower than the Turbo models. Open (Apache-2.0)."
+    )
+
+    /// The 4-bit pack (`--preset 16gb`) for 16 GB Macs.
+    static let qwenImage21_4bit = ImageModelPreset(
+        id: "ddalcu/qwen-image-2.1-4bit",
+        name: "Qwen-Image 2.1 4-bit (~10 GB)",
+        variant: .qwenImage21,
+        configName: "qwen_image21",
+        repo: "ddalcu/Qwen-Image-2.1-MLX-Serve-4bit",
+        approxDownloadGB: 10,
+        approxRAMGB: 12,
+        resolutions: qwenImageResolutions,
+        defaultResolution: qwenImageResolutions[0],
+        qualityProfiles: qwenImageQuality,
+        defaultQuality: .quality,
+        description: "Qwen-Image 2.1 quantized to 4-bit for smaller Macs — the same 40-step model at about half the memory, with some loss of fine detail. Open (Apache-2.0)."
+    )
+
     /// Catalog ordered cheapest → heaviest. Default (`first`) is FLUX.2-klein
     /// 4B Q4 — smallest download.
     static let all: [ImageModelPreset] = [
@@ -446,7 +523,9 @@ struct ImageModelPreset: Identifiable, Hashable {
         .mageFlowTurbo8bit, .mageFlowEditTurbo8bit,    // 9, 10
         .flux2Klein9B_Q4,                              // 10
         .flux2Klein9BBase_Q4,                          // 10
+        .qwenImage21_4bit,                             // 10
         .krea2Turbo,                                   // 15
+        .qwenImage21_8bit,                             // 18
     ]
 }
 
@@ -645,10 +724,13 @@ struct VideoModelPreset: Identifiable, Hashable {
         // H3 has no two-stage pipeline at all, and its own fastest canvases
         // (544, 672, 960) are /32 and not /64 — applying LTX's two-stage grid
         // here would refuse the model's own shipped rows.
+        // `.nearest`: the video handlers refuse an off-grid canvas, they do
+        // not rewrite it, so this snap is the one that counts.
         case .minimaxH3:
-            return ResolutionGrid(alignment: 32, minDim: 256, maxDim: maxDim)
+            return ResolutionGrid(alignment: 32, minDim: 256, maxDim: maxDim, rounding: .nearest)
         case .ltx:
-            return ResolutionGrid(alignment: twoStage ? 64 : 32, minDim: 256, maxDim: maxDim)
+            return ResolutionGrid(alignment: twoStage ? 64 : 32, minDim: 256, maxDim: maxDim,
+                                  rounding: .nearest)
         }
     }
 
@@ -694,16 +776,20 @@ struct VideoModelPreset: Identifiable, Hashable {
     /// two landscape/portrait pairs keep their place in the list. Pinned by
     /// `testEveryLtxResolutionSurvivesTheTwoStagePipelines`.
     private static let ltxResolutions: [ResolutionOption] = [
-        .init(width: 704,  height: 448, label: "704 × 448 (landscape 14:9) — fastest"),
-        .init(width: 448,  height: 704, label: "448 × 704 (portrait 9:14)"),
-        .init(width: 768,  height: 512, label: "768 × 512 (landscape 3:2)"),
-        .init(width: 512,  height: 768, label: "512 × 768 (portrait 2:3)"),
-        .init(width: 1024, height: 576, label: "1024 × 576 (landscape 16:9)"),
-        .init(width: 576,  height: 1024, label: "576 × 1024 (portrait 9:16)"),
-        .init(width: 1600, height: 896, label: "1600 × 896 (landscape 16:9) — recommended"),
-        .init(width: 896,  height: 1600, label: "896 × 1600 (portrait 9:16)"),
-        .init(width: 1920, height: 1088, label: "1920 × 1088 (landscape 16:9) — LTX's own canvas, slowest"),
-        .init(width: 1088, height: 1920, label: "1088 × 1920 (portrait 9:16) — slowest"),
+        .init(width: 704,  height: 448, label: "704 × 448 (landscape 14:9) — fastest",
+              ratio: "14:9", note: "fastest"),
+        .init(width: 448,  height: 704, label: "448 × 704 (portrait 9:14)", ratio: "9:14"),
+        .init(width: 768,  height: 512, label: "768 × 512 (landscape 3:2)", ratio: "3:2"),
+        .init(width: 512,  height: 768, label: "512 × 768 (portrait 2:3)", ratio: "2:3"),
+        .init(width: 1024, height: 576, label: "1024 × 576 (landscape 16:9)", ratio: "16:9"),
+        .init(width: 576,  height: 1024, label: "576 × 1024 (portrait 9:16)", ratio: "9:16"),
+        .init(width: 1600, height: 896, label: "1600 × 896 (landscape 16:9) — recommended",
+              ratio: "16:9", note: "recommended"),
+        .init(width: 896,  height: 1600, label: "896 × 1600 (portrait 9:16)", ratio: "9:16"),
+        .init(width: 1920, height: 1088, label: "1920 × 1088 (landscape 16:9) — LTX's own canvas, slowest",
+              ratio: "16:9", note: "LTX's own canvas, slowest"),
+        .init(width: 1088, height: 1920, label: "1088 × 1920 (portrait 9:16) — slowest",
+              ratio: "9:16", note: "slowest"),
     ]
 
     /// Ceiling on ONE generation's raw RGB volume. The server base64s the whole
@@ -720,12 +806,27 @@ struct VideoModelPreset: Identifiable, Hashable {
     /// one response can carry. Always returns at least the first rung, so the
     /// picker can never render blank.
     func frameOptions(width: Int, height: Int, chainWindows: Int = 1) -> [Int] {
-        let perFrame = max(1, width * height * 3)
-        let budget = Self.maxFramePayloadBytes / perFrame
-        // Chained windows deliver `w*n - (w-1)` frames in ONE response (#283).
-        let w = max(1, chainWindows)
-        let fits = frameOptions.filter { $0 * w - (w - 1) <= budget }
+        let fits = frameOptions.filter {
+            framePayloadFits(width: width, height: height, numFrames: $0, chainWindows: chainWindows)
+        }
         return fits.isEmpty ? Array(frameOptions.prefix(1)) : fits
+    }
+
+    /// Frames one request DELIVERS: chained windows join end to end and ride
+    /// back in a single response (#283).
+    static func deliveredFrames(perWindow: Int, chainWindows: Int) -> Int {
+        let w = max(1, chainWindows)
+        return perWindow * w - (w - 1)
+    }
+
+    /// Does one request's raw RGB fit the transport cap? ONE formula, read by
+    /// the length ladder AND by the Generate gate: the ladder alone is a gate
+    /// that can be walked around, because raising the window count after
+    /// choosing a length shortens the ladder under a value already set.
+    func framePayloadFits(width: Int, height: Int, numFrames: Int, chainWindows: Int) -> Bool {
+        let perFrame = max(1, width * height * 3)
+        return Self.deliveredFrames(perWindow: numFrames, chainWindows: chainWindows)
+            <= Self.maxFramePayloadBytes / perFrame
     }
 
     /// Ceiling for the AUTO-picked default canvas. This is a TIME budget, not a
@@ -747,8 +848,10 @@ struct VideoModelPreset: Identifiable, Hashable {
         guard let smallest = resolutions.map({ $0.width * $0.height }).min() else { return nil }
         let halfArea = (width / 2) * (height / 2)
         guard halfArea < smallest else { return nil }
-        return "Quality and Super Quality denoise at half this size (\(width / 2) × \(height / 2)) and upscale — "
-             + "below 1600 × 896 they can look softer than the one-stage tiers, not sharper."
+        // About the RENDER, not the tiers: the pane shows this whenever the
+        // request runs two stages, which a clip forces on a one-stage tier too.
+        return "Two stages denoise at half this size (\(width / 2) × \(height / 2)) and upscale — "
+             + "below 1600 × 896 that can look softer than one stage, not sharper."
     }
 
     /// Default canvas for THIS Mac. A single static default has to be safe on
@@ -924,14 +1027,22 @@ struct VideoModelPreset: Identifiable, Hashable {
     /// energy at matched display size). It is what makes the top of the 17k+5
     /// ladder — 362 frames, 15 s in ONE generation — practical at all.
     private static let h3Resolutions: [ResolutionOption] = [
-        .init(width: 1344, height: 768,  label: "1344 × 768 (16:9 widescreen) — most detail, 2.9x slower"),
-        .init(width: 960,  height: 544,  label: "960 × 544 (16:9 widescreen) — fastest, best for long clips"),
-        .init(width: 768,  height: 768,  label: "768 × 768 (square) — 1.2x slower"),
-        .init(width: 1024, height: 768,  label: "1024 × 768 (4:3 landscape) — 1.8x slower"),
-        .init(width: 768,  height: 1024, label: "768 × 1024 (3:4 portrait) — 1.8x slower"),
-        .init(width: 544,  height: 960,  label: "544 × 960 (9:16 portrait) — fastest, best for long clips"),
-        .init(width: 768,  height: 1344, label: "768 × 1344 (9:16 portrait) — 2.9x slower"),
-        .init(width: 1536, height: 672,  label: "1536 × 672 (21:9 cinematic) — 2.9x slower"),
+        .init(width: 1344, height: 768,  label: "1344 × 768 (16:9 widescreen) — most detail, 2.9x slower",
+              ratio: "16:9 widescreen", note: "most detail, 2.9x slower"),
+        .init(width: 960,  height: 544,  label: "960 × 544 (16:9 widescreen) — fastest, best for long clips",
+              ratio: "16:9 widescreen", note: "fastest, best for long clips"),
+        .init(width: 768,  height: 768,  label: "768 × 768 (square) — 1.2x slower",
+              ratio: "1:1", note: "1.2x slower"),
+        .init(width: 1024, height: 768,  label: "1024 × 768 (4:3 landscape) — 1.8x slower",
+              ratio: "4:3", note: "1.8x slower"),
+        .init(width: 768,  height: 1024, label: "768 × 1024 (3:4 portrait) — 1.8x slower",
+              ratio: "3:4", note: "1.8x slower"),
+        .init(width: 544,  height: 960,  label: "544 × 960 (9:16 portrait) — fastest, best for long clips",
+              ratio: "9:16", note: "fastest, best for long clips"),
+        .init(width: 768,  height: 1344, label: "768 × 1344 (9:16 portrait) — 2.9x slower",
+              ratio: "9:16", note: "2.9x slower"),
+        .init(width: 1536, height: 672,  label: "1536 × 672 (21:9 cinematic) — 2.9x slower",
+              ratio: "21:9 cinematic", note: "2.9x slower"),
     ]
 
     /// H3's frame ladder is `17k + 5`, NOT LTX's `8N + 1` (its VAE folds 17
@@ -1369,6 +1480,20 @@ struct MusicModelPreset: Identifiable, Hashable {
         description: "Generates full songs — instrumental or with sung lyrics — from a style description in just 8 steps. One self-contained download."
     )
 
+    /// ACE-Step v1.5 XL Turbo, 4-bit — the same bundle at half the download
+    /// size (4.0 GB of blobs), for Macs that want the music model without
+    /// the 8-bit payload.
+    static let acestepXLTurbo4bit = MusicModelPreset(
+        id: "acestep-v15-xl-turbo-4bit",
+        name: "ACE-Step 1.5 XL Turbo (4-bit)",
+        repo: "ddalcu/ACE-Step-1.5-XL-Turbo-MLX-Serve-4bit",
+        approxRAMGB: 6,
+        approxDownloadGB: 4.0,
+        fixedSteps: 8,
+        supportsLyrics: true,
+        description: "The 8-bit ACE-Step bundle above, requantized to 4-bit — same 8-step songs at half the download size, trading a little consistency for a lighter footprint."
+    )
+
     /// MiniMax Music 3, 8-bit — hierarchical AR (8B LLM + depth decoder)
     /// driving a flow-matching DiT; full songs with sung lyrics at 44.1 kHz.
     static let miniMaxMusic3_8bit = MusicModelPreset(
@@ -1384,7 +1509,7 @@ struct MusicModelPreset: Identifiable, Hashable {
     )
 
     /// Catalog, best-first per family.
-    static let all: [MusicModelPreset] = [.acestepXLTurbo8bit, .miniMaxMusic3_8bit]
+    static let all: [MusicModelPreset] = [.acestepXLTurbo8bit, .acestepXLTurbo4bit, .miniMaxMusic3_8bit]
 }
 
 extension MusicGenRequest {
@@ -1482,10 +1607,12 @@ enum MusicOptions {
         "G minor": "restless",
     ]
 
-    /// "C major — plain, open", or just "C major" where we have no association.
+    /// "C major — open", or just "C major" where we have no association. The
+    /// picker renders this verbatim, so the mood is looked up here; the key name
+    /// itself is musical notation and stays Latin.
     static func keyLabel(_ key: String) -> String {
         guard let mood = keyMoods[key] else { return key }
-        return "\(key) — \(mood)"
+        return L10n.format("%@ — %@", key, L10n.text(mood))
     }
 
     /// (label, wire value). The engine takes the beats-per-bar number.
@@ -1835,7 +1962,7 @@ extension ImageModelPreset {
     var condWeightCount: Int {
         switch variant {
         case .krea2Turbo: return 12
-        case .mageFlowTurbo, .mageFlowEditTurbo: return 0
+        case .mageFlowTurbo, .mageFlowEditTurbo, .qwenImage21: return 0
         default: return 3
         }
     }
@@ -1847,7 +1974,7 @@ extension ImageModelPreset {
         switch variant {
         // `clampKreaDim` — VAE ×8 + DiT patch ×2. Mage-Flow is native-resolution
         // with a ×16 VAE downsample and shares the same clamp server-side.
-        case .krea2Turbo, .mageFlowTurbo, .mageFlowEditTurbo:
+        case .krea2Turbo, .mageFlowTurbo, .mageFlowEditTurbo, .qwenImage21:
             return ResolutionGrid(alignment: 16, minDim: 256, maxDim: 2048)
         // `clampFluxDim` — klein's /32 crop granularity, 1536 covering the
         // widest preset edge.
@@ -1868,8 +1995,10 @@ extension ImageModelPreset {
     /// is a no-op there), but only the undistilled base checkpoint has an
     /// unconditional pathway worth opposing a prompt against; distilled klein
     /// collapsed it into the weights, so the field stays hidden for it.
+    /// Qwen-Image-2.1 is undistilled too: 1.0 (its recommended default) runs
+    /// one forward per step, anything else two.
     var supportsGuidance: Bool {
-        variant == .flux2Klein9BBase
+        variant == .flux2Klein9BBase || variant == .qwenImage21
     }
 
     // ── Capability flags: what the Advanced panel is allowed to offer ──
@@ -1891,7 +2020,7 @@ extension ImageModelPreset {
     /// Mage-Flow has no LoRA path, so a picked adapter matches 0 modules → 400.
     var supportsLoRA: Bool {
         switch variant {
-        case .mageFlowTurbo, .mageFlowEditTurbo: return false
+        case .mageFlowTurbo, .mageFlowEditTurbo, .qwenImage21: return false
         default: return true
         }
     }
@@ -2051,7 +2180,7 @@ struct VideoRefPayloads {
 }
 
 /// `ref_image_size` on the wire.
-enum RefImageSizing: String, CaseIterable, Hashable {
+enum RefImageSizing: String, CaseIterable, Hashable, Codable {
     case match, max
 
     var label: String {
@@ -2085,6 +2214,16 @@ struct AudioGenRequest {
     /// (`<model>@<peer>`). The gen service then skips local resolve/load/
     /// unload — the hosting Mac loads on demand and manages its own memory.
     var lanModelId: String? = nil
+
+    /// The reference clip this request may actually send: a model with its own
+    /// built-in voices takes no `ref_audio` (a named 400 server-side), and a
+    /// clip left behind by a model switch must not reach one from the pane OR
+    /// from the chat tool. Nil for no clip and for a model that cannot clone.
+    static func clonableReference(_ request: AudioGenRequest) -> String? {
+        guard request.model.supportsCloning else { return nil }
+        guard let path = request.refAudioPath, !path.isEmpty else { return nil }
+        return path
+    }
 }
 
 struct MusicGenRequest {

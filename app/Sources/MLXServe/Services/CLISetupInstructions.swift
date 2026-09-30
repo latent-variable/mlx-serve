@@ -193,9 +193,9 @@ struct CLISetupInstructionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Use with a coding agent")
-                .font(.headline)
+                .font(.app(.headline))
             Text("Run these commands in Terminal from your project folder. They point the CLI at this Mac's local server — nothing leaves your machine.")
-                .font(.caption)
+                .font(.app(.caption))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -203,7 +203,7 @@ struct CLISetupInstructionsView: View {
             // this popover's width.
             Picker("", selection: $selectedId) {
                 ForEach(tabs) { tab in
-                    Text(tab.title).tag(tab.id)
+                    Text(L10n.text(tab.title)).font(.app(.body)).tag(tab.id)
                 }
             }
             .pickerStyle(.menu)
@@ -212,7 +212,7 @@ struct CLISetupInstructionsView: View {
             if let tab = selected {
                 ScrollView([.vertical, .horizontal]) {
                     Text(tab.command)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.app(.subheadline, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(8)
@@ -222,8 +222,8 @@ struct CLISetupInstructionsView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
 
                 HStack {
-                    Text(tab.installHint)
-                        .font(.caption2)
+                    Text(L10n.text(tab.installHint))
+                        .font(.app(.caption2))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                     Spacer()
@@ -233,7 +233,7 @@ struct CLISetupInstructionsView: View {
                         copied = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
                     } label: {
-                        Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        Label(L10n.text(copied ? "Copied" : "Copy"), systemImage: copied ? "checkmark" : "doc.on.doc").font(.app(.body))
                     }
                 }
             }

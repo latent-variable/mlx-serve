@@ -33,9 +33,7 @@ struct WelcomeView: View {
     @State private var cliInstalling = false
     @State private var cliError: String?
 
-    /// The white monochrome mark (not the colored app icon) — reads cleanly on
-    /// the dark welcome surface.
-    private static let logoImage: NSImage? = BundledAsset.image("mlx-white.png")
+    private static let logoImage: NSImage? = BundledAsset.image("appicon.png")
 
     /// Derived from `UpdateChecker.repo` (the app's single source of truth
     /// for the GitHub repo) so the star link can never drift from it.
@@ -119,10 +117,10 @@ struct WelcomeView: View {
         HStack(alignment: .center, spacing: 14) {
             logoTile
             VStack(alignment: .leading, spacing: 2) {
-                Text("MLX Core")
-                    .font(.system(size: 22, weight: .semibold))
+                Text("MLX-Serve")
+                    .font(.app(.title, weight: .semibold))
                 Text("Local AI on Apple Silicon")
-                    .font(.subheadline)
+                    .font(.app(.subheadline))
                     .foregroundStyle(.secondary)
             }
 
@@ -136,11 +134,11 @@ struct WelcomeView: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "star.fill")
-                        .font(.system(size: 11))
+                        .font(.app(.subheadline))
                         .foregroundStyle(.yellow)
                     Text("Star on GitHub")
                 }
-                .font(.subheadline)
+                .font(.app(.subheadline))
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
@@ -150,18 +148,16 @@ struct WelcomeView: View {
 
     private var logoTile: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.white.opacity(0.06))
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
             if let logo = Self.logoImage {
                 Image(nsImage: logo)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(width: 30, height: 30)
             }
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
         }
         .frame(width: 46, height: 46)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     // MARK: - Feature list (the selector)
@@ -169,7 +165,7 @@ struct WelcomeView: View {
     private var featureCards: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("GET STARTED")
-                .font(.caption2.weight(.semibold))
+                .font(.app(.caption2).weight(.semibold))
                 .tracking(0.7)
                 .foregroundStyle(.tertiary)
                 .padding(.leading, 2)
@@ -259,14 +255,14 @@ struct WelcomeView: View {
     private func surfaceRow(_ surface: WelcomeSurface) -> some View {
         HStack(alignment: .center, spacing: 10) {
             Image(systemName: surface.icon)
-                .font(.system(size: 18))
+                .font(.app(.title2))
                 .foregroundColor(.accentColor)
                 .frame(width: 26, alignment: .center)
             VStack(alignment: .leading, spacing: 2) {
-                Text(surface.title)
-                    .font(.headline)
-                Text(caption(for: surface))
-                    .font(.callout)
+                Text(L10n.text(surface.title))
+                    .font(.app(.headline))
+                Text(L10n.text(caption(for: surface)))
+                    .font(.app(.callout))
                     .foregroundStyle(captionStyle(for: surface))
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -296,7 +292,7 @@ struct WelcomeView: View {
     /// Stated, not offered: these two are the app itself.
     private var installedBadge: some View {
         Label("Installed", systemImage: "checkmark.circle.fill")
-            .font(.callout.weight(.semibold))
+            .font(.app(.callout).weight(.semibold))
             .foregroundStyle(.green)
             .labelStyle(.titleAndIcon)
     }
@@ -321,7 +317,7 @@ struct WelcomeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(
                     Text("Demo unavailable in this build.")
-                        .font(.callout)
+                        .font(.app(.callout))
                         .foregroundStyle(.secondary))
         }
     }
@@ -333,7 +329,9 @@ struct WelcomeView: View {
     /// strength and a Get/Use control. The overall recommended pick (the
     /// app-wide `starterPick`) is marked.
     private var runModelsPanel: some View {
-        let picks = WelcomeModelPicks.forMemory(SystemMemoryInfo.current())
+        let memory = SystemMemoryInfo.current()
+        let picks = WelcomeModelPicks.forMemory(memory)
+        let recommendedId = WelcomeModelPicks.recommendedId(in: picks, memory: memory)
         return VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 8) {
                 panelLabel("THIS MAC")
@@ -344,12 +342,10 @@ struct WelcomeView: View {
             VStack(alignment: .leading, spacing: 8) {
                 panelLabel("BEST MODELS FOR YOUR MAC")
 
-                // The first entry (General) is the everyday default — marked as
-                // the suggested starting point.
-                ForEach(Array(picks.enumerated()), id: \.element.id) { index, entry in
+                ForEach(picks) { entry in
                     WelcomeModelRow(
                         entry: entry,
-                        isRecommended: index == 0,
+                        isRecommended: entry.id == recommendedId,
                         onOpenChat: { leave(.useModel) }
                     )
                 }
@@ -360,9 +356,9 @@ struct WelcomeView: View {
                     HStack(spacing: 4) {
                         Text("Browse all models")
                         Image(systemName: "arrow.right")
-                            .font(.caption2.weight(.semibold))
+                            .font(.app(.caption2).weight(.semibold))
                     }
-                    .font(.callout)
+                    .font(.app(.callout))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
@@ -374,8 +370,8 @@ struct WelcomeView: View {
     /// One small-caps label inside the panel. Same treatment as the tray's
     /// section headers, so the two surfaces read as one design.
     private func panelLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.caption2.weight(.semibold))
+        Text(L10n.text(text))
+            .font(.app(.caption2).weight(.semibold))
             .tracking(0.6)
             .foregroundStyle(.secondary)
     }
@@ -386,7 +382,7 @@ struct WelcomeView: View {
         HStack(spacing: 16) {
             Toggle("Don't show again", isOn: $suppressWelcome)
                 .toggleStyle(.checkbox)
-                .font(.subheadline)
+                .font(.app(.subheadline))
                 .foregroundStyle(.secondary)
 
             Spacer(minLength: 0)
@@ -397,8 +393,8 @@ struct WelcomeView: View {
             Button {
                 leave(.startChatting)
             } label: {
-                Text(hasChatModels ? "Start Chatting" : "Continue")
-                    .font(.headline)
+                Text(L10n.text(hasChatModels ? "Start Chatting" : "Continue"))
+                    .font(.app(.headline))
                     .frame(minWidth: 150)
                     .padding(.vertical, 4)
             }
@@ -429,7 +425,7 @@ struct WelcomeView: View {
             ProgressView().controlSize(.small)
         case .installed:
             Label("Installed", systemImage: "checkmark.circle.fill")
-                .font(.callout.weight(.semibold))
+                .font(.app(.callout).weight(.semibold))
                 .foregroundStyle(.green)
                 .labelStyle(.titleAndIcon)
         case .binaryMissing:
@@ -438,8 +434,8 @@ struct WelcomeView: View {
             Button {
                 installCLI(target: target)
             } label: {
-                Text(cliInstalling ? "Installing…" : "Install")
-                    .font(.callout.weight(.semibold))
+                Text(L10n.text(cliInstalling ? "Installing…" : "Install"))
+                    .font(.app(.callout).weight(.semibold))
             }
             .controlSize(.large)
             .disabled(cliInstalling)
@@ -520,16 +516,16 @@ private struct WelcomeFeatureCard: View {
         Button(action: onTap) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: feature.icon)
-                    .font(.system(size: 17))
+                    .font(.app(.title2))
                     .foregroundColor(isSelected ? .accentColor : .secondary)
                     .frame(width: 24, alignment: .center)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(feature.title)
-                        .font(.system(size: 14, weight: .semibold))
+                    Text(L10n.text(feature.title))
+                        .font(.app(.headline, weight: .semibold))
                         .foregroundColor(.primary)
-                    Text(feature.description)
-                        .font(.caption)
+                    Text(L10n.text(feature.description))
+                        .font(.app(.caption))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -588,23 +584,23 @@ private struct WelcomeModelRow: View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(entry.category)
-                        .font(.caption2.weight(.semibold))
+                    Text(L10n.text(entry.category))
+                        .font(.app(.caption2).weight(.semibold))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 1)
                         .background(Capsule().fill(Color.secondary.opacity(0.15)))
                         .foregroundStyle(.secondary)
                     Text(pick.name)
-                        .font(.callout.weight(.medium))
+                        .font(.app(.callout).weight(.medium))
                     if isRecommended {
                         Image(systemName: "sparkles")
-                            .font(.caption2)
+                            .font(.app(.caption2))
                             .foregroundStyle(.tint)
                             .help("Recommended for your Mac")
                     }
                 }
-                Text(entry.strength)
-                    .font(.caption)
+                Text(L10n.text(entry.strength))
+                    .font(.app(.caption))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -623,7 +619,7 @@ private struct WelcomeModelRow: View {
             Button {
                 useAndChat()
             } label: {
-                Text("Use").font(.caption.weight(.semibold))
+                Text("Use").font(.app(.caption).weight(.semibold))
             }
             .controlSize(.small)
             .buttonStyle(.borderedProminent)
@@ -631,15 +627,15 @@ private struct WelcomeModelRow: View {
             VStack(spacing: 2) {
                 ProgressView(value: state.progress).frame(width: 58)
                 Text(state.percentFormatted)
-                    .font(.system(size: 9).monospacedDigit())
+                    .font(.app(.caption2).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
         } else {
             Button {
                 startDownload()
             } label: {
-                Text(downloads.hasPartialDownload(pick.repoId) ? "Resume" : "Get")
-                    .font(.caption.weight(.semibold))
+                Text(L10n.text(downloads.hasPartialDownload(pick.repoId) ? "Resume" : "Get"))
+                    .font(.app(.caption).weight(.semibold))
             }
             .controlSize(.small)
             .buttonStyle(.bordered)

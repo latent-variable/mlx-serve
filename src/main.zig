@@ -1,6 +1,9 @@
 const std = @import("std");
 const build_options = @import("build_options");
-const mlx = @import("mlx.zig");
+// pub: lib/mlx-serve-gguf and lib/sushi reach these through their host root.
+pub const mlx = @import("mlx.zig");
+pub const io_util = @import("io_util.zig");
+const mlx_gguf = @import("arch/mlx_gguf.zig");
 const model_mod = @import("model.zig");
 const tokenizer_mod = @import("tokenizer.zig");
 const transformer_mod = @import("transformer.zig");
@@ -11,23 +14,24 @@ const model_discovery = @import("model_discovery.zig");
 const gguf_meta = @import("gguf_meta.zig");
 const model_registry_mod = @import("model_registry.zig");
 const drafter_mod = @import("drafter.zig");
+const mtp_graft = @import("mtp_graft.zig");
 const mtp_mod = @import("mtp.zig");
 const chat_mod = @import("chat.zig");
 const server_mod = @import("server.zig");
 const scheduler_mod = @import("scheduler.zig");
 const model_settings_mod = @import("model_settings.zig");
 const vision_mod = @import("vision.zig");
-const ds4_arch = @import("arch/ds4.zig");
-const llama_arch = @import("arch/llama.zig");
-const ds4_ffi = @import("ds4_ffi.zig");
+const ds4_arch = if (build_options.macos_engines) @import("arch/ds4.zig") else @import("arch/ds4_stub.zig");
+const llama_arch = if (build_options.macos_engines) @import("arch/llama.zig") else @import("arch/llama_stub.zig");
 const gen_mod = @import("gen.zig");
 const cli_mod = @import("cli.zig");
 const launch_mod = @import("launch.zig");
-const log = @import("log.zig");
+pub const log = @import("log.zig");
 const metrics_mod = @import("metrics.zig");
 const sleep_inhibit_mod = @import("sleep_inhibit.zig");
 const version_mod = @import("version.zig");
 const ane_mod = @import("ane.zig");
+const ple_gpu = @import("ple_gpu.zig");
 
 pub const VERSION: []const u8 = build_options.version;
 
@@ -35,6 +39,18 @@ pub const VERSION: []const u8 = build_options.version;
 // by the `--version` report, which runs before any engine init.
 extern "c" fn ggml_version() [*:0]const u8;
 extern "c" fn ggml_commit() [*:0]const u8;
+
+// The embedded llama.cpp engine only links on macOS builds (macos_engines);
+// elsewhere the stub engine replaces it, so the libllama symbols above are
+// not referenced and `--version` reports these placeholders instead.
+fn ggmlEngineVersion() []const u8 {
+    if (comptime !build_options.macos_engines) return "unavailable (no embedded llama.cpp)";
+    return std.mem.span(ggml_version());
+}
+fn ggmlEngineCommit() []const u8 {
+    if (comptime !build_options.macos_engines) return "";
+    return std.mem.span(ggml_commit());
+}
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 // GGUF file-format version — the compiled `GGUF_VERSION` in
@@ -47,6 +63,9 @@ const DEFAULT_MODEL_DIR = ""; // pass --model <path> to specify
 // parsing, read by the ds4 serve + offline open paths. Module-level to avoid
 // threading it through runDs4Serve's already-long parameter list.
 var ds4_ssd_streaming: bool = false;
+// --mlx-gguf: opt-in, experimental. Lets lib/mlx-serve-gguf claim the GGUFs it
+// supports; off, every .gguf goes to ds4 or llama.cpp as before.
+var mlx_gguf_enabled: bool = false;
 // Auto-load the ds4 MTP draft head (beside the model) for speculative decode.
 // Default on; `--no-ds4-mtp` disables it, and it's forced off under
 // `--ssd-streaming` (ds4 refuses the combination). Read by the same ds4 paths.
@@ -135,6 +154,10 @@ fn printUsage(io: std.Io) void {
         \\  --no-vision         Disable vision encoder (saves memory)
         \\  --no-prevent-sleep  Allow Mac idle sleep during inference and model
         \\                      loads. Display sleep is always allowed.
+        \\  --os-reserve-gib <n>  Free RAM left out of every memory plan so macOS keeps
+        \\                        room (default: an eighth of RAM, 2 to 8 GB). 0 turns
+        \\                        it off: more context and concurrency, but a small Mac
+        \\                        under heavy load can freeze or restart.
         \\  --skip-mem-preflight  Bypass the model-load free-RAM pre-flight that
         \\                        refuses a load whose weights + warmup headroom
         \\                        look too big for current free memory. The check
@@ -170,6 +193,10 @@ fn printUsage(io: std.Io) void {
         \\  --no-mtp            Disable the Qwen native MTP head (auto-loaded
         \\                        when the model dir ships mtp/weights.safetensors;
         \\                        priority: MTP > drafter > PLD).
+        \\  --ple-gpu           Qwen3.8-Flash-Next: gather the n-gram table on the
+        \\                        GPU. Keeps the whole ~30 GB table resident beside
+        \\                        the weights for a few % faster prefill/decode;
+        \\                        off = rows read from the mmapped file on demand.
         \\  --ane-prefill       Offload a share of each prefill chunk's dense
         \\                        MLP rows to the Neural Engine (qwen3_5-family
         \\                        only; int8/fp16, lossy; needs >= 96 GB RAM).
@@ -182,11 +209,8 @@ fn printUsage(io: std.Io) void {
         \\                        declines by name where the copy does not fit.
         \\  --ane-split <f>     Force the media offload's ANE share (0..1) instead
         \\                        of calibrating it per model (MLX_SERVE_ANE_SPLIT is the same).
-        \\  --mtp               Force the MTP head ON for MoE targets too.
-        \\                        Requests default to MTP only on DENSE models;
-        \\                        a MoE checkpoint that ships a sidecar is
-        \\                        otherwise reachable only via `enable_mtp:true`
-        \\                        in the request body.
+        \\  --mtp               No-op: a loaded MTP head drafts by default,
+        \\                        dense or MoE (--no-mtp turns it off).
         \\  --mtp-head-kv-quant Quantize the qwen4 MTP head's own KV with
         \\                        --kv-quant (default OFF: the head keeps
         \\                        dense bf16 KV).
@@ -225,6 +249,13 @@ fn printUsage(io: std.Io) void {
         \\                        Alias: --mtp-cascade. Use 0.95 for the
         \\                        Qwen3.8 matched comparison. Exclusive with
         \\                        --mtp-typical; exact is the default.
+        \\  --mtp-greedy-tail   Sampled requests draft only the first MTP token
+        \\                        from the draft sampler, every later one by
+        \\                        argmax. Pays with --mtp-typical; under exact
+        \\                        acceptance an argmax draft is accepted with
+        \\                        its target probability. Greedy requests are
+        \\                        unchanged. A model's "mtp_greedy_tail" in
+        \\                        model-settings.json outranks it. Default off.
         \\  --max-mtp-ctx <n>   Keep MTP speculative decoding OFF past <n>
         \\                        context tokens (default: 0 = no ceiling).
         \\                        A verify row is BYTES, so on a long-context
@@ -258,13 +289,20 @@ fn printUsage(io: std.Io) void {
         \\                        so one layer's attention scores stay within
         \\                        budget; this flag is the ceiling, not a floor.
         \\                        Lower it if a long prompt spikes memory.
+        \\  --prefill-decode-share <s>
+        \\                      Target fraction of wall time (0..0.9) the
+        \\                        decoding streams keep while another request
+        \\                        prefills; also narrows that prefill's chunks.
+        \\                        Default 0 (env MLX_SERVE_PREFILL_DECODE_SHARE).
         \\  --prefix-cache-entries <n>
         \\                      Hot prefix cache LRU capacity in entries
         \\                        (default: 32). 0 disables the cache — which also
         \\                        turns off SSM checkpoint capture, since
         \\                        checkpoints exist only to feed it.
         \\  --prefix-cache-mem <n>{{KB,MB,GB}}
-        \\                      Hot prefix cache KV-bytes budget (default: 2GB).
+        \\                      Hot prefix cache KV-bytes budget (default: 2GB,
+        \\                        or one session at the working context on
+        \\                        qwen4_exp when that is larger).
         \\                      Evicts LRU entries until the budget fits.
         \\                      Pass 0/off to disable the byte budget.
         \\  --prefix-cache-disk <n>{{KB,MB,GB}}
@@ -318,6 +356,11 @@ fn printUsage(io: std.Io) void {
         \\                        Override when auto-detection is wrong
         \\                        (e.g. an unusual ds4 quant whose metadata
         \\                        layout differs).
+        \\  --mlx-gguf          EXPERIMENTAL: serve supported .gguf files on MLX
+        \\                        itself (lib/mlx-serve-gguf) instead of
+        \\                        llama.cpp. Files it cannot serve fall back to
+        \\                        the embedded engines. --engine ds4|llama
+        \\                        still wins.
         \\  --ssd-streaming     ds4 / DeepSeek-V4-Flash only: stream expert
         \\                        weights from SSD instead of holding the whole
         \\                        model in RAM (skips full residency + warmup).
@@ -399,6 +442,7 @@ pub fn main(init: std.process.Init) !void {
     // --pld* flags. See server.mlxCacheLimitBytes for why MLX's own default
     // (~121 GB on a 128 GB Mac) is no defense.
     server_mod.applyMlxCacheLimit();
+    server_mod.applyGpuCeilingEnv();
     // Resolve lazily-cached env reads on the main thread before other threads exist.
     @import("transformer.zig").warmQsaEnvCaches();
     @import("prefix_cache.zig").warmEnvCaches();
@@ -521,11 +565,6 @@ pub fn main(init: std.process.Init) !void {
     var draft_block_size: u32 = drafter_mod.DEFAULT_BLOCK_SIZE;
     var draft_block_size_explicit: bool = false; // user passed --draft-block-size?
     var enable_mtp = true; // Qwen native MTP head (auto when sidecar present; --no-mtp to disable)
-    // --mtp: force the head ON for MoE targets too. Requests default to MTP
-    // only on DENSE targets (server.defaultEnableMtp); a MoE checkpoint that
-    // ships a sidecar is otherwise unreachable from clients that never send
-    // `enable_mtp:true` (llmprobe, Claude Code, curl).
-    var force_mtp = false;
     var mtp_head_kv_quant = false;
     var mtp_depth: u32 = 0; // 0 = auto (EV cap 8 on eligible M5 NAX, else 6; fixed cap 3); explicit wins
     var mtp_typical_raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_TYPICAL")) |v| std.mem.span(v) else null;
@@ -551,6 +590,7 @@ pub fn main(init: std.process.Init) !void {
     // file inspection); set explicitly via --engine to force ds4 or llama.
     var engine_override: ?gguf_meta.Engine = null;
     var log_level_explicit = false;
+    var decode_share_flag: ?[]const u8 = null;
     var i: usize = arg_start;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--version")) {
@@ -566,8 +606,8 @@ pub fn main(init: std.process.Init) !void {
                 .mlx = std.mem.span(mlx.mlx_string_data(mlx_ver)),
                 .mlx_c = build_options.mlx_c_version,
                 .nax = transformer_mod.naxStatus(),
-                .ggml = std.mem.span(ggml_version()),
-                .ggml_commit = std.mem.span(ggml_commit()),
+                .ggml = ggmlEngineVersion(),
+                .ggml_commit = ggmlEngineCommit(),
                 .llama_tag = build_options.llama_tag,
                 .gguf_format = GGUF_FORMAT_VERSION,
                 .ds4_commit = build_options.ds4_commit,
@@ -712,9 +752,11 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "--no-mtp")) {
             enable_mtp = false;
         } else if (std.mem.eql(u8, args[i], "--mtp")) {
-            force_mtp = true;
+            // The default now; still accepted so existing launch lines work.
         } else if (std.mem.eql(u8, args[i], "--mtp-head-kv-quant")) {
             mtp_head_kv_quant = true;
+        } else if (std.mem.eql(u8, args[i], "--ple-gpu")) {
+            ple_gpu.enabled = true;
         } else if (std.mem.eql(u8, args[i], "--ane-prefill")) {
             // ANE prefill-MLP offload (perf-plan-aug-17 P5): opt-in, lossy
             // by design (int8 fp16 datapath). Eligibility + machine gates
@@ -756,6 +798,8 @@ pub fn main(init: std.process.Init) !void {
         } else if ((std.mem.eql(u8, args[i], "--mtp-tokenv3") or std.mem.eql(u8, args[i], "--mtp-cascade")) and i + 1 < args.len) {
             i += 1;
             mtp_tokenv3_raw = args[i];
+        } else if (std.mem.eql(u8, args[i], "--mtp-greedy-tail")) {
+            generate_mod.mtp_greedy_tail_default = true;
         } else if (std.mem.eql(u8, args[i], "--max-mtp-ctx") and i + 1 < args.len) {
             i += 1;
             generate_mod.max_mtp_ctx = try std.fmt.parseInt(u32, args[i], 10);
@@ -807,6 +851,7 @@ pub fn main(init: std.process.Init) !void {
                 log.err("--prefix-cache-mem: expected '<n>{{MB,GB,KB}}' or '0'/'off'; got '{s}'\n", .{args[i]});
                 std.process.exit(1);
             };
+            server_mod.prefix_cache_mem_explicit = true;
         } else if (std.mem.eql(u8, args[i], "--prefix-cache-disk") and i + 1 < args.len) {
             // SSD tier for the hot prefix cache: previously-seen prefixes are
             // persisted as chunked safetensors and restored across restarts
@@ -840,6 +885,12 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "--ssm-checkpoint-max") and i + 1 < args.len) {
             i += 1;
             server_mod.ssm_checkpoint_max = std.fmt.parseInt(u32, args[i], 10) catch 16;
+        } else if (std.mem.eql(u8, args[i], "--os-reserve-gib") and i + 1 < args.len) {
+            i += 1;
+            server_mod.os_reserve_override = server_mod.parseOsReserveGib(args[i]) catch {
+                log.err("--os-reserve-gib: expected an integer 0..64, got '{s}'\n", .{args[i]});
+                std.process.exit(1);
+            };
         } else if (std.mem.eql(u8, args[i], "--wired-margin-gib") and i + 1 < args.len) {
             i += 1;
             server_mod.wired_limit_margin_bytes = server_mod.parseWiredMarginGib(args[i]) catch {
@@ -853,13 +904,15 @@ pub fn main(init: std.process.Init) !void {
             // compression, some quality impact). Auto-enables flash-attn
             // in the shim because llama's plain SDPA needs F16/F32 KV.
             i += 1;
-            const arch_llama = @import("arch/llama.zig");
-            if (arch_llama.LlamaKvQuant.fromString(args[i])) |q| {
+            if (llama_arch.LlamaKvQuant.fromString(args[i])) |q| {
                 server_mod.llama_kv_quant = q;
             } else {
                 log.err("--llama-kv-quant: expected off|q8|q4 (or 8/4), got '{s}'\n", .{args[i]});
                 std.process.exit(1);
             }
+        } else if (std.mem.eql(u8, args[i], "--prefill-decode-share") and i + 1 < args.len) {
+            i += 1;
+            decode_share_flag = args[i];
         } else if (std.mem.eql(u8, args[i], "--max-concurrent") and i + 1 < args.len) {
             i += 1;
             server_mod.max_concurrent = std.fmt.parseInt(u32, args[i], 10) catch 1;
@@ -931,6 +984,8 @@ pub fn main(init: std.process.Init) !void {
                 log.err("--engine: expected one of {{auto, ds4, llama}}; got '{s}'\n", .{args[i]});
                 std.process.exit(1);
             }
+        } else if (std.mem.eql(u8, args[i], "--mlx-gguf")) {
+            mlx_gguf_enabled = true;
         } else if (std.mem.eql(u8, args[i], "--ssd-streaming")) {
             ds4_ssd_streaming = true;
         } else if (std.mem.eql(u8, args[i], "--no-ds4-mtp")) {
@@ -964,6 +1019,12 @@ pub fn main(init: std.process.Init) !void {
     // server config in reach); the env stays the benching override.
     if (ane_media.share == null) ane_media.share = ane_mod.explicitShareEnv();
     ane_mod.media_offload = ane_media;
+
+    const decode_share_env: ?[]const u8 = if (std.c.getenv("MLX_SERVE_PREFILL_DECODE_SHARE")) |r| std.mem.sliceTo(r, 0) else null;
+    scheduler_mod.prefill_decode_share = scheduler_mod.resolveDecodeShare(decode_share_flag, decode_share_env) catch {
+        log.err("--prefill-decode-share / MLX_SERVE_PREFILL_DECODE_SHARE: expected a number >= 0 (above 0.9 clamps to 0.9), got '{s}'\n", .{decode_share_flag orelse decode_share_env.?});
+        std.process.exit(1);
+    };
 
     transformer_mod.Transformer.mtp_head_kv_quant_flag = mtp_head_kv_quant;
     generate_mod.mtp_acceptance_default = mtp_acceptance.parse(mtp_typical_raw, mtp_tokenv3_raw) catch |err| {
@@ -1115,7 +1176,11 @@ pub fn main(init: std.process.Init) !void {
     // containing one) bypasses the MLX safetensors path entirely. Both offline
     // (`--prompt`) and serve (`--serve`) modes are wired; serve constructs a stub
     // LoadedModel whose request handlers route through the engine.
-    if (isGgufPath(io, model_dir)) {
+    mlx_gguf.enabled = mlx_gguf_enabled and engine_override == null;
+    const mlx_gguf_path = mlx_gguf.servablePath(io, allocator, model_dir);
+    defer if (mlx_gguf_path) |p| allocator.free(p);
+    if (mlx_gguf_path != null) log.info("[gguf] engine: mlx (lib/mlx-serve-gguf)\n", .{});
+    if (mlx_gguf_path == null and isGgufPath(io, model_dir)) {
         const chosen = chooseGgufEngine(io, allocator, model_dir, engine_override);
         if (serve_mode) {
             switch (chosen) {
@@ -1199,7 +1264,7 @@ pub fn main(init: std.process.Init) !void {
         if (model_dir.len == 0) {
             const discovery_for_registry = discovery_storage;
             discovery_storage = null; // ownership moves to the registry
-            try runHeadlessServe(io, allocator, discovery_for_registry, host, port, ctx_size, timeout, reasoning_budget, max_resident_models, max_resident_mem, max_resident_mem_explicit, idle_evict_secs, kv_quant_config, force_mtp, cli_pld);
+            try runHeadlessServe(io, allocator, discovery_for_registry, host, port, ctx_size, timeout, reasoning_budget, max_resident_models, max_resident_mem, max_resident_mem_explicit, idle_evict_secs, kv_quant_config, cli_pld);
             return;
         }
 
@@ -1235,7 +1300,6 @@ pub fn main(init: std.process.Init) !void {
     };
     config_storage.* = try model_mod.parseConfig(io, allocator, model_dir);
     const config = config_storage;
-    scheduler_mod.applyModelSettings(config, model_settings_mod.overrideFor(allocator, io, model_dir));
     log.info("Model: {s} ({d} layers, {d}-dim, head_dim={d}, {d}h/{d}kv, {d}-bit {s} quant)\n", .{
         config.model_type,
         config.num_hidden_layers,
@@ -1283,41 +1347,12 @@ pub fn main(init: std.process.Init) !void {
         allocator.destroy(chat_config);
     };
 
-    // Merge the tokenizer's chat-terminator EOS into the stop set — ALWAYS,
-    // even when config.json already specified an eos_token_id. Some checkpoints
-    // (e.g. Qwen2.5-Coder-7B) set config.json eos_token_id to <|endoftext|>
-    // (151643) but their chat template ends turns with <|im_end|> (151645);
-    // stopping only on config's id leaks <|im_end|> into the output (breaks
-    // structured-JSON / tool-calling). Additive + dedup-guarded: this can only
-    // ADD a model-declared stop token, never remove one.
-    if (chat_config.eos_token) |eos_str| {
-        if (tok.special_tokens.get(eos_str)) |eos_id| {
-            if (!config.isEosToken(eos_id)) {
-                config.addEosToken(eos_id);
-                log.info("EOS token from tokenizer: {s} (id={d})\n", .{ eos_str, eos_id });
-            }
-        }
+    {
+        var settings = model_settings_mod.overrideFor(allocator, io, model_dir);
+        defer settings.deinit(allocator);
+        scheduler_mod.applyModelSettings(config, chat_config, &settings, enable_mtp);
     }
-    // Also add <|endoftext|> if it exists and wasn't already added.
-    if (tok.special_tokens.get("<|endoftext|>")) |eot_id| {
-        if (!config.isEosToken(eot_id)) {
-            config.addEosToken(eot_id);
-        }
-    }
-
-    // Treat <pad> as a stop token, but only if it's not token ID 0
-    // (ID 0 can be produced spuriously by models under long/confusing prompts)
-    if (tok.special_tokens.get("<pad>")) |pad_id| {
-        if (pad_id > 0 and !config.isEosToken(pad_id)) {
-            config.addEosToken(pad_id);
-            log.info("Added <pad> as stop token (id={d})\n", .{pad_id});
-        }
-    }
-
-    // Pre-encode the user-turn marker so vision-image insertion can locate the
-    // latest user turn at request time, regardless of architecture.
-    try config.populateUserTurnMarker(allocator, tok, chat_config.chat_template);
-    config.populateLfm2ImageTokens(tok);
+    config.applyTokenizer(tok, chat_config.eos_token);
 
     const load_vision = config.has_vision and !no_vision;
 
@@ -1447,18 +1482,15 @@ pub fn main(init: std.process.Init) !void {
             .default_pld_draft_len = cli_pld.draft_len,
             .default_pld_key_len = cli_pld.key_len,
             .kv_attn_mode = kv_attn_mode,
-            .default_force_mtp = force_mtp,
         });
     } else {
         // ── Offline single-prompt mode. mlx ops run on this thread, no
         //    scheduler. The same load path as pre-A1.
         log.info("Loading weights...\n", .{});
-        var weights = if (load_vision)
-            try model_mod.loadWeightsWithVision(io, allocator, model_dir)
-        else
-            try model_mod.loadWeights(io, allocator, model_dir);
+        var weights = try model_mod.loadModelWeights(io, allocator, model_dir, config, load_vision);
         defer weights.deinit();
         model_mod.resolveWeightPrefix(config, &weights);
+        try model_mod.narrowHadamardPackTables(config, &weights, mlx.gpuStream());
 
         var xfm = try transformer_mod.Transformer.init(io, allocator, config.*, &weights);
         defer xfm.deinit();
@@ -1500,6 +1532,7 @@ pub fn main(init: std.process.Init) !void {
         // file or in-checkpoint tensors in the trunk shards).
         var mtp_head: ?mtp_mod.MtpModel = null;
         defer if (mtp_head) |*h| h.deinit();
+        if (enable_mtp) mtp_graft.ensure(allocator, io, model_dir, config);
         if (enable_mtp and mtp_mod.hasMtpHead(io, allocator, model_dir)) {
             // A failed load (e.g. a sidecar layout we can't bind yet) only
             // disables the head — mirrors the serve path's graceful degrade.
@@ -1642,10 +1675,11 @@ fn chooseGgufEngine(
     defer info.deinit(allocator);
 
     const e = gguf_meta.preferredEngine(info);
-    log.info("[gguf] engine: {s} (arch={s}, ds4-lora={})\n", .{
+    log.info("[gguf] engine: {s} (arch={s}, ds4-lora={}, ds4-unloadable={})\n", .{
         @tagName(e),
         info.architecture orelse "?",
         info.has_ds4_lora_rank,
+        info.ds4_unloadable,
     });
     return e;
 }
@@ -1816,8 +1850,14 @@ fn runGenServe(
         e
     else if (registry.peekByPath(model_dir)) |e|
         e
-    else
-        try registry.registerStubWithArch(model_id, model_dir, null, modality.modelType());
+    else blk: {
+        // The boot stub's arch hint should be the pack's real model_type
+        // (`/v1/models` reports it); the modality marker is only the
+        // no-config fallback.
+        const real = gen_mod.peekModelType(io, allocator, model_dir);
+        defer if (real) |mt| allocator.free(mt);
+        break :blk try registry.registerStubWithArch(model_id, model_dir, null, real orelse modality.modelType());
+    };
     try registry.setDefault(entry.id);
 
     // Registry takes ownership of the stub if the inference thread installed it.
@@ -1886,7 +1926,6 @@ fn runHeadlessServe(
     max_resident_mem_explicit: bool,
     idle_evict_secs: ?u32,
     kv_quant_config: transformer_mod.KVQuantConfig,
-    force_mtp: bool,
     pld: server_mod.PldDefaults,
 ) !void {
     log.info("mlx-serve {s} (headless — models load on demand)\n", .{VERSION});
@@ -2000,9 +2039,6 @@ fn runHeadlessServe(
         .default_pld_draft_len = pld.draft_len,
         .default_pld_key_len = pld.key_len,
         .kv_attn_mode = .auto,
-        // On-demand MLX loads auto-attach an MTP sidecar (LoadParams.mtp_enabled
-        // defaults true), so the MoE force flag has to reach this path too.
-        .default_force_mtp = force_mtp,
     });
 }
 
@@ -2029,7 +2065,8 @@ fn runDs4Serve(
     max_resident_mem_explicit: bool,
     idle_evict_secs: ?u32,
 ) !void {
-    const settings = model_settings_mod.overrideFor(allocator, io, model_dir);
+    var settings = model_settings_mod.overrideFor(allocator, io, model_dir);
+    defer settings.deinit(allocator);
     const model_ctx = settings.ctx_size orelse ctx_size;
     // Resolve the GGUF file once on this thread so the engine's open() call
     // (running on the inference thread) gets an absolute path.
@@ -2328,7 +2365,8 @@ fn runLlamaServe(
     // inference thread). Used for BOTH the llama session size (via the stub
     // config's max_position_embeddings, read in runPrefillLlama) AND the
     // server's context guard (server_config.max_context_size), so they agree.
-    const settings = model_settings_mod.overrideFor(allocator, io, model_dir);
+    var settings = model_settings_mod.overrideFor(allocator, io, model_dir);
+    defer settings.deinit(allocator);
     const effective_ctx: u32 = settings.ctx_size orelse (if (ctx_size > 0) ctx_size else 8192);
 
     log.info("mlx-serve {s} (llama.cpp engine, GGUF backend)\n", .{VERSION});

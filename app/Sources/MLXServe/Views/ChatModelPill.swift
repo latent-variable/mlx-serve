@@ -134,20 +134,20 @@ struct ChatModelPill: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
                     Image(systemName: "cpu")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.app(.callout, weight: .medium))
                         .foregroundStyle(.secondary)
                     // The READABLE name (`ModelDisplayName`). The repo id it is
                     // built from stays the identity and is still what the menu
                     // rows carry underneath — this is the label, not a rename.
                     Text(ModelDisplayName.pretty(pill.name))
-                        .font(compact ? .callout.weight(.semibold) : .callout.weight(.medium))
+                        .font(compact ? .app(.callout, weight: .semibold) : .app(.callout, weight: .medium))
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .frame(maxWidth: compact ? Self.compactNameWidth : Self.maxNameWidth,
                                alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
                     Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.app(.caption2, weight: .semibold))
                         .foregroundStyle(.secondary)
                     if pill.isLoading {
                         // A switch in flight. The dot would say GREEN here —
@@ -163,7 +163,7 @@ struct ChatModelPill: View {
                         // say it with the symbol rather than a dot that only
                         // reports.
                         Image(systemName: "arrow.down.circle.fill")
-                            .font(.system(size: 11))
+                            .font(.app(.subheadline))
                             .foregroundStyle(Color.accentColor)
                     } else {
                         Circle()
@@ -199,8 +199,8 @@ struct ChatModelPill: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help(pill.isLoading
-              ? "Loading \(ModelDisplayName.pretty(pill.name))…"
-              : "Chat model. Click to switch — models on this Mac and any shared by other Macs on your network.")
+              ? L10n.format("Loading %@…", ModelDisplayName.pretty(pill.name))
+              : L10n.text("Chat model. Click to switch — models on this Mac and any shared by other Macs on your network."))
     }
 
     @ViewBuilder
@@ -208,7 +208,7 @@ struct ChatModelPill: View {
         let pickable = pickableModels
         if pickable.isEmpty && lanChatModels.isEmpty {
             if !AppleFoundationChat.availability.isAvailable {
-                Text("No chat models downloaded")
+                Text("No chat models downloaded").font(.app(.body))
             }
         } else {
             // Same duplicate-name suffixing as the tray: a menu keys its
@@ -217,7 +217,7 @@ struct ChatModelPill: View {
             ForEach(LocalModelSource.allCases, id: \.self) { source in
                 let models = pickable.filter { $0.source == source }
                 if !models.isEmpty {
-                    Section(source.sectionTitle) {
+                    Section(L10n.text(source.sectionTitle)) {
                         ForEach(models) { model in
                             row(title: rowLabel(model, dupNames: dupNames),
                                 tag: model.path)
@@ -228,14 +228,14 @@ struct ChatModelPill: View {
             let network = lanChatModels.filter { $0.provider == nil }
             let providers = lanChatModels.filter { $0.provider != nil }
             if !network.isEmpty {
-                Section(ModelPalette.networkSection) {
+                Section(L10n.text(ModelPalette.networkSection)) {
                     ForEach(network, id: \.name) { m in
                         row(title: m.lanDisplayName, tag: "lan:" + m.name)
                     }
                 }
             }
             if !providers.isEmpty {
-                Section(ModelPalette.providersSection) {
+                Section(L10n.text(ModelPalette.providersSection)) {
                     ForEach(providers, id: \.name) { m in
                         row(title: m.lanDisplayName, tag: "lan:" + m.name)
                     }
@@ -243,18 +243,19 @@ struct ChatModelPill: View {
             }
         }
         if AppleFoundationChat.availability.isAvailable {
-            Section(ModelPalette.onDeviceSection) {
+            Section(L10n.text(ModelPalette.onDeviceSection)) {
                 row(title: AppleFoundationChat.displayName, tag: ChatModelSelection.appleTag)
             }
         }
         Divider()
-        Button("Manage Models…") {
+        Button {
             // A MODE of this window now, not a window of its own — so the
             // picker's "manage" route lands beside the picker rather than on
             // top of it. AppState.showModels is the one way in, and it is the
             // LAST row: everything above it is a model you can pick right now.
             appState.showModels()
-        }
+        } label: { Text("Manage Models…")
+            .font(.app(.body)) }
     }
 
     private func row(title: String, tag: String) -> some View {
@@ -262,9 +263,9 @@ struct ChatModelPill: View {
             selection.wrappedValue = tag
         } label: {
             if selection.wrappedValue == tag {
-                Label(title, systemImage: "checkmark")
+                Label(L10n.text(title), systemImage: "checkmark").font(.app(.body))
             } else {
-                Text(title)
+                Text(L10n.text(title)).font(.app(.body))
             }
         }
     }

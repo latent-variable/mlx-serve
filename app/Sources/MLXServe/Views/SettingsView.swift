@@ -24,6 +24,9 @@ struct SettingsView: View {
     /// `SettingsVisibleRowCountKey`. Drives the "no matches" placeholder.
     @State private var visibleRows = 0
 
+    /// What the sections below the containers edit — see `SettingsFormState`.
+    @StateObject private var formState = SettingsFormState()
+
     private var filtering: Bool { !SettingsSearch.tokens(searchQuery).isEmpty }
 
     /// Categories the form actually renders for the active engine — the sidebar
@@ -83,115 +86,134 @@ struct SettingsView: View {
                     selection = SettingsSelection.afterQueryEdit(query: q, current: selection)
                 }
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    SettingsSection(
-                        category: .modelFolders,
-                        subtitle: "Choose where downloads are saved, and add a folder to scan if some of your models live elsewhere. Every folder listed here is served — restart the server after changing them."
-                    ) {
-                        ModelFoldersSectionContent()
-                    }
-                    SettingsSection(
-                        category: .server,
-                        subtitle: "Server-launch flags. Restart the server to apply changes."
-                    ) {
-                        ServerSectionContent()
-                    }
-                    SettingsSection(
-                        category: .lanSharing,
-                        subtitle: "Share models with other Macs on your local network and use theirs — zero-setup discovery over Bonjour, everything off by default. Restart the server to apply."
-                    ) {
-                        LanSharingSectionContent()
-                    }
-                    SettingsSection(
-                        category: .providers,
-                        subtitle: "Add OpenAI-compatible chat endpoints — a cloud API, another machine, a local runtime. Their models join the picker as <model>@<name> while the provider answers. Applies on save — no restart needed."
-                    ) {
-                        ProvidersSectionContent()
-                    }
-                    // Engine-aware sections. Each panel is hidden when its
-                    // controls don't apply to the active engine — flipping
-                    // `--kv-quant` on a GGUF model silently no-ops, so we'd
-                    // rather not show that picker at all than mislead.
-                    EngineAwareSections()
-                    SettingsSection(
-                        category: .requestDefaults,
-                        subtitle: "Apply on the next chat request — no restart needed."
-                    ) {
-                        RequestDefaultsSectionContent()
-                    }
-
-                    SettingsSection(
-                        category: .interface,
-                        subtitle: "How the app looks and how you summon the Quick Launcher. Applies immediately — no restart needed."
-                    ) {
-                        InterfaceSectionContent()
-                    }
-
-                    SettingsSection(
-                        category: .voice,
-                        subtitle: "Clone your voice once — hands-free voice mode answers in it via the local TTS model. No clip set: answers use the macOS system voice. Applies to the next spoken sentence — no restart needed."
-                    ) {
-                        WakePhraseSectionContent()
-                        VoiceCloneSectionContent()
-                    }
-
-                    SettingsSection(
-                        category: .sandbox,
-                        subtitle: BuildFeatures.current.hostShell
-                            ? "Run the agent's shell commands inside an isolated Linux sandbox instead of directly on this Mac. Off by default; applies to the next command — no restart needed."
-                            : "Agent shell commands always run inside an isolated Linux sandbox in this build — they never touch macOS directly. The guest OS ships inside the app."
-                    ) {
-                        SandboxSectionContent()
-                    }
-
-                    SettingsSection(
-                        category: .messaging,
-                        subtitle: "Message your local model from your phone via a Telegram bot. No public URL or port-forwarding needed — the app long-polls Telegram over your normal internet connection, so it works behind home Wi-Fi."
-                    ) {
-                        MessagingSectionContent(bridge: appState.telegramBridge)
-                    }
-
-                    // The Mac App Store updates the app itself; a pane offering a
-                    // DMG self-update would be dead UI there (and an App Review flag).
-                    // `SettingsCategory.visible(selfUpdate:)` mirrors this so the
-                    // sidebar never lists a section that isn't built.
-                    if BuildFeatures.current.selfUpdate {
-                        SettingsSection(
-                            category: .updates,
-                            subtitle: "New versions ship on the project's GitHub releases page. Installing downloads the notarized app, swaps it in place, and relaunches — chats, models, and settings are untouched."
-                        ) {
-                            UpdatesSectionContent(updates: appState.updates)
+                // Lazy while nothing is filtered — a `ScrollView` is measured from
+                // its content, so an eager stack lays out every section. A query
+                // stays eager: a deferred section publishes no count to collapse on.
+                Group {
+                    if filtering {
+                        VStack(alignment: .leading, spacing: 0) {
+                            sections
+                        }
+                    } else {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            sections
                         }
                     }
-
-                    // Not folded into Updates: that section is gated on
-                    // `selfUpdate`, so on a Mac App Store build these links
-                    // would never render.
-                    SettingsSection(
-                        category: .about,
-                        subtitle: "mlx-serve is free and open source, built by one person. Star it, follow along, or just say hello — questions and bug reports are welcome."
-                    ) {
-                        ForEach(CommunityLinks.all) { item in
-                            SettingsRow(title: item.title, explainer: item.explainer) {
-                                Link(item.actionLabel, destination: item.url)
-                            }
-                        }
-                    }
-
-                    if filtering && visibleRows == 0 {
-                        NoSearchResults(query: searchQuery) { searchQuery = "" }
-                    }
-
-                    ResetDefaultsFooter()
                 }
                 .environment(\.settingsSearchQuery, searchQuery)
                 .environment(\.settingsSelection, selection)
+                .environmentObject(formState)
                 .onPreferenceChange(SettingsVisibleRowCountKey.self) { visibleRows = $0 }
                 .padding(.horizontal, 24)
                 .padding(.vertical, 20)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+
+    /// The form's sections, in sidebar order. ONE list, so the lazy and the eager
+    /// container cannot drift.
+    @ViewBuilder
+    private var sections: some View {
+        SettingsSection(
+            category: .modelFolders,
+            subtitle: "Choose where downloads are saved, and add a folder to scan if some of your models live elsewhere. Every folder listed here is served — restart the server after changing them."
+        ) {
+            ModelFoldersSectionContent()
+        }
+        SettingsSection(
+            category: .server,
+            subtitle: "Server-launch flags. Restart the server to apply changes."
+        ) {
+            ServerSectionContent()
+        }
+        SettingsSection(
+            category: .lanSharing,
+            subtitle: "Share models with other Macs on your local network and use theirs — zero-setup discovery over Bonjour, everything off by default. Restart the server to apply."
+        ) {
+            LanSharingSectionContent()
+        }
+        SettingsSection(
+            category: .providers,
+            subtitle: "Add OpenAI-compatible chat endpoints — a cloud API, another machine, a local runtime. Their models join the picker as <model>@<name> while the provider answers. Applies on save — no restart needed."
+        ) {
+            ProvidersSectionContent()
+        }
+        // Engine-aware sections. Each panel is hidden when its
+        // controls don't apply to the active engine — flipping
+        // `--kv-quant` on a GGUF model silently no-ops, so we'd
+        // rather not show that picker at all than mislead.
+        EngineAwareSections()
+        SettingsSection(
+            category: .requestDefaults,
+            subtitle: "Apply on the next chat request — no restart needed."
+        ) {
+            RequestDefaultsSectionContent()
+        }
+
+        SettingsSection(
+            category: .interface,
+            subtitle: "How the app looks and how you summon the Quick Launcher. Applies immediately — no restart needed."
+        ) {
+            InterfaceSectionContent()
+        }
+
+        SettingsSection(
+            category: .voice,
+            subtitle: "Clone your voice once — hands-free voice mode answers in it via the local TTS model. No clip set: answers use the macOS system voice. Applies to the next spoken sentence — no restart needed."
+        ) {
+            WakePhraseSectionContent()
+            VoiceCloneSectionContent()
+        }
+
+        SettingsSection(
+            category: .sandbox,
+            subtitle: BuildFeatures.current.hostShell
+                ? "Run the agent's shell commands inside an isolated Linux sandbox instead of directly on this Mac. Off by default; applies to the next command — no restart needed."
+                : "Agent shell commands always run inside an isolated Linux sandbox in this build — they never touch macOS directly. The guest OS ships inside the app."
+        ) {
+            SandboxSectionContent()
+        }
+
+        SettingsSection(
+            category: .messaging,
+            subtitle: "Message your local model from your phone via a Telegram bot. No public URL or port-forwarding needed — the app long-polls Telegram over your normal internet connection, so it works behind home Wi-Fi."
+        ) {
+            MessagingSectionContent(bridge: appState.telegramBridge)
+        }
+
+        // The Mac App Store updates the app itself; a pane offering a
+        // DMG self-update would be dead UI there (and an App Review flag).
+        // `SettingsCategory.visible(selfUpdate:)` mirrors this so the
+        // sidebar never lists a section that isn't built.
+        if BuildFeatures.current.selfUpdate {
+            SettingsSection(
+                category: .updates,
+                subtitle: "New versions ship on the project's GitHub releases page. Installing downloads the notarized app, swaps it in place, and relaunches — chats, models, and settings are untouched."
+            ) {
+                UpdatesSectionContent(updates: appState.updates)
+            }
+        }
+
+        // Not folded into Updates: that section is gated on
+        // `selfUpdate`, so on a Mac App Store build these links
+        // would never render.
+        SettingsSection(
+            category: .about,
+            subtitle: "mlx-serve is free and open source, built by one person. Star it, follow along, or just say hello — questions and bug reports are welcome."
+        ) {
+            ForEach(CommunityLinks.all) { item in
+                SettingsRow(title: item.title, explainer: item.explainer) {
+                    Link(L10n.text(item.actionLabel), destination: item.url)
+                }
+            }
+        }
+
+        if filtering && visibleRows == 0 {
+            NoSearchResults(query: searchQuery) { searchQuery = "" }
+        }
+
+        ResetDefaultsFooter()
     }
 }
 
@@ -215,15 +237,19 @@ private struct SettingsSidebar: View {
                 onPick()
             }
         )) {
-            Label("All Settings", systemImage: "square.grid.2x2")
+            Label("All Settings", systemImage: "square.grid.2x2").font(.app(.body))
                 .tag(SettingsSelection.all)
             Section {
                 ForEach(categories) { category in
-                    Label(category.sidebarLabel, systemImage: category.icon)
-                        .tag(SettingsSelection.category(category))
+                    Label(L10n.text(category.sidebarLabel), systemImage: category.icon)
+                        .tag(SettingsSelection.category(category)).font(.app(.body))
                 }
             }
         }
+        // The sidebar rows are the app's other callouts, not the platform
+        // default: without this they render at 13pt while every pane they open
+        // reads from the ladder.
+        .font(.app(.callout))
         .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 260)
     }
 }
@@ -291,7 +317,7 @@ private struct SettingsSearchField: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
             TextField("Filter settings", text: $text)
-                .textFieldStyle(.plain)
+                .textFieldStyle(.plain).font(.app(.body))
             if !text.isEmpty {
                 Button {
                     text = ""
@@ -320,12 +346,13 @@ private struct NoSearchResults: View {
     var body: some View {
         VStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.title2)
+                .font(.app(.title2))
                 .foregroundStyle(.secondary)
-            Text("No settings match “\(query)”")
-                .font(.subheadline)
+            Text(L10n.format("No settings match \"%@\"", query))
+                .font(.app(.subheadline))
                 .foregroundStyle(.secondary)
-            Button("Clear filter", action: clear)
+            Button(action: clear, label: { Text(L10n.text("Clear filter"))
+                .font(.app(.body)) })
                 .buttonStyle(.bordered)
                 .controlSize(.small)
         }
@@ -361,7 +388,7 @@ private struct ResetDefaultsFooter: View {
                     Button(role: .destructive) {
                         showConfirm = true
                     } label: {
-                        Label(label, systemImage: "arrow.uturn.backward.circle")
+                        Label(L10n.text(label), systemImage: "arrow.uturn.backward.circle").font(.app(.body))
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -373,13 +400,15 @@ private struct ResetDefaultsFooter: View {
                     isPresented: $showConfirm,
                     titleVisibility: .visible
                 ) {
-                    Button("Reset", role: .destructive) {
+                    Button(role: .destructive) {
                         appState.serverOptions = SettingsReset.apply(selection, to: appState.serverOptions)
-                    }
+                    } label: { Text("Reset")
+                        .font(.app(.body)) }
                     .keyboardShortcut(.defaultAction)
-                    Button("Cancel", role: .cancel) { }
+                    Button(role: .cancel) { } label: { Text("Cancel")
+                        .font(.app(.body)) }
                 } message: {
-                    Text(helpText)
+                    Text(L10n.text(helpText))
                 }
             }
         }
@@ -395,28 +424,29 @@ private struct RestartBanner: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "arrow.clockwise.circle.fill")
-                .font(.title2)
+                .font(.app(.title2))
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Some changes require a server restart")
-                    .font(.subheadline.weight(.semibold))
-                Text("Click Restart Now to apply, or Discard to revert the unsaved server-launch fields.")
-                    .font(.caption)
+                Text(L10n.text("Some changes require a server restart"))
+                    .font(.app(.subheadline).weight(.semibold))
+                Text(L10n.text("Click Restart Now to apply, or Discard to revert the unsaved server-launch fields."))
+                    .font(.app(.caption))
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Restart Now") {
+            Button {
                 let opts = appState.serverOptions
                 let model = appState.selectedModelPath
                 server.stop()
                 if !model.isEmpty {
                     server.start(modelPath: model, options: opts)
                 }
-            }
+            } label: { Text("Restart Now")
+                .font(.app(.body)) }
             .buttonStyle(.borderedProminent)
             .disabled(appState.selectedModelPath.isEmpty)
 
-            Button("Discard") {
+            Button {
                 if let last = server.lastLaunchedOptions {
                     // Revert every server-launch field to the last-launched
                     // snapshot; per-request defaults are preserved. Start
@@ -437,7 +467,8 @@ private struct RestartBanner: View {
                     reverted.perRequestEnableDrafter = current.perRequestEnableDrafter
                     appState.serverOptions = reverted
                 }
-            }
+            } label: { Text("Discard")
+                .font(.app(.body)) }
             .buttonStyle(.bordered)
             .disabled(server.lastLaunchedOptions == nil)
         }
@@ -452,8 +483,8 @@ private struct RestartBanner: View {
 
 /// Renders the engine-specific section set for the active model:
 ///   - MLX target:   Common Performance + MLX Performance + MLX Spec Decode
-///   - GGUF target:  Common Performance + GGUF Performance
-///   - DSV4 target:  Common Performance + DeepSeek-V4 (ds4) section
+///   - GGUF / DSV4:  Common Performance
+///   Engines (every engine's own flags) always renders.
 ///   - No model yet: All sections shown (so users can pre-tune before
 ///                   loading); a banner clarifies that some controls only
 ///                   apply once a matching engine is loaded.
@@ -470,9 +501,7 @@ private struct EngineAwareSections: View {
     var body: some View {
         // Engine-specific sections. Show all when no model is loaded so
         // the user can pre-tune; otherwise show only the matching set.
-        let showMLX = (engine == nil || engine == .mlx)
-        let showLlama = (engine == nil || engine == .llama)
-        let showDs4 = (engine == nil || engine == .dsv4)
+        let showMLX = engine?.isMlxPath ?? true
 
         if showMLX {
             SettingsSection(
@@ -483,14 +512,21 @@ private struct EngineAwareSections: View {
             }
         }
 
+        SettingsSection(
+            category: .memory,
+            subtitle: "How much memory the engine may use: resident models, the OS reserve, the KV cache and the hot prefix cache. Server-launch flags — restart to apply."
+        ) {
+            MemorySectionContent(showMLX: showMLX)
+        }
+
         // ONE Performance section. The universal rows always apply; the MLX-only
-        // ones (continuous batching, KV-quant, hot prefix cache) join them when
-        // an MLX model is serving — on GGUF/DSV4 they'd silently no-op, so they
-        // stay hidden rather than lie.
+        // ones (continuous batching, attention requant, SSD prefix cache) join
+        // them when an MLX model is serving — on GGUF/DSV4 they'd silently no-op,
+        // so they stay hidden rather than lie.
         SettingsSection(
             category: .performance,
             subtitle: showMLX
-                ? "Continuous batching, KV-cache quantization, and the cross-request hot prefix cache. Server-launch flags — restart to apply."
+                ? "Continuous batching, decode attention requant, and the SSD prefix cache. Server-launch flags — restart to apply."
                 : "Tunables that apply regardless of engine. Server-launch flags — restart to apply."
         ) {
             CommonPerformanceSectionContent()
@@ -508,22 +544,14 @@ private struct EngineAwareSections: View {
             NeuralEngineSectionContent()
         }
 
-        if showLlama {
-            SettingsSection(
-                category: .ggufPerformance,
-                subtitle: "Knobs that apply when an embedded llama.cpp engine is serving a `.gguf` model. Distinct from the MLX Performance section — different kernels, different KV layout."
-            ) {
-                LlamaPerformanceSectionContent()
-            }
-        }
-
-        if showDs4 {
-            SettingsSection(
-                category: .ds4,
-                subtitle: "Knobs for the embedded ds4 engine serving DeepSeek-V4-Flash. Ignored by the MLX and llama.cpp engines."
-            ) {
-                Ds4PerformanceSectionContent()
-            }
+        // Always on screen: these rows configure engines that are NOT loaded
+        // yet, so gating them on the active engine hid the way to opt into
+        // the next one.
+        SettingsSection(
+            category: .engines,
+            subtitle: "Launch flags for each embedded engine. A .gguf file goes to llama.cpp, or to ds4 for DeepSeek-V4-Flash; mlx-serve-gguf can take the ones it supports instead. Restart the server to apply."
+        ) {
+            EnginesSectionContent()
         }
 
         // The pre-tune banner explains why EVERY engine section is on screen —
@@ -532,8 +560,8 @@ private struct EngineAwareSections: View {
             HStack(spacing: 8) {
                 Image(systemName: "info.circle")
                     .foregroundStyle(.secondary)
-                Text("No model loaded yet — every section is shown so you can pre-tune. Once a model is active, sections that don't apply will hide automatically.")
-                    .font(.caption2)
+                Text(L10n.text("No model loaded yet — every section is shown so you can pre-tune. Once a model is active, sections that don't apply will hide automatically."))
+                    .font(.app(.caption2))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -589,10 +617,10 @@ private struct SettingsSection<Content: View>: View {
         VStack(alignment: .leading, spacing: collapsed ? 0 : 12) {
             if !collapsed {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.title3.weight(.semibold))
-                    Text(subtitle)
-                        .font(.caption)
+                    Text(L10n.text(title))
+                        .font(.app(.title3).weight(.semibold))
+                    Text(L10n.text(subtitle))
+                        .font(.app(.caption))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -631,11 +659,11 @@ private struct SettingsRow<Control: View>: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     HStack(spacing: 6) {
-                        Text(title)
-                            .font(.body)
+                        Text(L10n.text(title))
+                            .font(.app(.rowTitle))
                         if isDirty {
                             Image(systemName: "arrow.clockwise.circle.fill")
-                                .font(.caption)
+                                .font(.app(.caption))
                                 .foregroundStyle(.orange)
                                 .help("Restart the server to apply this change")
                         }
@@ -644,13 +672,13 @@ private struct SettingsRow<Control: View>: View {
                     control
                         .frame(maxWidth: 280, alignment: .trailing)
                 }
-                Text(explainer)
-                    .font(.caption2)
+            Text(L10n.text(explainer))
+                    .font(.app(.explainer))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let cost {
-                    Text(cost)
-                        .font(.caption)
+                    Text(L10n.text(cost))
+                        .font(.app(.value))
                         .fontWeight(costActive ? .semibold : .regular)
                         .foregroundStyle(costActive ? Color.orange : Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -706,12 +734,12 @@ private struct ModelFoldersSectionContent: View {
         SearchableRow(searchText: ["Default folder", "download", Self.defaultExplainer]) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("Default folder")
-                        .font(.body)
+                    Text(L10n.text("Default folder"))
+                        .font(.app(.body))
                     Spacer(minLength: 12)
                     HStack(spacing: 8) {
                         Text(configured ?? roots.downloadRoot)
-                            .font(.caption.monospaced())
+                            .font(.app(.caption).monospaced())
                             // An unreachable folder is shown in the warning
                             // colour rather than swapped for the fallback: the
                             // path the user chose is the thing they need to see
@@ -720,21 +748,23 @@ private struct ModelFoldersSectionContent: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .frame(maxWidth: 220, alignment: .trailing)
-                        Button("Choose…") { chooseDownloadFolder() }
+                        Button { chooseDownloadFolder() } label: { Text("Choose…")
+                            .font(.app(.body)) }
                             .buttonStyle(.bordered)
-                        Button("Reset") {
+                        Button {
                             SecurityScopedBookmark.clear(name: DownloadManager.downloadFolderBookmarkName)
                             ModelRoots().configuredDownloadRoot = nil
                             applyFolderChange()
-                        }
+                        } label: { Text("Reset")
+                            .font(.app(.body)) }
                         .buttonStyle(.bordered)
                         .disabled(configured == nil)
                     }
                 }
                 Text(unavailable
-                     ? "That folder isn't reachable right now, so downloads are going to \(ModelRoots.builtInRoot) instead."
-                     : Self.defaultExplainer)
-                    .font(.caption2)
+                     ? L10n.format("That folder isn't reachable right now, so downloads are going to %@ instead.", ModelRoots.builtInRoot)
+                     : L10n.text(Self.defaultExplainer))
+                    .font(.app(.caption2))
                     .foregroundStyle(unavailable ? .orange : .secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -782,28 +812,30 @@ private struct ModelFoldersSectionContent: View {
         return SearchableRow(searchText: ["Custom folder", Self.explainer]) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("Custom folder")
-                        .font(.body)
+                    Text(L10n.text("Custom folder"))
+                        .font(.app(.body))
                     Spacer(minLength: 12)
                     HStack(spacing: 8) {
-                        Text(pathText)
-                            .font(.caption.monospaced())
+                        Text(L10n.text(pathText))
+                            .font(.app(.caption).monospaced())
                             .foregroundStyle(hasPath ? .primary : .secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .frame(maxWidth: 220, alignment: .trailing)
-                        Button("Choose…") { choose() }
+                        Button { choose() } label: { Text("Choose…")
+                            .font(.app(.body)) }
                             .buttonStyle(.bordered)
-                        Button("Clear") {
+                        Button {
                             downloads.customRoot = nil
                             appState.refreshModels()
-                        }
+                        } label: { Text("Clear")
+                            .font(.app(.body)) }
                         .buttonStyle(.bordered)
                         .disabled(!hasPath)
                     }
                 }
-                Text(Self.explainer)
-                    .font(.caption2)
+                Text(L10n.text(Self.explainer))
+                    .font(.app(.caption2))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -845,7 +877,7 @@ private struct LanSharingSectionContent: View {
             SettingsRow(title: m.title, explainer: m.explainer, isDirty: dirty.dirty(\.lanShareEnabled)) {
                 Toggle("", isOn: $appState.serverOptions.lanShareEnabled)
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
         if appState.serverOptions.lanShareEnabled {
@@ -853,7 +885,7 @@ private struct LanSharingSectionContent: View {
                 SettingsRow(title: m.title, explainer: m.explainer, isDirty: dirty.dirty(\.lanShareAll)) {
                     Toggle("", isOn: $appState.serverOptions.lanShareAll)
                         .labelsHidden()
-                        .toggleStyle(.switch)
+                        .toggleStyle(.switch).font(.app(.body))
                 }
             }
             if !appState.serverOptions.lanShareAll {
@@ -864,11 +896,11 @@ private struct LanSharingSectionContent: View {
                     TextField(
                         "",
                         text: $appState.serverOptions.lanName,
-                        prompt: Text(Host.current().localizedName ?? "this Mac")
+                        prompt: Text(Host.current().localizedName ?? L10n.text("this Mac"))
                     )
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.trailing)
-                    .frame(width: 200)
+                    .frame(width: 200).font(.app(.body))
                 }
             }
         }
@@ -876,17 +908,21 @@ private struct LanSharingSectionContent: View {
             SettingsRow(title: m.title, explainer: m.explainer, isDirty: dirty.dirty(\.lanDiscoverEnabled)) {
                 Toggle("", isOn: $appState.serverOptions.lanDiscoverEnabled)
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
         // The privacy disclosure — sharing means running other people's
         // prompts, and using a network model means the host reads yours.
-        Text("Privacy: prompts sent to a model you share are processed on — and visible to — this Mac. Prompts you send to a network model are visible to the Mac hosting it. Traffic stays on your local network, and everything here is off unless you turn it on.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, 4)
+        SearchableRow(searchText: ["Privacy", Self.privacyNote]) {
+            Text(L10n.text(Self.privacyNote))
+                .font(.app(.caption))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 4)
+        }
     }
+
+    private static let privacyNote = "Privacy: prompts sent to a model you share are processed on — and visible to — this Mac. Prompts you send to a network model are visible to the Mac hosting it. Traffic stays on your local network, and everything here is off unless you turn it on."
 
     /// One checkbox per local model name. Names are deduped — a GGUF and an
     /// MLX build of the same repo share a name and are shared together (the
@@ -895,8 +931,8 @@ private struct LanSharingSectionContent: View {
         let names = Array(Set(appState.localModels.map(\.name))).sorted()
         return VStack(alignment: .leading, spacing: 4) {
             if names.isEmpty {
-                Text("No local models yet — download one first.")
-                    .font(.caption)
+                Text(L10n.text("No local models yet — download one first."))
+                    .font(.app(.caption))
                     .foregroundStyle(.tertiary)
             }
             ForEach(names, id: \.self) { name in
@@ -910,7 +946,7 @@ private struct LanSharingSectionContent: View {
                     }
                 ))
                 .toggleStyle(.checkbox)
-                .font(.caption)
+                .font(.app(.caption))
             }
         }
         .padding(.leading, 8)
@@ -925,39 +961,53 @@ private struct LanSharingSectionContent: View {
 /// (`GET /v1/providers`), never a guess made here.
 private struct ProvidersSectionContent: View {
     @EnvironmentObject var server: ServerManager
-    @State private var entries: [ProviderEntry] = ProvidersFile.load()
+    @EnvironmentObject var formState: SettingsFormState
     @State private var status: [ProviderStatus] = []
     @State private var saveError: String?
 
     var body: some View {
+        // One searchable row: a section whose content publishes no row count
+        // never collapses under the filter.
+        SearchableRow(searchText: ["Providers", "OpenAI-compatible chat endpoints", "cloud API", "providers.json", "API key"]
+                      + formState.providerEntries.map(\.name)) {
+            providersBody
+        }
+    }
+
+    private var providersBody: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if entries.isEmpty {
-                Text("No providers yet.")
-                    .font(.caption)
+            if formState.providerEntries.isEmpty {
+                Text(L10n.text("No providers yet."))
+                    .font(.app(.caption))
                     .foregroundStyle(.tertiary)
             }
-            ForEach($entries) { $entry in
+            ForEach($formState.providerEntries) { $entry in
                 ProviderRow(entry: $entry,
                             serverPort: server.port,
                             status: status.first { $0.name == entry.name },
-                            duplicate: ProvidersFile.duplicateNames(entries).contains(entry.name),
-                            onDelete: { entries.removeAll { $0.id == entry.id }; save() },
+                            duplicate: ProvidersFile.duplicateNames(formState.providerEntries).contains(entry.name),
+                            onDelete: {
+                                formState.providerEntries.removeAll { $0.id == entry.id }
+                                formState.providerModelText[entry.id] = nil
+                                save()
+                            },
                             onCommit: save)
             }
             HStack {
-                Button { entries.append(ProviderEntry()) } label: { Label("Add Provider", systemImage: "plus") }
+                Button { formState.providerEntries.append(ProviderEntry()) } label: { Label("Add Provider", systemImage: "plus") }
                 Spacer()
                 // Fields also save on Enter, but an edit followed by a click
                 // elsewhere never submits — this is the button that always writes.
-                Button("Save") { save() }
+                Button { save() } label: { Text("Save")
+                    .font(.app(.body)) }
                 .keyboardShortcut("s", modifiers: .command)
                 .help("Write providers.json and ask the server to re-probe now")
             }
             if let saveError {
-                Text(saveError).font(.caption).foregroundStyle(.red)
+                Text(L10n.text(saveError)).font(.app(.caption)).foregroundStyle(.red)
             }
-            Text("Keys are stored in plain text in ~/.mlx-serve/providers.json. Prefer an environment variable name for a shared machine. Provider models are never shared over the LAN.")
-                .font(.caption)
+            Text(L10n.text("Keys are stored in plain text in ~/.mlx-serve/providers.json. Prefer an environment variable name for a shared machine. Provider models are never shared over the LAN."))
+                .font(.app(.caption))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -969,7 +1019,7 @@ private struct ProvidersSectionContent: View {
 
     private func save() {
         do {
-            try ProvidersFile.save(entries)
+            try ProvidersFile.save(formState.providerEntries)
             saveError = nil
         } catch {
             saveError = "Could not save providers.json: \(error.localizedDescription)"
@@ -991,13 +1041,22 @@ private struct ProvidersSectionContent: View {
 
 private struct ProviderRow: View {
     @Binding var entry: ProviderEntry
+    @EnvironmentObject var formState: SettingsFormState
     let serverPort: UInt16
     let status: ProviderStatus?
     let duplicate: Bool
     let onDelete: () -> Void
     let onCommit: () -> Void
-    @State private var modelsText: String = ""
     @State private var picking = false
+
+    /// The model-id field's own text, held on the store: the entry keeps the
+    /// parsed ids, so a rebuilt row would otherwise show the parsed list back.
+    private var modelsText: Binding<String> {
+        Binding(
+            get: { formState.providerModelText[entry.id] ?? entry.models.joined(separator: ", ") },
+            set: { formState.providerModelText[entry.id] = $0 }
+        )
+    }
 
     private var problem: String? {
         if duplicate { return "Another provider already uses this name" }
@@ -1018,41 +1077,43 @@ private struct ProviderRow: View {
                 Toggle("", isOn: $entry.enabled)
                     .labelsHidden()
                     .toggleStyle(.switch)
-                    .onChange(of: entry.enabled) { _, _ in onCommit() }
+                    .onChange(of: entry.enabled) { _, _ in onCommit() }.font(.app(.body))
                 Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }
                     .buttonStyle(.borderless)
                     .help("Remove this provider")
             }
             HStack(spacing: 8) {
-                SecureField("api key", text: $entry.apiKey, prompt: Text("API key"))
+                SecureField("api key", text: $entry.apiKey, prompt: Text(L10n.text("API key")))
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(onCommit)
-                TextField("env", text: $entry.apiKeyEnv, prompt: Text("or env var, e.g. OPENAI_API_KEY"))
+                TextField("env", text: $entry.apiKeyEnv, prompt: Text(L10n.text("or env var, e.g. OPENAI_API_KEY")))
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(onCommit)
             }
             HStack(spacing: 8) {
-                TextField("models", text: $modelsText, prompt: Text("Models, comma-separated — only these are exposed; empty = all the provider lists"))
+                TextField("models", text: modelsText, prompt: Text(L10n.text("Models, comma-separated — only these are exposed; empty = all the provider lists")))
                     .textFieldStyle(.roundedBorder)
-                    .font(.caption)
-                    .onAppear { modelsText = entry.models.joined(separator: ", ") }
-                    .onChange(of: modelsText) { _, t in entry.models = ProviderEntry.parseModelList(t) }
+                    .font(.app(.caption))
+                    .onChange(of: formState.providerModelText[entry.id]) { _, t in
+                        entry.models = ProviderEntry.parseModelList(t ?? "")
+                    }
                     .onSubmit(onCommit)
-                Button("Pick…") { picking = true }
+                Button { picking = true } label: { Text(L10n.text("Pick…"))
+                    .font(.app(.body)) }
                     .disabled(entry.problem() != nil)
-                    .help("Fetch the provider's model list and tick the ones to expose")
+                    .help(L10n.text("Fetch the provider's model list and tick the ones to expose"))
             }
             .sheet(isPresented: $picking) {
                 ProviderModelPickerSheet(entry: entry) { chosen in
-                    modelsText = chosen.joined(separator: ", ")
+                    formState.providerModelText[entry.id] = chosen.joined(separator: ", ")
                     entry.models = chosen
                     onCommit()
                 }
             }
             if let problem {
-                Text(problem).font(.caption2).foregroundStyle(.orange)
+                Text(L10n.text(problem)).font(.app(.caption2)).foregroundStyle(.orange)
             } else if let status {
-                Text(statusLine(status)).font(.caption2).foregroundStyle(.secondary)
+                Text(L10n.text(statusLine(status))).font(.app(.caption2)).foregroundStyle(.secondary)
             }
         }
         .padding(8)
@@ -1090,12 +1151,12 @@ private struct ProviderModelPickerSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Models at \(entry.name)").font(.headline)
+            Text(L10n.format("Models at %@", entry.name)).font(.app(.headline))
             TextField("Filter", text: $filter).textFieldStyle(.roundedBorder)
             if loading {
                 ProgressView().frame(maxWidth: .infinity)
             } else if let error {
-                Text(error).foregroundStyle(.red).font(.caption)
+                Text(error).foregroundStyle(.red).font(.app(.caption))
             } else {
                 List(shown, id: \.self) { id in
                     Toggle(id, isOn: Binding(
@@ -1106,14 +1167,17 @@ private struct ProviderModelPickerSheet: View {
                 .listStyle(.plain)
             }
             HStack {
-                Text("\(chosen.count) of \(ids.count) selected").font(.caption).foregroundStyle(.secondary)
-                Button("Clear") { chosen = [] }.disabled(chosen.isEmpty)
+                Text("\(chosen.count) of \(ids.count) selected").font(.app(.caption)).foregroundStyle(.secondary)
+                Button { chosen = [] } label: { Text("Clear")
+                    .font(.app(.body)) }.disabled(chosen.isEmpty)
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Done") {
+                Button { dismiss() } label: { Text("Cancel")
+                    .font(.app(.body)) }.keyboardShortcut(.cancelAction)
+                Button {
                     onDone(ids.filter { chosen.contains($0) })
                     dismiss()
-                }
+                } label: { Text("Done")
+                    .font(.app(.body)) }
                 .keyboardShortcut(.defaultAction)
                 .disabled(loading)
             }
@@ -1126,7 +1190,14 @@ private struct ProviderModelPickerSheet: View {
     private func load() async {
         chosen = Set(entry.models)
         var key = entry.apiKey
-        if !entry.apiKeyEnv.isEmpty, let v = LoginShellEnv.values(of: [entry.apiKeyEnv])[entry.apiKeyEnv], !v.isEmpty { key = v }
+        if !entry.apiKeyEnv.isEmpty {
+            // `LoginShellEnv.values(of:)` spawns the user's login shell — blocking,
+            // and documented as off-main only. This runs from `.task`, which
+            // inherits the main actor, so it has to hop off before asking.
+            let name = entry.apiKeyEnv
+            let shell = await Task.detached(priority: .userInitiated) { LoginShellEnv.values(of: [name]) }.value
+            if let v = shell[name], !v.isEmpty { key = v }
+        }
         var lastError = "No model list at \(entry.url)"
         for url in ProviderEntry.modelsURLs(for: entry.url) {
             var req = URLRequest(url: url, timeoutInterval: 15)
@@ -1190,14 +1261,22 @@ private struct ServerSectionContent: View {
     }
 
     var body: some View {
-        // Whether and which model loads at start; auto-start itself is the tray's toggle.
+        // Same value as the tray's toggle.
         SettingsRow(
-            title: "Load a model at start",
-            explainer: "Off by default. Auto-start brings the server up with no model resident; it loads one on demand at your first message, so login stays fast. Turn this on to pay for the load up front instead — a large checkpoint can take a while and holds the memory from the moment you log in."
+            title: "Start server when the app launches",
+            explainer: "The server comes up as soon as the app does. Off means you start it from the tray."
+        ) {
+            Toggle("", isOn: $appState.autoStartServer)
+                .labelsHidden()
+                .toggleStyle(.switch).font(.app(.body))
+        }
+        SettingsRow(
+            title: "Preload the model when the server starts",
+            explainer: "Off by default: every start, automatic or from the Start Server button, comes up with no model resident and loads one on demand at your first message, so login stays fast. On pays for the load up front. A large checkpoint can take a while and holds the memory from the moment the server is up."
         ) {
             Toggle("", isOn: $appState.loadModelAtStart)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(.switch).font(.app(.body))
         }
         SettingsRow(
             title: "Which model",
@@ -1205,12 +1284,12 @@ private struct ServerSectionContent: View {
         ) {
             Picker("", selection: $appState.startupModelMode) {
                 ForEach(StartupModelChoice.Mode.allCases) { mode in
-                    Text(mode.label).tag(mode)
+                    Text(L10n.text(mode.label)).tag(mode)
                 }
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .disabled(!appState.loadModelAtStart)
+            .disabled(!appState.loadModelAtStart).font(.app(.body))
         }
         SettingsRow(
             title: "Model",
@@ -1220,16 +1299,16 @@ private struct ServerSectionContent: View {
                 Picker("", selection: startupModelDisplay) {
                     let dupNames = LocalModel.duplicateNames(in: pickable)
                     ForEach(pickable) { model in
-                        Text(startupModelLabel(model, dupNames: dupNames)).tag(model.path)
+                        Text(L10n.text(startupModelLabel(model, dupNames: dupNames))).font(.app(.body)).tag(model.path)
                     }
                     // A selection that matches no row renders blank, so empty and
                     // uninstalled selections each get a row of their own.
                     if startupModelDisplay.wrappedValue.isEmpty {
-                        Text("None — starts with no model").tag("")
+                        Text(L10n.text("None — starts with no model")).font(.app(.body)).tag("")
                     }
                     if !appState.startupModelPinnedPath.isEmpty,
                        !pickable.contains(where: { $0.path == appState.startupModelPinnedPath }) {
-                        Text("\((appState.startupModelPinnedPath as NSString).lastPathComponent) — no longer installed")
+                        Text("\((appState.startupModelPinnedPath as NSString).lastPathComponent) — no longer installed").font(.app(.body))
                             .tag(appState.startupModelPinnedPath)
                     }
                 }
@@ -1239,8 +1318,8 @@ private struct ServerSectionContent: View {
                 .disabled(!appState.loadModelAtStart || appState.startupModelMode == .lastUsed)
 
                 if appState.startupModelMode == .lastUsed {
-                    Text("Resolved each time the app starts, so it keeps up as you switch models.")
-                        .font(.caption2)
+                    Text(L10n.text("Resolved each time the app starts, so it keeps up as you switch models."))
+                        .font(.app(.caption2))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.trailing)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1262,7 +1341,7 @@ private struct ServerSectionContent: View {
                     prompt: Text("0.0.0.0")
                 )
                 .textFieldStyle(.roundedBorder)
-                .font(.body.monospacedDigit())
+                .font(.app(.body).monospacedDigit())
                 .multilineTextAlignment(.trailing)
                 .frame(width: 160)
             }
@@ -1277,7 +1356,7 @@ private struct ServerSectionContent: View {
             ) {
                 Toggle("", isOn: $appState.serverOptions.noVision)
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
         if let m = meta["enableMetrics"] {
@@ -1288,7 +1367,7 @@ private struct ServerSectionContent: View {
             ) {
                 Toggle("", isOn: $appState.serverOptions.enableMetrics)
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
         if let m = meta["apiKey"] {
@@ -1306,7 +1385,7 @@ private struct ServerSectionContent: View {
                     prompt: Text("none")
                 )
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 180)
+                .frame(width: 180).font(.app(.body))
             }
         }
         if let m = meta["toolAutocorrect"] {
@@ -1317,7 +1396,7 @@ private struct ServerSectionContent: View {
             ) {
                 Toggle("", isOn: $appState.serverOptions.toolAutocorrect)
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
         if let m = meta["logLevel"] {
@@ -1328,12 +1407,12 @@ private struct ServerSectionContent: View {
             ) {
                 Picker("", selection: $appState.serverOptions.logLevel) {
                     ForEach(ServerOptions.LogLevel.allCases) { lvl in
-                        Text(lvl.label).tag(lvl)
+                        Text(L10n.text(lvl.label)).font(.app(.body)).tag(lvl)
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(minWidth: 180)
+                .frame(minWidth: 180).font(.app(.body))
             }
         }
         if let m = meta["logToFile"] {
@@ -1344,61 +1423,7 @@ private struct ServerSectionContent: View {
             ) {
                 Toggle("", isOn: $appState.serverOptions.logToFile)
                     .labelsHidden()
-                    .toggleStyle(.switch)
-            }
-        }
-        if let m = meta["maxResidentMemGB"] {
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer,
-                isDirty: dirty.dirty(\.maxResidentMemGB)
-            ) {
-                let gb = appState.serverOptions.maxResidentMemGB
-                snappingSlider(
-                    presets: ServerOptions.residentMemPresets(
-                        physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory),
-                    current: gb,
-                    set: { appState.serverOptions.maxResidentMemGB = $0 },
-                    label: gb == 0 ? "Auto" : "\(gb) GB"
-                )
-            }
-        }
-        if let m = meta["maxResidentModels"] {
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer,
-                isDirty: dirty.dirty(\.maxResidentModels)
-            ) {
-                Stepper(value: $appState.serverOptions.maxResidentModels, in: 1...8) {
-                    Text("\(appState.serverOptions.maxResidentModels)")
-                        .font(.body.monospacedDigit())
-                }
-            }
-        }
-        if let m = meta["idleEvictSecs"] {
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer,
-                isDirty: dirty.dirty(\.idleEvictSecs)
-            ) {
-                let secs = appState.serverOptions.idleEvictSecs
-                snappingSlider(
-                    presets: ServerOptions.idleEvictPresets,
-                    current: secs,
-                    set: { appState.serverOptions.idleEvictSecs = $0 },
-                    label: ServerOptions.idleEvictLabel(secs)
-                )
-            }
-        }
-        if let m = meta["skipMemPreflight"] {
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer,
-                isDirty: dirty.dirty(\.skipMemPreflight)
-            ) {
-                Toggle("", isOn: $appState.serverOptions.skipMemPreflight)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
     }
@@ -1412,7 +1437,14 @@ private struct ServerSectionContent: View {
 private struct PortRow: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var server: ServerManager
-    @State private var text: String = ""
+    @EnvironmentObject var formState: SettingsFormState
+
+    /// The field's text lives on the store so what is being typed survives a
+    /// query edit; nil means the field has not been shown yet.
+    private var text: Binding<String> {
+        Binding(get: { formState.portText ?? "" },
+                set: { formState.portText = $0 })
+    }
 
     private var isDirty: Bool {
         guard let last = server.liveLaunchedOptions else { return false }
@@ -1426,23 +1458,25 @@ private struct PortRow: View {
                 explainer: m.explainer,
                 isDirty: isDirty
             ) {
-                TextField("", text: $text, prompt: Text("11234"))
+                TextField("", text: text, prompt: Text("11234"))
                     .textFieldStyle(.roundedBorder)
-                    .font(.body.monospacedDigit())
+                    .font(.app(.body).monospacedDigit())
                     .multilineTextAlignment(.trailing)
                     .frame(width: 90)
-                    .onAppear { text = "\(appState.serverOptions.port)" }
-                    .onChange(of: text) { _, newValue in
-                        if let p = ServerOptions.parsePort(newValue) {
+                    .onAppear {
+                        if formState.portText == nil { formState.portText = "\(appState.serverOptions.port)" }
+                    }
+                    .onChange(of: formState.portText) { _, newValue in
+                        if let p = ServerOptions.parsePort(newValue ?? "") {
                             appState.serverOptions.port = p
                         }
                     }
                     .onChange(of: appState.serverOptions.port) { _, newPort in
-                        if ServerOptions.parsePort(text) != newPort {
-                            text = "\(newPort)"
+                        if ServerOptions.parsePort(formState.portText ?? "") != newPort {
+                            formState.portText = "\(newPort)"
                         }
                     }
-                    .onSubmit { text = "\(appState.serverOptions.port)" }
+                    .onSubmit { formState.portText = "\(appState.serverOptions.port)" }
             }
         }
     }
@@ -1506,11 +1540,11 @@ private struct ContextSizeRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     HStack(spacing: 6) {
-                        Text("Context size")
-                            .font(.body)
+                        Text(L10n.text("Context size"))
+                            .font(.app(.body))
                         if isDirty {
                             Image(systemName: "arrow.clockwise.circle.fill")
-                                .font(.caption)
+                                .font(.app(.caption))
                                 .foregroundStyle(.orange)
                                 .help("Restart the server to apply this change")
                         }
@@ -1531,12 +1565,12 @@ private struct ContextSizeRow: View {
                         )
                         .frame(width: 200)
                         Text(Self.formatTokens(appState.serverOptions.ctxSize))
-                            .font(.body.monospacedDigit())
+                            .font(.app(.body).monospacedDigit())
                             .frame(minWidth: 56, alignment: .trailing)
                     }
                 }
-                Text(ContextSizeDisplay.helpText)
-                    .font(.caption2)
+                Text(L10n.text(ContextSizeDisplay.helpText))
+                    .font(.app(.caption2))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -1576,11 +1610,11 @@ private struct ContextSizeRow: View {
         let labelColor: Color = warn ? .orange : .secondary
         let valueColor: Color = warn ? .orange : .primary
         HStack(spacing: 4) {
-            Text(label)
-                .font(.caption2)
+            Text(L10n.text(label))
+                .font(.app(.caption2))
                 .foregroundStyle(labelColor)
             Text(value)
-                .font(.caption2.monospacedDigit().weight(.medium))
+                .font(.app(.caption2).monospacedDigit().weight(.medium))
                 .foregroundStyle(valueColor)
         }
         .padding(.horizontal, 6)
@@ -1602,20 +1636,18 @@ private struct SpecDecodeSectionContent: View {
         ServerLaunchDirty(current: appState.serverOptions, last: server.liveLaunchedOptions)
     }
 
-    /// `draftBlockSize` stays CLI-only — `recommendedBlockSize` in drafter.zig
-    /// auto-picks per target (E2B=2, E4B=4, 31B=8, 26B-A4B=4); the field is
-    /// kept in ServerOptions so power users who set it via CLI keep working.
-
     var body: some View {
         let opts = $appState.serverOptions
         // Drafter and PLD are mutually exclusive at the request level
         // (`drafter > PLD > regular` in src/server.zig). When drafter is on
         // we lock the PLD toggles down so users can't accidentally enable a
         // setting that would never apply.
-        let drafterActive = !appState.serverOptions.drafterPath.isEmpty
+        let drafterActive = server.chatModelInfo?.drafterLoaded ?? false
         let pldUsable = appState.serverOptions.enablePLD && !drafterActive
 
-        DrafterRow()
+        Text(L10n.text("Drafters are chosen per model: Model Settings, Speculation."))
+            .font(.app(.caption2))
+            .foregroundStyle(.secondary)
         if let m = meta["enablePLD"] {
             let suffix = drafterActive
                 ? " Locked off while Drafter is on (Drafter takes priority)."
@@ -1628,7 +1660,7 @@ private struct SpecDecodeSectionContent: View {
                 Toggle("", isOn: opts.enablePLD)
                     .labelsHidden()
                     .toggleStyle(.switch)
-                    .disabled(drafterActive)
+                    .disabled(drafterActive).font(.app(.body))
             }
         }
         if let m = meta["pldDraftLen"] {
@@ -1639,7 +1671,7 @@ private struct SpecDecodeSectionContent: View {
             ) {
                 Stepper(value: opts.pldDraftLen, in: 1...16) {
                     Text("\(appState.serverOptions.pldDraftLen)")
-                        .font(.body.monospacedDigit())
+                        .font(.app(.body).monospacedDigit())
                 }
                 .disabled(!pldUsable)
             }
@@ -1652,7 +1684,7 @@ private struct SpecDecodeSectionContent: View {
             ) {
                 Stepper(value: opts.pldKeyLen, in: 1...8) {
                     Text("\(appState.serverOptions.pldKeyLen)")
-                        .font(.body.monospacedDigit())
+                        .font(.app(.body).monospacedDigit())
                 }
                 .disabled(!pldUsable)
             }
@@ -1672,7 +1704,7 @@ private struct SpecDecodeSectionContent: View {
             ) {
                 Toggle("", isOn: opts.enableMTP)
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
         if let m = meta["mtpDepth"] {
@@ -1690,27 +1722,19 @@ private struct SpecDecodeSectionContent: View {
                     // beside "Probe" would ask a question nobody can answer
                     // without benchmarking. It DISPLAYS what it resolved to
                     // instead (MLX_SERVE_SPEC_COST_PROBE=0 is the A/B arm).
-                    Text(server.specCost?.automaticLabel ?? "Automatic").tag(0)
+                    if let specCost = server.specCost {
+                        Text(L10n.format("Automatic (measured: %lld tokens)", Int64(specCost.mtpDepthCap))).font(.app(.body)).tag(0)
+                    } else {
+                        Text(L10n.text("Automatic")).font(.app(.body)).tag(0)
+                    }
                     ForEach(1...6, id: \.self) { n in
-                        Text("\(n) token\(n == 1 ? "" : "s")").tag(n)
+                        Text("\(n) token\(n == 1 ? "" : "s")").font(.app(.body)).tag(n)
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .frame(width: 140)
-                .disabled(!appState.serverOptions.enableMTP)
-            }
-        }
-        if let m = meta["mtpOnMoE"] {
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer,
-                isDirty: dirty.dirty(\.mtpOnMoE)
-            ) {
-                Toggle("", isOn: opts.mtpOnMoE)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .disabled(!appState.serverOptions.enableMTP)
+                .disabled(!appState.serverOptions.enableMTP).font(.app(.body))
             }
         }
         // DSpark is DeepSeek-V4's own draft — independent of the Qwen MTP
@@ -1723,7 +1747,7 @@ private struct SpecDecodeSectionContent: View {
             ) {
                 Toggle("", isOn: opts.enableDSpark)
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
     }
@@ -1742,8 +1766,8 @@ private struct SettingsSubheader: View {
 
     var body: some View {
         if SettingsSearch.tokens(query).isEmpty {
-            Text(text)
-                .font(.caption.weight(.semibold))
+            Text(L10n.text(text))
+                .font(.app(.caption).weight(.semibold))
                 .foregroundStyle(.secondary)
                 .textCase(.uppercase)
                 .padding(.top, 4)
@@ -1774,11 +1798,11 @@ private struct PerformanceSectionContent: View {
                 VStack(alignment: .trailing, spacing: 4) {
                     Stepper(value: opts.maxConcurrent, in: 1...8) {
                         Text("\(appState.serverOptions.maxConcurrent)")
-                            .font(.body.monospacedDigit())
+                            .font(.app(.body).monospacedDigit())
                     }
                     if let b = server.batching {
-                        Text(b.label)
-                            .font(.caption)
+                        Text(L10n.text(b.label))
+                            .font(.app(.caption))
                             .foregroundStyle(b.supported ? .secondary : Color.orange)
                     }
                 }
@@ -1799,54 +1823,7 @@ private struct PerformanceSectionContent: View {
                     set: { appState.serverOptions.decodeAttnQuantChoice = $0 }
                 ))
                 .labelsHidden()
-                .toggleStyle(.switch)
-            }
-        }
-        if let m = meta["kvQuant"] {
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer,
-                isDirty: dirty.dirty(\.kvQuant)
-            ) {
-                Picker("", selection: opts.kvQuant) {
-                    ForEach(ServerOptions.KVQuant.allCases) { q in
-                        Text(q.label).tag(q)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(minWidth: 220)
-            }
-        }
-        if let m = meta["prefixCacheEntries"] {
-            // Surface the RAM clamp so a 16 GB Mac user who sets, say, 8 sees
-            // that the launcher will actually pass 1 (and why).
-            let ram = ProcessInfo.processInfo.physicalMemory
-            let set = appState.serverOptions.prefixCacheEntries
-            let effective = ServerOptions.ramCappedPrefixCacheEntries(set, physicalMemoryBytes: ram)
-            let capNote = effective < set
-                ? "  ·  This Mac (\(MemoryInfo.format(Int64(ram)))) launches with \(effective) to keep cache memory bounded."
-                : ""
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer + capNote,
-                isDirty: dirty.dirty(\.prefixCacheEntries)
-            ) {
-                Stepper(value: opts.prefixCacheEntries, in: 0...16) {
-                    Text("\(appState.serverOptions.prefixCacheEntries)")
-                        .font(.body.monospacedDigit())
-                }
-            }
-        }
-        if let m = meta["prefixCacheMem"] {
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer,
-                isDirty: dirty.dirty(\.prefixCacheMem)
-            ) {
-                TextField("", text: opts.prefixCacheMem, prompt: Text("2GB"))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 110)
+                .toggleStyle(.switch).font(.app(.body))
             }
         }
         if let m = meta["enablePrefixCacheDisk"] {
@@ -1857,7 +1834,7 @@ private struct PerformanceSectionContent: View {
             ) {
                 Toggle("", isOn: opts.enablePrefixCacheDisk)
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
         if let m = meta["prefixCacheDisk"], appState.serverOptions.enablePrefixCacheDisk {
@@ -1869,6 +1846,154 @@ private struct PerformanceSectionContent: View {
                 TextField("", text: opts.prefixCacheDisk, prompt: Text("10GB"))
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 110)
+            }
+        }
+    }
+}
+
+// MARK: - Memory section
+
+/// Every engine memory knob in one place. The resident-model limits, the OS
+/// reserve and the preflight apply to every engine; the KV and prefix-cache rows
+/// and the n-gram table are MLX-only and hide when a GGUF/DSV4 model is serving.
+private struct MemorySectionContent: View {
+    let showMLX: Bool
+    @EnvironmentObject var appState: AppState
+    @EnvironmentObject var server: ServerManager
+
+    private var meta: [String: ServerOptionField] { ServerOptions.serverFlagFields }
+    private var dirty: ServerLaunchDirty {
+        ServerLaunchDirty(current: appState.serverOptions, last: server.liveLaunchedOptions)
+    }
+
+    var body: some View {
+        let opts = $appState.serverOptions
+
+        if let m = meta["maxResidentMemGB"] {
+            SettingsRow(
+                title: m.title,
+                explainer: m.explainer,
+                isDirty: dirty.dirty(\.maxResidentMemGB)
+            ) {
+                let gb = appState.serverOptions.maxResidentMemGB
+                snappingSlider(
+                    presets: ServerOptions.residentMemPresets(
+                        physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory),
+                    current: gb,
+                    set: { appState.serverOptions.maxResidentMemGB = $0 },
+                    label: gb == 0 ? "Auto" : "\(gb) GB"
+                )
+            }
+        }
+        if let m = meta["maxResidentModels"] {
+            SettingsRow(
+                title: m.title,
+                explainer: m.explainer,
+                isDirty: dirty.dirty(\.maxResidentModels)
+            ) {
+                Stepper(value: opts.maxResidentModels, in: 1...8) {
+                    Text("\(appState.serverOptions.maxResidentModels)")
+                        .font(.app(.body).monospacedDigit())
+                }
+            }
+        }
+        if let m = meta["idleEvictSecs"] {
+            SettingsRow(
+                title: m.title,
+                explainer: m.explainer,
+                isDirty: dirty.dirty(\.idleEvictSecs)
+            ) {
+                let secs = appState.serverOptions.idleEvictSecs
+                snappingSlider(
+                    presets: ServerOptions.idleEvictPresets,
+                    current: secs,
+                    set: { appState.serverOptions.idleEvictSecs = $0 },
+                    label: ServerOptions.idleEvictLabel(secs)
+                )
+            }
+        }
+        if let m = meta["skipMemPreflight"] {
+            SettingsRow(
+                title: m.title,
+                explainer: m.explainer,
+                isDirty: dirty.dirty(\.skipMemPreflight)
+            ) {
+                Toggle("", isOn: opts.skipMemPreflight)
+                    .labelsHidden()
+                    .toggleStyle(.switch).font(.app(.body))
+            }
+        }
+        if let m = meta["osMemoryReserve"] {
+            SettingsRow(
+                title: m.title,
+                explainer: m.explainer,
+                isDirty: dirty.dirty(\.osMemoryReserve)
+            ) {
+                Toggle("", isOn: opts.osMemoryReserve)
+                    .labelsHidden()
+                    .toggleStyle(.switch).font(.app(.body))
+            }
+        }
+        if showMLX {
+            if let m = meta["kvQuant"] {
+                SettingsRow(
+                    title: m.title,
+                    explainer: m.explainer,
+                    isDirty: dirty.dirty(\.kvQuant)
+                ) {
+                    Picker("", selection: opts.kvQuant) {
+                        ForEach(ServerOptions.KVQuant.allCases) { q in
+                            Text(L10n.text(q.label)).font(.app(.body)).tag(q)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(minWidth: 220).font(.app(.body))
+                }
+            }
+            if let m = meta["prefixCacheEntries"] {
+                // Surface the RAM clamp so a 16 GB Mac user who sets, say, 8 sees
+                // that the launcher will actually pass 1 (and why).
+                let ram = ProcessInfo.processInfo.physicalMemory
+                let set = appState.serverOptions.prefixCacheEntries
+                let effective = ServerOptions.ramCappedPrefixCacheEntries(set, physicalMemoryBytes: ram)
+                let capNote = effective < set
+                    ? "  ·  This Mac (\(MemoryInfo.format(Int64(ram)))) launches with \(effective) to keep cache memory bounded."
+                    : ""
+                SettingsRow(
+                    title: m.title,
+                    explainer: m.explainer + capNote,
+                    isDirty: dirty.dirty(\.prefixCacheEntries)
+                ) {
+                    Stepper(value: opts.prefixCacheEntries, in: 0...16) {
+                        Text("\(appState.serverOptions.prefixCacheEntries)")
+                            .font(.app(.body).monospacedDigit())
+                    }
+                }
+            }
+            if let m = meta["prefixCacheMem"] {
+                SettingsRow(
+                    title: m.title,
+                    explainer: m.explainer,
+                    isDirty: dirty.dirty(\.prefixCacheMem)
+                ) {
+                    TextField("", text: opts.prefixCacheMem, prompt: Text("Auto"))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 110)
+                }
+            }
+            if let m = meta["pleGpu"] {
+                SettingsRow(
+                    title: m.title,
+                    explainer: m.explainer,
+                    isDirty: dirty.dirty(\.pleGpu),
+                    cost: m.cost,
+                    costActive: appState.serverOptions.pleGpu
+                ) {
+                    Toggle("", isOn: opts.pleGpu)
+                        .labelsHidden()
+                        .toggleStyle(.switch).font(.app(.body))
+                }
             }
         }
     }
@@ -1910,8 +2035,8 @@ private struct NeuralEngineSectionContent: View {
                         .labelsHidden()
                         .toggleStyle(.switch)
                     if let caution = AnePrefillAdvice.liveCaution {
-                        Text(caution)
-                            .font(.caption2)
+                        Text(L10n.text(caution))
+                            .font(.app(.caption2))
                             .foregroundStyle(.orange)
                             .multilineTextAlignment(.trailing)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1922,19 +2047,19 @@ private struct NeuralEngineSectionContent: View {
         if let m = meta["aneImage"] {
             SettingsRow(title: m.title, explainer: m.explainer, isDirty: dirty.dirty(\.aneImage),
                         cost: m.cost, costActive: appState.serverOptions.aneImage) {
-                Toggle("", isOn: opts.aneImage).labelsHidden().toggleStyle(.switch)
+                Toggle("", isOn: opts.aneImage).labelsHidden().toggleStyle(.switch).font(.app(.body))
             }
         }
         if let m = meta["aneVideo"] {
             SettingsRow(title: m.title, explainer: m.explainer, isDirty: dirty.dirty(\.aneVideo),
                         cost: m.cost, costActive: appState.serverOptions.aneVideo) {
-                Toggle("", isOn: opts.aneVideo).labelsHidden().toggleStyle(.switch)
+                Toggle("", isOn: opts.aneVideo).labelsHidden().toggleStyle(.switch).font(.app(.body))
             }
         }
         if let m = meta["aneAudio"] {
             SettingsRow(title: m.title, explainer: m.explainer, isDirty: dirty.dirty(\.aneAudio),
                         cost: m.cost, costActive: appState.serverOptions.aneAudio) {
-                Toggle("", isOn: opts.aneAudio).labelsHidden().toggleStyle(.switch)
+                Toggle("", isOn: opts.aneAudio).labelsHidden().toggleStyle(.switch).font(.app(.body))
             }
         }
     }
@@ -1959,7 +2084,7 @@ private struct CommonPerformanceSectionContent: View {
             ) {
                 Stepper(value: opts.tokenizeCacheEntries, in: 0...32) {
                     Text("\(appState.serverOptions.tokenizeCacheEntries)")
-                        .font(.body.monospacedDigit())
+                        .font(.app(.body).monospacedDigit())
                 }
             }
         }
@@ -1968,248 +2093,80 @@ private struct CommonPerformanceSectionContent: View {
 
 // MARK: - GGUF (llama.cpp) performance section
 
-/// Knobs specific to the embedded llama.cpp engine — surfaced only when
-/// the active model loaded through that path (or pre-load, when no
-/// engine has been chosen yet). MLX's `--kv-quant` and `--prefix-cache-*`
-/// don't apply here; llama.cpp has its own KV scheme and its own
-/// multi-session LRU.
-private struct LlamaPerformanceSectionContent: View {
+/// Every embedded engine's launch flags, grouped by engine.
+private struct EnginesSectionContent: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var server: ServerManager
+    @Environment(\.settingsSearchQuery) private var query
 
     private var meta: [String: ServerOptionField] { ServerOptions.serverFlagFields }
     private var dirty: ServerLaunchDirty {
         ServerLaunchDirty(current: appState.serverOptions, last: server.liveLaunchedOptions)
     }
+    /// Group labels are not rows: a search narrows to rows, so they step aside.
+    private var showLabels: Bool { SettingsSearch.tokens(query).isEmpty }
 
     var body: some View {
         let opts = $appState.serverOptions
+        if showLabels {
+            EngineGroupLabel(name: "mlx-serve-gguf", blurb: "GGUF files on MLX itself. Experimental.")
+        }
+        if let m = meta["mlxGguf"] {
+            SettingsRow(title: m.title, explainer: m.explainer, isDirty: dirty.dirty(\.mlxGguf)) {
+                Toggle("", isOn: opts.mlxGguf)
+                    .labelsHidden()
+                    .toggleStyle(.switch).font(.app(.body))
+            }
+        }
+        if showLabels {
+            EngineGroupLabel(name: "llama.cpp", blurb: "Serves every other .gguf file. Its own kernels and KV layout, so the MLX rows do not apply.")
+        }
         if let m = meta["llamaKvQuant"] {
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer,
-                isDirty: dirty.dirty(\.llamaKvQuant)
-            ) {
+            SettingsRow(title: m.title, explainer: m.explainer, isDirty: dirty.dirty(\.llamaKvQuant)) {
                 Picker("", selection: opts.llamaKvQuant) {
                     ForEach(ServerOptions.LlamaKVQuant.allCases) { q in
-                        Text(q.label).tag(q)
+                        Text(L10n.text(q.label)).font(.app(.body)).tag(q)
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(minWidth: 260)
+                .frame(minWidth: 260).font(.app(.body))
             }
         }
         if let m = meta["llamaCacheEntries"] {
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer,
-                isDirty: dirty.dirty(\.llamaCacheEntries)
-            ) {
+            SettingsRow(title: m.title, explainer: m.explainer, isDirty: dirty.dirty(\.llamaCacheEntries)) {
                 Stepper(value: opts.llamaCacheEntries, in: 1...8) {
                     Text("\(appState.serverOptions.llamaCacheEntries)")
-                        .font(.body.monospacedDigit())
+                        .font(.app(.body).monospacedDigit())
                 }
             }
         }
-    }
-}
-
-// MARK: - ds4 (DeepSeek-V4-Flash) performance section
-
-/// Knobs specific to the embedded ds4 engine — surfaced only when the active
-/// model loaded through that path (DeepSeek-V4-Flash GGUF), or pre-load when
-/// no engine has been chosen yet. Today this is just SSD weight streaming:
-/// the lever that lets a model larger than RAM load by streaming experts off
-/// disk instead of OOMing at warmup (issue #39).
-private struct Ds4PerformanceSectionContent: View {
-    @EnvironmentObject var appState: AppState
-    @EnvironmentObject var server: ServerManager
-
-    private var meta: [String: ServerOptionField] { ServerOptions.serverFlagFields }
-    private var dirty: ServerLaunchDirty {
-        ServerLaunchDirty(current: appState.serverOptions, last: server.liveLaunchedOptions)
-    }
-
-    var body: some View {
+        if showLabels {
+            EngineGroupLabel(name: "ds4", blurb: "Serves DeepSeek-V4-Flash GGUF files.")
+        }
         if let m = meta["ssdStreaming"] {
-            SettingsRow(
-                title: m.title,
-                explainer: m.explainer,
-                isDirty: dirty.dirty(\.ssdStreaming)
-            ) {
-                Toggle("", isOn: $appState.serverOptions.ssdStreaming)
+            SettingsRow(title: m.title, explainer: m.explainer, isDirty: dirty.dirty(\.ssdStreaming)) {
+                Toggle("", isOn: opts.ssdStreaming)
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
     }
 }
 
-// MARK: - Drafter row
-
-/// Three-state speculative-decoding toggle for the Gemma 4 assistant drafter.
-private struct DrafterRow: View {
-    @EnvironmentObject var appState: AppState
-    @EnvironmentObject var server: ServerManager
-    @EnvironmentObject var downloads: DownloadManager
-
-    private var dirty: ServerLaunchDirty {
-        ServerLaunchDirty(current: appState.serverOptions, last: server.liveLaunchedOptions)
-    }
-
-    /// Drafter the loaded model would pair with — nil for non-Gemma-4 or
-    /// when no matching checkpoint is on disk.
-    private var recommended: LocalDrafter? {
-        guard let info = server.modelInfo else { return nil }
-        return downloads.recommendedDrafterFor(
-            modelPath: appState.selectedModelPath,
-            architecture: info.architecture,
-            isMoE: info.isMoE
-        )
-    }
-
-    /// True when the loaded target is a Gemma 4 model (any size). Tells us
-    /// whether to surface "drafter not found" (worth fixing) vs "drafter is
-    /// Gemma 4 only" (architectural).
-    private var targetIsGemma4: Bool {
-        let arch = server.modelInfo?.architecture ?? ""
-        return arch == "gemma4" || arch == "gemma4_text"
-    }
-
-    private var isMoeTarget: Bool { server.modelInfo?.isMoE ?? false }
-
-    private var explainer: String {
-        if let r = recommended {
-            return "Pairs with the small assistant drafter for +27–40% on code & agents (dense Gemma 4 only). On automatically: \(r.url.lastPathComponent)."
-        }
-        // Server hasn't reported a model yet — either it's not started or
-        // we're mid-handshake. Don't claim the architecture is wrong.
-        if server.modelInfo == nil {
-            if appState.selectedModelPath.isEmpty {
-                return "Select a model to check drafter compatibility."
-            }
-            return "Start the server to check drafter compatibility."
-        }
-        // Server reported a model but didn't include `architecture` in its
-        // /v1/models meta — that field landed in the same release that
-        // unhid this row, so an older bundled binary will leave it empty.
-        if (server.modelInfo?.architecture ?? "").isEmpty {
-            return "Drafter status unavailable (server build pre-dates this UI). Use --drafter via CLI."
-        }
-        if !targetIsGemma4 {
-            return "Drafter is Gemma 4 only."
-        }
-        if isMoeTarget {
-            return "No drafter for the MoE Gemma 4 — it regresses decode there. Use PLD instead."
-        }
-        return "Drafter checkpoint not found. New Gemma 4 downloads bring it automatically."
-    }
-
-    /// The drafter this target would pair with, whether or not it's on disk —
-    /// what the Download button fetches.
-    private var pairedDrafterRepo: String? {
-        DownloadManager.companionDrafterRepo(forRepoId: appState.selectedModelPath)
-    }
-
-    private var toggleEnabled: Bool { recommended != nil }
+private struct EngineGroupLabel: View {
+    let name: String
+    let blurb: String
 
     var body: some View {
-        // `explainer` is state-dependent (names the discovered checkpoint, or
-        // why there isn't one), so the searchable text follows the UI.
-        SearchableRow(searchText: ["Enable Assistant MTP Drafter model", explainer]) {
-            rowBody
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name).font(.app(.headline))
+            Text(L10n.text(blurb)).font(.app(.caption2)).foregroundStyle(.secondary)
         }
-    }
-
-    @ViewBuilder
-    private var rowBody: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                HStack(spacing: 6) {
-                    Text("Enable Assistant MTP Drafter model")
-                        .font(.body)
-                    if dirty.dirty(\.drafterPath) {
-                        Image(systemName: "arrow.clockwise.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .help("Restart the server to apply this change")
-                    }
-                }
-                Spacer(minLength: 12)
-                control
-                    .frame(maxWidth: 280, alignment: .trailing)
-            }
-            Text(explainer)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            // Status pill — green for "ready", yellow for the MoE caution.
-            if let r = recommended {
-                HStack(spacing: 8) {
-                    statusPill(
-                        text: "✓ \(r.url.lastPathComponent)",
-                        warn: false
-                    )
-                    if isMoeTarget && !appState.serverOptions.drafterPath.isEmpty {
-                        statusPill(
-                            text: "⚠ Drafter regresses ~30% on MoE — PLD is recommended",
-                            warn: true
-                        )
-                    }
-                }
-                .padding(.top, 2)
-            } else if server.modelInfo != nil, targetIsGemma4, let repo = pairedDrafterRepo {
-                // A dense Gemma 4 is loaded but its drafter isn't on disk —
-                Button(downloads.downloads[repo]?.status == .downloading
-                       ? "Downloading drafter…" : "Download drafter") {
-                    downloads.start(repoId: repo) { appState.refreshModels() }
-                }
-                .controlSize(.small)
-                .disabled(downloads.downloads[repo]?.status == .downloading)
-                .padding(.top, 2)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var control: some View {
-        // Off writes `drafterOptOut` as well as clearing the path: the app pairs
-        // a dense Gemma 4 with its drafter on its own now, so an empty path
-        // alone would read as "not paired yet" and pair itself again at the next
-        // model switch. Turning it back on clears the opt-out.
-        let isOn = Binding<Bool>(
-            get: { !appState.serverOptions.drafterPath.isEmpty },
-            set: { newValue in
-                appState.serverOptions.drafterOptOut = !newValue
-                if newValue {
-                    if let r = recommended {
-                        appState.serverOptions.drafterPath = r.url.path
-                    }
-                } else {
-                    appState.serverOptions.drafterPath = ""
-                }
-            }
-        )
-        Toggle("", isOn: isOn)
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .disabled(!toggleEnabled)
-    }
-
-    @ViewBuilder
-    private func statusPill(text: String, warn: Bool) -> some View {
-        let fg: Color = warn ? .orange : .green
-        Text(text)
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(fg)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(fg.opacity(0.10))
-            .clipShape(Capsule())
+        .padding(.top, 8)
     }
 }
+
 
 // MARK: - Per-request defaults section
 
@@ -2230,56 +2187,56 @@ private struct InterfaceSectionContent: View {
         SettingsRow(title: "Appearance", explainer: "Follow the system setting, or force light/dark for this app only.") {
             Picker("", selection: $appearanceModeRaw) {
                 ForEach(AppAppearanceMode.allCases) { mode in
-                    Text(mode.label).tag(mode.rawValue)
+                    Text(L10n.text(mode.label)).tag(mode.rawValue)
                 }
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 180)
+            .frame(width: 180).font(.app(.body))
         }
         SettingsRow(title: "Accent Color", explainer: "Tint for buttons, links and the selected message bubble.") {
             Picker("", selection: $accentColorRaw) {
                 ForEach(AppAccentColor.allCases) { accent in
-                    Text(accent.label).tag(accent.rawValue)
+                    Text(L10n.text(accent.label)).font(.app(.body)).tag(accent.rawValue)
                 }
             }
             .labelsHidden()
-            .frame(width: 140)
+            .frame(width: 140).font(.app(.body))
         }
         SettingsRow(title: "Text Size", explainer: "Size of the chat transcript's prose and code.") {
             Picker("", selection: $textSizeRaw) {
                 ForEach(ChatTextSize.allCases) { size in
-                    Text(size.label).tag(size.rawValue)
+                    Text(L10n.text(size.label)).font(.app(.body)).tag(size.rawValue)
                 }
             }
             .labelsHidden()
-            .frame(width: 140)
+            .frame(width: 140).font(.app(.body))
         }
         SettingsRow(title: "Chat Column",
                     explainer: "How wide a conversation reads. Narrow and Medium are fixed widths, so resizing the window moves the margins rather than the text; Wide follows the window. Also on ⌘⌥1-3, under View ▸ Interface.") {
             Picker("", selection: $chatColumnRaw) {
                 ForEach(ChatColumnWidth.allCases) { width in
-                    Text(width.label).tag(width.rawValue)
+                    Text(L10n.text(width.label)).tag(width.rawValue)
                 }
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 220)
+            .frame(width: 220).font(.app(.body))
         }
         SettingsRow(title: "Compact Mode", explainer: "Tighter spacing between messages — more of the conversation on screen. Also on ⌘⌥C, under View ▸ Interface.") {
             Toggle("", isOn: $compactMode)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(.switch).font(.app(.body))
         }
         SettingsRow(title: "Terminal Theme",
                     explainer: "Colors for new sandbox terminals. Right-click a terminal in the sidebar to give one session a different theme.") {
             Picker("", selection: $terminalThemeId) {
                 ForEach(TerminalTheme.all) { theme in
-                    Text(theme.name).tag(theme.id)
+                    Text(theme.name).font(.app(.body)).tag(theme.id)
                 }
             }
             .labelsHidden()
-            .frame(width: 160)
+            .frame(width: 160).font(.app(.body))
         }
         SettingsRow(title: "Terminal Background",
                     explainer: "Ground under the default theme. Reset to use the theme's own.") {
@@ -2287,7 +2244,8 @@ private struct InterfaceSectionContent: View {
                 ColorPicker("", selection: terminalBackground, supportsOpacity: false)
                     .labelsHidden()
                 if !terminalBackgroundHex.isEmpty {
-                    Button("Reset") { terminalBackgroundHex = "" }
+                    Button { terminalBackgroundHex = "" } label: { Text("Reset")
+                        .font(.app(.body)) }
                         .controlSize(.small)
                 }
             }
@@ -2369,7 +2327,7 @@ private struct RequestDefaultsSectionContent: View {
                     HStack(spacing: 8) {
                         Slider(value: opts.defaultTemperature, in: 0...2, step: 0.05)
                         Text(String(format: "%.2f", appState.serverOptions.defaultTemperature))
-                            .font(.body.monospacedDigit())
+                            .font(.app(.body).monospacedDigit())
                             .frame(minWidth: 36, alignment: .trailing)
                     }
                     recPill(server.modelInfo?.recTemperature.map { String(format: "%.2f", $0) })
@@ -2382,7 +2340,7 @@ private struct RequestDefaultsSectionContent: View {
                     HStack(spacing: 8) {
                         Slider(value: opts.defaultTopP, in: 0.1...1.0, step: 0.01)
                         Text(String(format: "%.2f", appState.serverOptions.defaultTopP))
-                            .font(.body.monospacedDigit())
+                            .font(.app(.body).monospacedDigit())
                             .frame(minWidth: 36, alignment: .trailing)
                     }
                     recPill(server.modelInfo?.recTopP.map { String(format: "%.2f", $0) })
@@ -2393,10 +2351,12 @@ private struct RequestDefaultsSectionContent: View {
             SettingsRow(title: m.title, explainer: m.explainer) {
                 VStack(alignment: .trailing, spacing: 4) {
                     Stepper(value: opts.defaultTopK, in: 0...1000) {
-                        Text(appState.serverOptions.defaultTopK == 0
+                        Text(L10n.text(
+                             appState.serverOptions.defaultTopK == 0
                              ? "Disabled"
-                             : "\(appState.serverOptions.defaultTopK)")
-                            .font(.body.monospacedDigit())
+                             : "\(appState.serverOptions.defaultTopK)"
+))
+                            .font(.app(.body).monospacedDigit())
                     }
                     // Top-k is the one sampling field that actually falls
                     // through to the model's recommendation: when the slider
@@ -2415,7 +2375,7 @@ private struct RequestDefaultsSectionContent: View {
                 HStack(spacing: 8) {
                     Slider(value: opts.defaultRepeatPenalty, in: 1.0...2.0, step: 0.01)
                     Text(String(format: "%.2f", appState.serverOptions.defaultRepeatPenalty))
-                        .font(.body.monospacedDigit())
+                        .font(.app(.body).monospacedDigit())
                         .frame(minWidth: 40, alignment: .trailing)
                 }
             }
@@ -2425,7 +2385,7 @@ private struct RequestDefaultsSectionContent: View {
                 HStack(spacing: 8) {
                     Slider(value: opts.defaultPresencePenalty, in: 0.0...2.0, step: 0.01)
                     Text(String(format: "%.2f", appState.serverOptions.defaultPresencePenalty))
-                        .font(.body.monospacedDigit())
+                        .font(.app(.body).monospacedDigit())
                         .frame(minWidth: 40, alignment: .trailing)
                 }
             }
@@ -2457,10 +2417,10 @@ private struct RequestDefaultsSectionContent: View {
         if let value {
             let color: Color = active ? .green : .secondary
             HStack(spacing: 4) {
-                Text(active ? "Model default (in effect):" : "Model recommends:")
-                    .font(.caption2)
+                Text(L10n.text(active ? "Model default (in effect):" : "Model recommends:"))
+                    .font(.app(.caption2))
                 Text(value)
-                    .font(.caption2.monospacedDigit().weight(.medium))
+                    .font(.app(.caption2).monospacedDigit().weight(.medium))
             }
             .foregroundStyle(color)
             .padding(.horizontal, 6)
@@ -2487,12 +2447,12 @@ private struct WakePhraseSectionContent: View {
     var body: some View {
         SearchableRow(searchText: ["Wake phrase", "Hey Loki", Self.explainer]) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Wake phrase").font(.subheadline.weight(.semibold))
+                Text(L10n.text("Wake phrase")).font(.app(.rowTitle).weight(.semibold))
                 TextField("Hey Loki", text: $appState.serverOptions.wakePhrase)
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 220)
-                Text(Self.explainer)
-                    .font(.caption2).foregroundStyle(.secondary)
+                Text(L10n.text(Self.explainer))
+                    .font(.app(.caption2)).foregroundStyle(.secondary)
             }
         }
     }
@@ -2508,7 +2468,9 @@ private struct WakePhraseSectionContent: View {
 /// flag. Voice mode's `ClonedVoiceSynthesizer` re-reads the path per sentence.
 private struct VoiceCloneSectionContent: View {
     @EnvironmentObject var appState: AppState
-    @StateObject private var recorder = AudioRecorder()
+    /// The recorder is the store's, so a filter edit cannot stop a capture
+    /// mid-recording; the store builds it on the first record.
+    @EnvironmentObject var formState: SettingsFormState
     @State private var voiceError: String?
     /// Built lazily against the app's server so previews reuse the resident
     /// Kokoro model instead of loading it per click.
@@ -2553,16 +2515,16 @@ private struct VoiceCloneSectionContent: View {
     @ViewBuilder
     private var engineBody: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Voice engine").font(.subheadline.weight(.semibold))
+            Text(L10n.text("Voice engine")).font(.app(.rowTitle).weight(.semibold))
             Picker("", selection: $appState.serverOptions.voiceEngine) {
                 ForEach(VoiceEngine.allCases, id: \.self) { e in
-                    Text(e.label).tag(e)
+                    Text(L10n.text(e.label)).tag(e)
                 }
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            Text(Self.engineExplainer(appState.serverOptions.voiceEngine))
-                .font(.caption2).foregroundStyle(.secondary)
+            Text(L10n.text(Self.engineExplainer(appState.serverOptions.voiceEngine)))
+                .font(.app(.caption2)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         // Stop a preview when the engine changes — otherwise a Kokoro sample
@@ -2577,7 +2539,7 @@ private struct VoiceCloneSectionContent: View {
     @ViewBuilder
     private var kokoroBody: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Kokoro voice").font(.subheadline.weight(.semibold))
+            Text(L10n.text("Kokoro voice")).font(.app(.headline).weight(.semibold))
             // Selecting the engine has to be able to GET the model — the gen
             // panes have had this bar all along; Settings ▸ Voice was the one
             // place that offered a backend with no way to fetch it. Collapses to
@@ -2591,9 +2553,9 @@ private struct VoiceCloneSectionContent: View {
                     // Grouped by language so 54 entries are navigable, and named
                     // rather than shown as raw wire ids.
                     ForEach(KokoroVoiceCatalog.grouped(), id: \.language) { group in
-                        Section(group.language) {
+                        Section(L10n.text(group.language)) {
                             ForEach(group.voices, id: \.self) { v in
-                                Text(KokoroVoiceCatalog.displayName(for: v)).tag(v)
+                                Text(KokoroVoiceCatalog.displayName(for: v)).font(.app(.body)).tag(v)
                             }
                         }
                     }
@@ -2607,7 +2569,7 @@ private struct VoiceCloneSectionContent: View {
                     if previewer.isPreviewing(appState.serverOptions.kokoroVoice) {
                         ProgressView().controlSize(.small)
                     } else {
-                        Label("Play", systemImage: "play.circle")
+                        Label("Play", systemImage: "play.circle").font(.app(.body))
                     }
                 }
                 .help(kokoroReady ? "Hear a short sample of this voice"
@@ -2618,11 +2580,11 @@ private struct VoiceCloneSectionContent: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text("Voices blend: type several separated by commas (af_bella,af_sky) to make a new one.")
-                .font(.caption2).foregroundStyle(.secondary)
+            Text(L10n.text("Voices blend: type several separated by commas (af_bella,af_sky) to make a new one."))
+                .font(.app(.caption2)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let e = previewer.error {
-                Text(e).font(.caption).foregroundStyle(.orange)
+                Text(L10n.text(e)).font(.app(.caption)).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -2639,39 +2601,40 @@ private struct VoiceCloneSectionContent: View {
     @ViewBuilder
     private var clipBody: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Voice clone clip").font(.subheadline.weight(.semibold))
+            Text(L10n.text("Voice clone clip")).font(.app(.headline).weight(.semibold))
             HStack(spacing: 8) {
                 if !appState.serverOptions.voiceClonePath.isEmpty {
                     Image(systemName: "waveform").foregroundStyle(.secondary)
                     // Prefer the display label — the stored file is always the
                     // normalized "voice-clone.wav", which says nothing.
-                    Text(appState.serverOptions.voiceCloneLabel.isEmpty
-                         ? (appState.serverOptions.voiceClonePath as NSString).lastPathComponent
-                         : appState.serverOptions.voiceCloneLabel)
-                        .font(.caption).lineLimit(1).truncationMode(.middle)
+                    // "Recorded clip" is copy, not a file name: the row resolves
+                    // it, so the stored label stays language-neutral.
+                    let label = appState.serverOptions.voiceCloneLabel.isEmpty
+                        ? (appState.serverOptions.voiceClonePath as NSString).lastPathComponent
+                        : appState.serverOptions.voiceCloneLabel
+                    Text(L10n.text(label))
+                        .font(.app(.caption)).lineLimit(1).truncationMode(.middle)
                     Button { clearVoice() } label: { Image(systemName: "xmark.circle.fill") }
                         .buttonStyle(.borderless).foregroundStyle(.secondary)
                         .help("Remove the clip — voice mode falls back to the system voice")
                 } else {
-                    Text("None — voice mode uses the system voice.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text(L10n.text("None — voice mode uses the system voice."))
+                        .font(.app(.caption)).foregroundStyle(.secondary)
                 }
             }
             HStack(spacing: 8) {
                 Button { chooseVoiceFile() } label: { Label("Choose file…", systemImage: "folder") }
-                if recorder.isRecording {
-                    Button(role: .destructive) { stopRecording() } label: {
-                        Label(String(format: "Stop (%.1fs)", recorder.duration), systemImage: "stop.circle")
-                    }
+                if let recorder = formState.recorder {
+                    VoiceRecordControl(recorder: recorder, onRecord: startRecording, onStop: stopRecording)
                 } else {
                     Button { startRecording() } label: { Label("Record", systemImage: "mic") }
                 }
             }
-            .font(.caption)
-            Text(Self.explainer)
-                .font(.caption2).foregroundStyle(.secondary)
+            .font(.app(.caption))
+            Text(L10n.text(Self.explainer))
+                .font(.app(.caption2)).foregroundStyle(.secondary)
             if let voiceError {
-                Text(voiceError).font(.caption).foregroundStyle(.red)
+                Text(L10n.text(voiceError)).font(.app(.caption)).foregroundStyle(.red)
             }
         }
     }
@@ -2692,16 +2655,16 @@ private struct VoiceCloneSectionContent: View {
         voiceError = nil
         Task {
             guard await AudioRecorder.requestPermission() else {
-                voiceError = "Microphone access denied. Enable it in System Settings ▸ Privacy ▸ Microphone."
+                voiceError = L10n.text("Microphone access denied. Enable it in System Settings ▸ Privacy ▸ Microphone.")
                 return
             }
-            do { try recorder.start() }
+            do { try formState.audioRecorder().start() }
             catch { voiceError = error.localizedDescription }
         }
     }
 
     private func stopRecording() {
-        guard let data = recorder.stop() else { voiceError = "Nothing was recorded."; return }
+        guard let data = formState.recorder?.stop() else { voiceError = L10n.text("Nothing was recorded."); return }
         do {
             let normalized = try AudioReference.normalizedReferenceWav(fromRecordedPCM: data)
             appState.serverOptions.voiceClonePath = VoiceCloneClipStore.persist(normalized)
@@ -2715,6 +2678,24 @@ private struct VoiceCloneSectionContent: View {
     private func clearVoice() {
         appState.serverOptions.voiceClonePath = ""
         appState.serverOptions.voiceCloneLabel = ""
+    }
+}
+
+/// Record / stop for the clip row. The store owns the recorder, so this is
+/// what still observes it — the elapsed label has to tick while recording.
+private struct VoiceRecordControl: View {
+    @ObservedObject var recorder: AudioRecorder
+    let onRecord: () -> Void
+    let onStop: () -> Void
+
+    var body: some View {
+        if recorder.isRecording {
+            Button(role: .destructive, action: onStop) {
+                Label(L10n.format("Stop (%.1fs)", recorder.duration), systemImage: "stop.circle")
+            }
+        } else {
+            Button(action: onRecord) { Label("Record", systemImage: "mic").font(.app(.callout)) }
+        }
     }
 }
 
@@ -2744,7 +2725,7 @@ private struct SandboxSectionContent: View {
         ) {
             Toggle("", isOn: $appState.serverOptions.toolsOnlyWhenAsked)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(.switch).font(.app(.body))
         }
 
         SettingsRow(
@@ -2753,16 +2734,17 @@ private struct SandboxSectionContent: View {
         ) {
             HStack(spacing: 8) {
                 Text((currentWorkspace as NSString).abbreviatingWithTildeInPath)
-                    .font(.caption.monospaced())
+                    .font(.app(.caption).monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(currentWorkspace)
-                Button("Choose…") {
+                Button {
                     if let picked = WorkspacePicker.pickDirectory() {
                         appState.setDefaultAgentWorkspace(picked)
                     }
-                }
+                } label: { Text("Choose…")
+                    .font(.app(.body)) }
             }
         }
 
@@ -2776,7 +2758,7 @@ private struct SandboxSectionContent: View {
             ) {
                 Toggle("", isOn: $appState.serverOptions.sandbox.enabled)
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(.switch).font(.app(.body))
             }
         }
 
@@ -2786,7 +2768,7 @@ private struct SandboxSectionContent: View {
         ) {
             Toggle("", isOn: $appState.serverOptions.sandbox.network)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(.switch).font(.app(.body))
         }
 
         SettingsRow(
@@ -2799,10 +2781,10 @@ private struct SandboxSectionContent: View {
                 if resetting {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        Text("Resetting…")
+                        Text("Resetting…").font(.app(.body))
                     }
                 } else {
-                    Label("Reset Sandbox…", systemImage: "trash")
+                    Label("Reset Sandbox…", systemImage: "trash").font(.app(.body))
                         .foregroundStyle(.red)
                 }
             }
@@ -2812,14 +2794,16 @@ private struct SandboxSectionContent: View {
                 isPresented: $showResetConfirm,
                 titleVisibility: .visible
             ) {
-                Button("Delete All Sandbox Data", role: .destructive) {
+                Button(role: .destructive) {
                     resetting = true
                     AgentSandbox.shared.resetAllData {
                         resetting = false
                     }
-                }
+                } label: { Text("Delete All Sandbox Data")
+                    .font(.app(.body)) }
                 .keyboardShortcut(.defaultAction)
-                Button("Cancel", role: .cancel) {}
+                Button(role: .cancel) {} label: { Text("Cancel")
+                    .font(.app(.body)) }
             } message: {
                 Text("""
                 This permanently deletes everything the sandbox has downloaded and every change made inside it — installed agent CLIs (pi, hermes), their configs and logins, and any files outside the shared workspace. Any running guest and live sessions stop immediately.
@@ -2849,7 +2833,7 @@ private struct MessagingSectionContent: View {
             SearchableRow(searchText: ["Status", "Telegram bot bridge connection status"]) {
                 HStack(spacing: 8) {
                     Text("Status")
-                        .font(.body)
+                        .font(.app(.body))
                     Spacer(minLength: 12)
                     statusPill
                 }
@@ -2862,7 +2846,7 @@ private struct MessagingSectionContent: View {
         ) {
             Toggle("", isOn: $appState.serverOptions.telegram.enabled)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(.switch).font(.app(.body))
         }
 
         SettingsRow(
@@ -2872,7 +2856,7 @@ private struct MessagingSectionContent: View {
             TextField("", text: $appState.serverOptions.telegram.botToken,
                       prompt: Text("123456:ABC-DEF…"))
                 .textFieldStyle(.roundedBorder)
-                .font(.body.monospaced())
+                .font(.app(.body).monospaced())
                 .frame(width: 260)
         }
 
@@ -2882,7 +2866,7 @@ private struct MessagingSectionContent: View {
         ) {
             Toggle("", isOn: $appState.serverOptions.telegram.agentMode)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(.switch).font(.app(.body))
         }
 
         SettingsRow(
@@ -2891,7 +2875,7 @@ private struct MessagingSectionContent: View {
         ) {
             Toggle("", isOn: $appState.serverOptions.telegram.useMCP)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(.switch).font(.app(.body))
         }
 
         SettingsRow(
@@ -2900,7 +2884,7 @@ private struct MessagingSectionContent: View {
         ) {
             Toggle("", isOn: $appState.serverOptions.telegram.enableThinking)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(.switch).font(.app(.body))
         }
 
         SettingsRow(
@@ -2908,13 +2892,13 @@ private struct MessagingSectionContent: View {
             explainer: "Reply as one of your agents (Chat window ▸ Agents): its prompt, tools, model and workspace. \"None\" uses the settings above."
         ) {
             Picker("", selection: $appState.serverOptions.telegram.agentId) {
-                Text("None").tag(UUID?.none)
+                Text("None").font(.app(.body)).tag(UUID?.none)
                 ForEach(appState.agents.allAgents) { agent in
-                    Text(agent.name).tag(UUID?.some(agent.id))
+                    Text(agent.name).font(.app(.body)).tag(UUID?.some(agent.id))
                 }
             }
             .labelsHidden()
-            .frame(width: 200)
+            .frame(width: 200).font(.app(.body))
         }
 
         // Allow-list / lock control.
@@ -2922,22 +2906,23 @@ private struct MessagingSectionContent: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Locked to")
-                        .font(.body)
+                        .font(.app(.body))
                     Spacer(minLength: 12)
                     HStack(spacing: 8) {
-                        Text(lockLabel)
-                            .font(.caption.monospacedDigit())
+                        Text(L10n.text(lockLabel))
+                            .font(.app(.caption).monospacedDigit())
                             .foregroundStyle(telegram.allowedChatIds.isEmpty ? .secondary : .primary)
-                        Button("Reset lock") {
+                        Button {
                             appState.serverOptions.telegram.allowedChatIds = []
-                        }
+                        } label: { Text("Reset lock")
+                            .font(.app(.body)) }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .disabled(telegram.allowedChatIds.isEmpty)
                     }
                 }
-                Text(Self.lockExplainer)
-                    .font(.caption2)
+                Text(L10n.text(Self.lockExplainer))
+                    .font(.app(.caption2))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -2950,15 +2935,15 @@ private struct MessagingSectionContent: View {
                 Divider()
                     .padding(.bottom, 6)
                 Text("Setup")
-                    .font(.caption.weight(.semibold))
+                    .font(.app(.caption).weight(.semibold))
                 Text("1. In Telegram, open @BotFather and send /newbot.")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.app(.caption2)).foregroundStyle(.secondary)
                 Text("2. Copy the token it gives you and paste it above.")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.app(.caption2)).foregroundStyle(.secondary)
                 Text("3. Turn on “Enable Telegram bot”, then message your bot once to lock it to your chat.")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.app(.caption2)).foregroundStyle(.secondary)
                 Link("Open @BotFather ↗", destination: URL(string: "https://t.me/botfather")!)
-                    .font(.caption2)
+                    .font(.app(.caption2))
             }
             .fixedSize(horizontal: false, vertical: true)
             .padding(.top, 2)
@@ -2987,7 +2972,7 @@ private struct MessagingSectionContent: View {
             }
         }()
         Text(text)
-            .font(.caption2.monospaced())
+            .font(.app(.caption2).monospaced())
             .foregroundStyle(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -3005,15 +2990,13 @@ private struct MessagingSectionContent: View {
 /// mirrors the tray banner's one-click update.
 private struct UpdatesSectionContent: View {
     @ObservedObject var updates: UpdateChecker
-    /// Read once from `mlx-serve --version` (a print-and-exit that never boots
-    /// the server), so the embedded-engine versions show even when it's stopped.
-    @State private var engineVersions: [EngineVersion] = []
+    @EnvironmentObject var formState: SettingsFormState
 
     /// Engine rows to display — drops the `mlx-serve` app row (already shown as
     /// "Installed version"). Falls back to the compile-time llama pin so the
     /// section is never empty if the probe hasn't returned yet.
     private var engineRows: [EngineVersion] {
-        let rows = engineVersions.filter { $0.name != "mlx-serve" }
+        let rows = formState.engineVersions.filter { $0.name != "mlx-serve" }
         return rows.isEmpty
             ? [EngineVersion(name: "llama.cpp", version: UpdateChecker.bundledLlamaTag)]
             : rows
@@ -3028,11 +3011,11 @@ private struct UpdatesSectionContent: View {
                 get: { updates.autoCheckEnabled },
                 set: { updates.autoCheckEnabled = $0 }))
                 .toggleStyle(.switch)
-                .labelsHidden()
+                .labelsHidden().font(.app(.body))
         }
 
         SettingsRow(
-            title: "Installed version — v\(updates.currentVersion)",
+            title: L10n.format("Installed version — v%@", updates.currentVersion),
             explainer: statusText
         ) {
             Button {
@@ -3044,6 +3027,7 @@ private struct UpdatesSectionContent: View {
                     Text("Check Now")
                 }
             }
+            .font(.app(.callout))
             .disabled(busy)
         }
 
@@ -3052,21 +3036,21 @@ private struct UpdatesSectionContent: View {
         // Settings shows them even when the server is stopped.
         ForEach(engineRows) { row in
             SettingsRow(
-                title: "\(Self.engineLabel(row.name)) — \(row.version)",
+                title: L10n.format("%@ — %@", Self.engineLabel(row.name), row.version),
                 explainer: Self.engineExplainer(row.name)
             ) {
                 EmptyView()
             }
         }
         .task {
-            guard engineVersions.isEmpty else { return }
-            engineVersions = await EngineVersions.probe(binaryPath: ServerManager.resolveBinaryPath())
+            guard formState.engineVersions.isEmpty else { return }
+            formState.engineVersions = await EngineVersions.probe(binaryPath: ServerManager.resolveBinaryPath())
         }
 
         if let update = updates.available {
             SettingsRow(
-                title: "MLX Core v\(update.version) is available",
-                explainer: "Downloads MLXCore.dmg from the release, replaces the app, and relaunches."
+                title: L10n.format("MLX-Serve v%@ is available", update.version),
+                explainer: L10n.text("Downloads MLX-Serve.dmg from the release, replaces the app, and relaunches.")
             ) {
                 switch updates.phase {
                 case .downloading(let fraction):
@@ -3076,9 +3060,10 @@ private struct UpdatesSectionContent: View {
                 case .installing:
                     ProgressView().controlSize(.small)
                 default:
-                    Button("Download & Install") {
+                    Button {
                         Task { await updates.downloadAndInstall() }
-                    }
+                    } label: { Text("Download & Install")
+                        .font(.app(.body)) }
                     .buttonStyle(.borderedProminent)
                 }
             }
@@ -3150,8 +3135,8 @@ private func snappingSlider(
             step: 1
         )
         .frame(width: 200)
-        Text(label)
-            .font(.body.monospacedDigit())
+        Text(L10n.text(label))
+            .font(.app(.body).monospacedDigit())
             .frame(minWidth: 70, alignment: .trailing)
     }
 }
