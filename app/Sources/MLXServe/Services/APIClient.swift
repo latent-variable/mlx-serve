@@ -96,6 +96,9 @@ class APIClient {
         config.waitsForConnectivity = true
         return URLSession(configuration: config)
     }()
+    /// For a poll that has to fail at once on a server that is not listening yet: a request on `session`, which waits
+    /// for connectivity, stays pending on a closed port and does not recover when the server comes up.
+    private let pollSession = URLSession(configuration: .ephemeral)
     private let decoder = JSONDecoder()
 
     /// Build a URL pointing at the server, honouring `host`. The settings
@@ -139,11 +142,28 @@ class APIClient {
     /// callers prefer this over `fetchModels(port:)` so the picker UI can
     /// show loaded/unloaded badges per model.
     func fetchAllModels(port: UInt16) async throws -> [ModelInfo] {
-        let url = serverURL(port: port, path: "/v1/models")
-        let (data, _) = try await session.data(from: url)
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let dataArr = json["data"] as? [[String: Any]] else { return [] }
-        return dataArr.map { Self.parseModelInfo($0) }
+        try await fetchModelList(port: port).models
+    }
+
+    /// `/v1/models` whole: the rows, the LAN peers that refused us for want of a key, and
+    /// every peer's address.
+    func fetchModelList(port: UInt16) async throws -> (models: [ModelInfo], lanNeedsKey: [String], lanPeers: [String: LanPeer]) {
+        let (data, _) = try await session.data(from: serverURL(port: port, path: "/v1/models"))
+        return Self.parseModelsBody(data)
+    }
+
+    static func parseModelsBody(_ data: Data) -> (models: [ModelInfo], lanNeedsKey: [String], lanPeers: [String: LanPeer]) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataArr = json["data"] as? [[String: Any]] else { return ([], [], [:]) }
+        var peers: [String: LanPeer] = [:]
+        for p in json["lan_peers"] as? [[String: Any]] ?? [] {
+            guard let name = p["name"] as? String else { continue }
+            peers[name] = LanPeer(kind: MachineKind(os: p["os"] as? String ?? "", model: p["model"] as? String ?? ""),
+                                  leads: p["leads"] as? String ?? "", joined: p["joined"] as? Bool ?? false,
+                                  url: (p["url"] as? String).flatMap(URL.init(string:)),
+                                  freeBytes: Int64(p["free_mib"] as? Int ?? 0) << 20)
+        }
+        return (dataArr.map { parseModelInfo($0) }, json["lan_needs_key"] as? [String] ?? [], peers)
     }
 
     // Internal (not private) so unit tests can exercise the capability/meta
@@ -176,6 +196,8 @@ class APIClient {
         // never be true without supportsVision, since video piggybacks the
         // same vision tower server-side.
         let supportsVideo = supportsVision && mods.contains("video")
+        // A model that answers in speech itself (LFM3-Audio / Omni): its own voice replaces dictation + TTS.
+        let speaks = (first["output_modalities"] as? [String] ?? []).contains("audio")
         // Encoder-only entries advertise "embeddings" even as unloaded stubs
         // (the server peeks model_type at discovery); architecture is the
         // belt-and-suspenders signal for loaded entries.
@@ -196,6 +218,8 @@ class APIClient {
             supportsVision: supportsVision,
             supportsVideo: supportsVideo,
             supportsEmbeddings: supportsEmbeddings,
+            speaks: speaks,
+            voices: first["voices"] as? [String] ?? [],
             capabilities: caps,
             drafterLoaded: meta["drafter_loaded"] as? Bool ?? false,
             drafterPath: meta["drafter_path"] as? String,
@@ -215,7 +239,10 @@ class APIClient {
             recTopP: meta["gen_top_p"] as? Double,
             recTopK: meta["gen_top_k"] as? Int,
             lanPeer: (first["lan_peer"] as? String) ?? (first["provider"] as? String),
-            provider: first["provider"] as? String
+            provider: first["provider"] as? String,
+            agentBudget: AgentBudget.parse(first["agent_budget"]),
+            modality: first["modality"] as? String,
+            engines: first["engines"] as? [String] ?? []
         )
     }
 
@@ -294,6 +321,17 @@ class APIClient {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw APIError.badStatus(code: (response as? HTTPURLResponse)?.statusCode ?? -1, detail: "")
         }
+    }
+
+    /// `GET /v1/load-progress`: every model mid-load, by path.
+    func loadProgress(port: UInt16) async throws -> [String: LoadProgress] {
+        var request = URLRequest(url: serverURL(port: port, path: "/v1/load-progress"))
+        request.timeoutInterval = 5
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw APIError.badStatus(code: (response as? HTTPURLResponse)?.statusCode ?? -1, detail: "")
+        }
+        return LoadProgress.parse(data)
     }
 
     func unloadModel(port: UInt16, id: String) async throws {
@@ -397,6 +435,9 @@ class APIClient {
         /// tables applied), which the UI reads as "nothing to show".
         let specCost: SpecCostInfo?
         let batching: BatchingInfo?
+        let cluster: ClusterInfo?
+        /// Moves whenever `/v1/models` would read differently; nil from older servers.
+        let registryGeneration: UInt64?
     }
 
     func fetchProps(port: UInt16) async throws -> PropsSnapshot? {
@@ -404,7 +445,9 @@ class APIClient {
         let (data, _) = try await session.data(from: url)
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let mem = json["memory"] as? [String: Any] else { return nil }
-        return PropsSnapshot(memory: MemoryInfo.parse(mem), specCost: SpecCostInfo.parse(json), batching: BatchingInfo.parse(json))
+        return PropsSnapshot(memory: MemoryInfo.parse(mem), specCost: SpecCostInfo.parse(json), batching: BatchingInfo.parse(json),
+                             cluster: ClusterInfo.parse(json),
+                             registryGeneration: (json["registry_generation"] as? NSNumber)?.uint64Value)
     }
 
     /// The whole `/props` document. Settings are per MODEL and the bare
@@ -425,7 +468,7 @@ class APIClient {
     /// `--metrics`, which reads as nil (the tray hides the rows).
     func fetchThroughput(port: UInt16) async throws -> ThroughputSnapshot? {
         let url = serverURL(port: port, path: "/metrics.json")
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await pollSession.data(from: url)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return ThroughputSnapshot.parse(json, at: Date().timeIntervalSinceReferenceDate)
@@ -569,6 +612,28 @@ class APIClient {
         var reasoningBudget: Int? = nil
         var enablePLD: Bool? = nil
         var enableDrafter: Bool? = nil
+        var inheritGeneration = false
+        var temperatureOverride: Double? = nil
+        var maxTokensOverride: Int? = nil
+
+        func applyGeneration(to body: inout [String: Any], maxTokens: Int, temperature: Double,
+                             enableThinking: Bool, effort: String?) {
+            if inheritGeneration {
+                body["temperature"] = temperatureOverride
+                body["max_tokens"] = maxTokensOverride
+                body["top_p"] = topP
+            } else {
+                body["temperature"] = temperature
+                body["top_p"] = topP ?? 0.95
+                if maxTokens > 0 { body["max_tokens"] = maxTokens }
+            }
+            if inheritGeneration || enableThinking { body["enable_thinking"] = enableThinking }
+            body["reasoning_effort"] = effort
+            body["top_k"] = topK
+            body["repeat_penalty"] = repeatPenalty
+            body["presence_penalty"] = presencePenalty
+            body["reasoning_budget_tokens"] = reasoningBudget
+        }
 
         static let none = RequestDefaults()
 
@@ -677,6 +742,30 @@ class APIClient {
         }
     }
 
+    static func chatRequestBody(messages: [[String: Any]], maxTokens: Int, temperature: Double,
+                                enableThinking: Bool, reasoningEffort: String? = nil,
+                                tools: [[String: Any]]? = nil, toolsJSON: String? = nil,
+                                defaults: RequestDefaults = .none, modelId: String? = nil,
+                                continueFinalMessage: Bool = false) throws -> Data {
+        var body: [String: Any] = [
+            "model": modelId ?? "mlx-serve", "messages": messages,
+            "stream": true, "stream_options": ["include_usage": true],
+        ]
+        defaults.applyGeneration(to: &body, maxTokens: maxTokens, temperature: temperature,
+                                 enableThinking: enableThinking, effort: reasoningEffort)
+        if continueFinalMessage { body["continue_final_message"] = true }
+        if let value = defaults.enablePLD { body["enable_pld"] = value }
+        if let value = defaults.enableDrafter { body["enable_drafter"] = value }
+        if toolsJSON == nil, let tools { body["tools"] = tools }
+        let data = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
+        guard let toolsJSON else { return data }
+        // Keep the tool schema's property order while sharing generation fields with plain chat.
+        var spliced = String(decoding: data, as: UTF8.self)
+        spliced.removeLast()
+        spliced += ",\"tools\":\(toolsJSON)}"
+        return Data(spliced.utf8)
+    }
+
     private func performStream(
         port: UInt16,
         messages: [[String: Any]],
@@ -698,72 +787,10 @@ class APIClient {
         request.setValue("close", forHTTPHeaderField: "Connection")
         request.timeoutInterval = 300
 
-        // Effective top_p: use the user's saved default when set, else 0.95.
-        // (`top_p` is special — it has a sane non-disabled default we want to
-        // keep on every request.)
-        let effectiveTopP = defaults.topP ?? 0.95
-
-        // Plan 05 Phase G — pin the request to the user's selected model
-        // when known. Defaults to "mlx-serve" which the server resolves
-        // to its default loaded model (matches pre-Phase-G behavior).
-        let effectiveModelId = modelId ?? "mlx-serve"
-        if let toolsJSON {
-            // Splice pre-serialized tools JSON to preserve property key order
-            let messagesData = try JSONSerialization.data(withJSONObject: messages)
-            guard let messagesStr = String(data: messagesData, encoding: .utf8) else {
-                continuation.finish(throwing: URLError(.cannotParseResponse))
-                return
-            }
-            let escapedModelId = effectiveModelId
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-            var parts = [
-                "\"model\":\"\(escapedModelId)\"",
-                "\"messages\":\(messagesStr)",
-                "\"temperature\":\(temperature)",
-                "\"top_p\":\(effectiveTopP)",
-                "\"stream\":true",
-                "\"stream_options\":{\"include_usage\":true}",
-            ]
-            // maxTokens <= 0 means "Auto": omit the field so the server pegs
-            // generation to the remaining context window.
-            if maxTokens > 0 { parts.append("\"max_tokens\":\(maxTokens)") }
-            if enableThinking { parts.append("\"enable_thinking\":true") }
-            if let v = reasoningEffort { parts.append("\"reasoning_effort\":\"\(v)\"") }
-            if let v = defaults.topK { parts.append("\"top_k\":\(v)") }
-            if let v = defaults.repeatPenalty { parts.append("\"repeat_penalty\":\(v)") }
-            if let v = defaults.presencePenalty { parts.append("\"presence_penalty\":\(v)") }
-            if let v = defaults.reasoningBudget { parts.append("\"reasoning_budget\":\(v)") }
-            if let v = defaults.enablePLD { parts.append("\"enable_pld\":\(v)") }
-            if let v = defaults.enableDrafter { parts.append("\"enable_drafter\":\(v)") }
-            parts.append("\"tools\":\(toolsJSON)")
-            request.httpBody = "{\(parts.joined(separator: ","))}".data(using: .utf8)
-        } else {
-            var body: [String: Any] = [
-                "model": effectiveModelId,
-                "messages": messages,
-                "temperature": temperature,
-                "top_p": effectiveTopP,
-                "stream": true,
-                "stream_options": ["include_usage": true],
-            ]
-            // maxTokens <= 0 means "Auto": omit so the server pegs to context.
-            if maxTokens > 0 { body["max_tokens"] = maxTokens }
-            if enableThinking { body["enable_thinking"] = true }
-            if continueFinalMessage { body["continue_final_message"] = true }
-            if let v = reasoningEffort { body["reasoning_effort"] = v }
-            if let v = defaults.topK { body["top_k"] = v }
-            if let v = defaults.repeatPenalty { body["repeat_penalty"] = v }
-            if let v = defaults.presencePenalty { body["presence_penalty"] = v }
-            if let v = defaults.reasoningBudget { body["reasoning_budget"] = v }
-            if let v = defaults.enablePLD { body["enable_pld"] = v }
-            if let v = defaults.enableDrafter { body["enable_drafter"] = v }
-            if let tools { body["tools"] = tools }
-            // withoutEscapingSlashes: same rationale as loadModel — a LAN model
-            // id ("ddalcu/…@peer") escaped to `\/` misses the peer-table
-            // byte-compare (live 404 "no longer shares this model").
-            request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
-        }
+        request.httpBody = try Self.chatRequestBody(messages: messages, maxTokens: maxTokens,
+            temperature: temperature, enableThinking: enableThinking, reasoningEffort: reasoningEffort,
+            tools: tools, toolsJSON: toolsJSON, defaults: defaults, modelId: modelId,
+            continueFinalMessage: continueFinalMessage)
 
         let streamStart = Date()
         let (bytes, response) = try await session.bytes(for: request)

@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
-# Registry eviction gate vs. a staged-residency media model (#126).
+# test_media_eviction_gate.sh — the registry's eviction gate against a staged-residency media model. HERMETIC: the
+# "model" is four SPARSE files carrying the real 4-bit H3 pack's byte sizes + a config.json naming the backend, so
+# nothing is read and the load fails at engine build; WHICH failure it is, is the test. A 30 GB cap (what `auto`
+# resolves to on a 48 GB Mac) must NOT 503 and must log no refusal; an 8 GB cap must refuse, name
+# --max-resident-mem in the body and log an estimate in the 24-29 GB band (the staged peak + 10%, never the 41.3 GiB
+# sum). Also the H3 request-surface arms that fire before any weight is read: turbo without its file or below 4 steps,
+# chain_windows out of 1-6 and chaining on a ref2va pack are named 400s; a malformed lora_paths reaches the shared
+# parser; a relative path is the handler's own named 400.
 #
-# The gate reserves a model's post-load bytes BEFORE the media preflight runs,
-# and it used to bill every entry the sum of every safetensors in its dir. For
-# MiniMax-H3 that sum (37.55 GiB) is 14.7 GiB more than the model can ever
-# hold — the text encoder runs and is FREED before the DiT loads, so the real
-# staged peak is 22.83 GiB — and on a 48 GB Mac (auto cap 30.0 GiB) it refused
-# every load, permanently, on an idle server with nothing to evict.
+#   ./tests/test_media_eviction_gate.sh [port]
 #
-# Hermetic: the "model" is four SPARSE files with the real pack's byte sizes and
-# a config.json naming the backend. Nothing is ever read, so the load fails at
-# engine build — which is exactly the point. WHICH failure it is, is the test:
-# past the gate the answer is no longer the gate's 503.
-#
-# Usage: ./tests/test_media_eviction_gate.sh [port]
+# Hermetic twins: gateEstimateBytes / genLoadResidentBytes, not_enough_memory_message.
+
 set -uo pipefail
+source "$(dirname "$0")/lib/server.sh"
 PORT="${1:-11374}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/zig-out/bin/mlx-serve"
@@ -41,7 +40,7 @@ JSON
 
 MODEL_ID="fake/MiniMax-H3-Gate"
 rc=0
-# Arms [1], [3] and [4] need the 17.3 GB staged peak to clear the server's
+# Arms [1], [3] and [4] need the 14.7 GB staged peak to clear the server's
 # real-RAM preflight too; below a 48 GB Mac it refuses first (503), correctly.
 RAM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 FITS=1; [ "$RAM_GB" -ge 48 ] || FITS=0
@@ -49,11 +48,8 @@ FITS=1; [ "$RAM_GB" -ge 48 ] || FITS=0
 boot() { # boot <cap> <logfile>
   "$BIN" --serve --port "$PORT" --model-dir "$TMP/models" --max-resident-mem "$1" >"$2" 2>&1 &
   SRV=$!
-  for _ in $(seq 1 60); do
-    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && return 0
-    kill -0 $SRV 2>/dev/null || { echo "FAIL: server did not start"; tail -8 "$2"; return 1; }
-    sleep 0.5
-  done
+  srv_wait_health "http://127.0.0.1:$PORT" 60 0.5 "$SRV" && return 0
+  kill -0 "$SRV" 2>/dev/null || { echo "FAIL: server did not start"; tail -8 "$2"; return 1; }
   echo "FAIL: server never became healthy"; return 1
 }
 stop() { [ -n "$SRV" ] && { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; }; SRV=""; }
@@ -105,11 +101,12 @@ else
 fi
 # The number it names must be the BIGGEST STAGE, not the sum and not a stage
 # plus another stage. For this pack: TE 14.72, DiT 17.41 x 0.65 (precomputeAdaln
-# frees the 13B modulation weights) = 11.32, VAEs 5.41 — and the two stages that
-# GENERATE carry a 6 GiB transient allowance the TE stage does not. So
-# max(14.72, 11.32 + 6, 5.41 + 6) = 17.32, against a 37.55 dir sum.
+# frees the 13B modulation weights) = 11.32, VAEs 5.41 — and the stages that
+# GENERATE carry the 1 GiB request base (the canvas itself is billed per request,
+# `h3ActivationBytes`). So max(14.72, 11.32 + 1, 5.41 + 1) = 14.72, against a
+# 37.55 dir sum.
 EST=$(sed -E -n 's/.*needs ~([0-9.]+) GB.*/\1/p' "$LOG2" | head -1)
-if [ -n "$EST" ] && python3 -c "import sys; sys.exit(0 if 16.0 < float('$EST') < 19.0 else 1)"; then
+if [ -n "$EST" ] && python3 -c "import sys; sys.exit(0 if 14.0 < float('$EST') < 16.0 else 1)"; then
   echo "PASS: the gate billed the biggest stage (~$EST GB, not the ~37.6 sum)"
 else
   echo "FAIL: gate estimate '$EST' GB is not the staged peak"; rc=1

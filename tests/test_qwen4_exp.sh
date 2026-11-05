@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
-# Qwen3.8-Flash-Next (qwen4_exp) live end-to-end on the converted pack.
-# Boots the pack, then: architecture advertised, a short greedy answer, a tool
-# call + round-trip, streaming delta cleanliness, and a prompt past the QSA
-# budget (2048 tokens) — asserted through the server's own
-# `[qsa] sparse attention engaged` line, since a dense fallback answers
-# plausibly too. [7] sends an image (tower + M-RoPE engagement lines) and
-# SKIPs when the pack ships no `model-vision.safetensors`. [11] reboots
-# `--no-vision` (tower absent, text works, media 400s by name). SKIPs without the pack.
-#   QWEN4_MODEL=<pack dir> ./tests/test_qwen4_exp.sh [port]
+# test_qwen4_exp.sh — Qwen3.8-Flash-Next (qwen4_exp) live end to end on a converted pack (--max-concurrent 4
+# --prefix-cache-entries 0, 38 checks): architecture + n-gram-table boot line, greedy answer, tool call + round trip,
+# clean streaming, a prompt past the 2048-token QSA budget (`[qsa] sparse attention engaged`, `[qsa-fused] engaged`,
+# a needle), [5b] the same under MTP depth 3 (`[sdpa-split] masked arm engaged`), the MTP head (`mode=mtp`, greedy ==
+# serial, acceptance >= 0.5/round), [7] an image on house.jpeg (tower + `M-RoPE: 1 images` lines; SKIPs without
+# model-vision.safetensors), [7b] the image turn under MTP (tie-aware == serial), [8][9] two concurrent requests
+# through `[batched] gdn batched decode engaged (slots=2)` each == its serial answer (400 tokens, then ~3k prompts),
+# [10] an MTP request beside a plain one, [11] a --no-vision reboot (no tower line, lower active_bytes, image 400).
+#
+#   QWEN4_MODEL=<pack dir> ./tests/test_qwen4_exp.sh [port]   # SKIPs without the pack
+#
+# Tie-aware = a divergence only at a near-tie (top-2 gap <= 0.15 nats), on lead-STRIPPED text. Hermetic twins: the
+# qwen4 GDN fused-path and batched decode tests, `ssm checkpoint carries the qwen4_exp aux state`, DiskTier hybrid.
+source "$(dirname "$0")/_lib_models.sh"
+
 set -u
-MODEL="${QWEN4_MODEL:-$HOME/.mlx-serve/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-4bit}"
+MODEL="${QWEN4_MODEL:-$(find_model ddalcu/Qwen3.8-Flash-Next-MLX-Serve-4bit || echo "$HOME/.mlx-serve/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-4bit")}"
 PORT="${1:-11411}"
 BIN="${MLX_SERVE_BIN:-./zig-out/bin/mlx-serve}"
 LOG="$HOME/claude-tmp/qwen4-live/server-$PORT.log"
 mkdir -p "$(dirname "$LOG")"
 [ -f "$MODEL/config.json" ] || { echo "SKIP: no pack at $MODEL"; exit 0; }
-[ -f "$MODEL/ngram_table.bin" ] || { echo "SKIP: pack has no ngram_table.bin"; exit 0; }
+[ -f "$MODEL/ngram_table.bin" ] || grep -qE 'ngram_embedding\.(shards\.[0-9]+|shard_[0-9]+)\.weight"' "$MODEL/model.safetensors.index.json" 2>/dev/null ||
+  { echo "SKIP: pack has no n-gram table (ngram_table.bin or embedded shards)"; exit 0; }
 pass=0; fail=0
 # Tie-aware equivalence (test_mtp_equivalence.sh bar): prints 1 when `other`
 # equals the serial greedy answer for body `$1`, or first diverges at a token
@@ -34,15 +41,15 @@ for n,e in enumerate(d['choices'][0]['logprobs']['content'][:30]):
 print(ok)" "$other"
 }
 check() { if [ "$2" = "$3" ]; then echo "  ok   $1"; pass=$((pass+1)); else echo "  FAIL $1: got '$2' want '$3'"; fail=$((fail+1)); fi; }
-# MTP_FORCE_DEPTH=3: every MTP round verifies 4 rows, so [5b] exercises the
+# --mtp-min-depth 3 --mtp-max-depth 3: every MTP round verifies 4 rows, so [5b] exercises the
 # array-mask row split (S >= 3 at gqa 12 is MLX's unfused fallback).
 # --max-concurrent 4: [8]-[10] batch plain slots; --prefix-cache-entries 0: the
 # serial reruns those arms compare against must not restore (hybrid restore
 # class 0.14-0.30 nats > the near-tie bar).
-MLX_SERVE_MTP_FORCE_DEPTH=3 "$BIN" --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" --log-level info --max-concurrent 4 --prefix-cache-entries 0 > "$LOG" 2>&1 &
+"$BIN" --mtp-min-depth 3 --mtp-max-depth 3 --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" --log-level info --max-concurrent 4 --prefix-cache-entries 0 > "$LOG" 2>&1 &
 SPID=$!
 trap 'kill $SPID 2>/dev/null; wait $SPID 2>/dev/null' EXIT
-for _ in $(seq 1 600); do curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && grep -q "ready" "$LOG" && break; kill -0 $SPID 2>/dev/null || { echo "server died"; tail -20 "$LOG"; exit 1; }; sleep 2; done
+for _ in $(seq 1 600); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && grep -q "ready" "$LOG" && break; kill -0 $SPID 2>/dev/null || { echo "server died"; tail -20 "$LOG"; exit 1; }; sleep 2; done
 U="http://127.0.0.1:$PORT"
 echo "[1] architecture + n-gram table"
 arch=$(curl -s "$U/v1/models" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['meta'].get('architecture',''))")
@@ -69,12 +76,12 @@ filler=' '.join(f'Fact {i}: the sky over city number {i} is blue.' for i in rang
 print(json.dumps({'messages':[{'role':'user','content':filler+' The secret code is PELICAN-42. '+filler+' What is the secret code? Answer with the code only.'}],'max_tokens':32,'temperature':0,'enable_thinking':False}))")
 la=$(curl -s -m 1200 "$U/v1/chat/completions" -H 'content-type: application/json' -d "$long" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['usage']['prompt_tokens'], '|', d['choices'][0]['message']['content'])")
 echo "  prompt_tokens|answer: $la"
-check "qsa engaged line" "$(grep -c '\[qsa\] sparse attention engaged' "$LOG")" "1"
+# The trunk and its MTP head each log the once-per-process line: at least one is the bar.
+check "qsa engaged line" "$(grep -c '\[qsa\] sparse attention engaged' "$LOG" | awk '{print ($1 >= 1) ? 1 : 0}')" "1"
 check "needle recovered" "$(echo "$la" | grep -c 'PELICAN-42')" "1"
 # Assert the invariant (some QSA attention arm engaged), never one kernel's name.
 check "qsa prefill attention arm engaged (gather kernel or msv_attn_p256 mask arm)" "$(grep -cE '\[qsa-gather\] engaged|\[qsa-fused\] engaged' "$LOG" | sed 's/^[1-9][0-9]*$/1/')" "1"
-# Decode (S=1): `[qsa-decode-gather] engaged` serves it, since the fused kernel
-# floors at S=2 — `MLX_SERVE_QSA_ATTN_MIN_S=1` hands the row to `[qsa-attn]`.
+# Decode (S=1): `[qsa-decode-gather] engaged` serves it, since the fused kernel floors at S=2.
 check "qsa decode attention arm engaged (S=1 subset rows)" "$(grep -cE '\[qsa-decode-gather\] engaged|\[qsa-attn\] engaged' "$LOG" | sed 's/^[1-9][0-9]*$/1/')" "1"
 echo "[5b] MTP past the QSA budget (verify rows under the QSA mask)"
 longm=$(echo "$long" | python3 -c "import sys,json; d=json.load(sys.stdin); d['enable_mtp']=True; print(json.dumps(d))")
@@ -200,9 +207,9 @@ echo "[11] --no-vision boot: tower absent, text works, media 400s by name"
 kill $SPID 2>/dev/null; wait $SPID 2>/dev/null
 LOG11="$LOG.novision"
 sleep 20
-"$BIN" --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" --log-level info --no-vision > "$LOG11" 2>&1 &
+"$BIN" --mtp-min-depth 3 --mtp-max-depth 3 --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" --log-level info --no-vision > "$LOG11" 2>&1 &
 SPID=$!
-for _ in $(seq 1 600); do curl -s "$U/health" >/dev/null 2>&1 && grep -q "Model ready" "$LOG11" && break; kill -0 $SPID 2>/dev/null || { echo "server died"; tail -20 "$LOG11"; exit 1; }; sleep 2; done
+for _ in $(seq 1 600); do curl -sf "$U/health" >/dev/null 2>&1 && grep -q "Model ready" "$LOG11" && break; kill -0 $SPID 2>/dev/null || { echo "server died"; tail -20 "$LOG11"; exit 1; }; sleep 2; done
 check "vision encoder load line absent" "$(grep -c 'Vision encoder: Qwen3-VL ViT' "$LOG11")" "0"
 check "capabilities drop vision" "$(curl -s "$U/v1/models" | python3 -c "import sys,json; print(1 if 'vision' in json.load(sys.stdin)['data'][0].get('capabilities',[]) else 0)")" "0"
 nv_bytes=$(curl -s "$U/props" | python3 -c "import sys,json; print(json.load(sys.stdin)['memory']['active_bytes'])")

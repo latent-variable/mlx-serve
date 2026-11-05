@@ -202,45 +202,8 @@ struct Agent: Identifiable, Codable, Equatable {
     }
 }
 
-/// The editor's reasoning-budget choices, in the server's own `reasoning_effort`
-/// denominations (`effortBudget`: low 512 / medium 2048 / high 8192; unlimited
-/// = -1). Stored as TOKENS in `Agent.reasoningBudget` so the wire stays
-/// `reasoning_budget` — sending `reasoning_effort` would also flip thinking
-/// on/off, which the Capabilities tri-state owns.
-enum AgentReasoningEffort: CaseIterable {
-    case low, medium, high, unlimited
-
-    var budgetTokens: Int {
-        switch self {
-        case .low: return 512
-        case .medium: return 2048
-        case .high: return 8192
-        case .unlimited: return -1
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .low: return "Low"
-        case .medium: return "Medium"
-        case .high: return "High"
-        case .unlimited: return "Unlimited"
-        }
-    }
-
-    /// The level a token count reads as: any negative is unlimited, anything
-    /// else snaps to the closest finite level — older builds stored raw
-    /// numbers, and the app default can be any preset.
-    static func nearest(to budget: Int) -> AgentReasoningEffort {
-        guard budget >= 0 else { return .unlimited }
-        let finite: [AgentReasoningEffort] = [.low, .medium, .high]
-        return finite.min { abs($0.budgetTokens - budget) < abs($1.budgetTokens - budget) } ?? .high
-    }
-}
-
-/// Which voice an agent speaks with. Mirrors the three engines the app's voice
-/// picker already offers (`VoiceEngine`), so an agent voice is exactly one of
-/// the choices a user can make globally — no fourth code path.
+/// Which voice an agent speaks with. Mirrors the engines the app's voice picker offers (`VoiceEngine`), so an agent
+/// voice is exactly one of the choices a user can make globally — no code path of its own.
 enum AgentVoice: Codable, Equatable, Hashable, Sendable {
     /// macOS `AVSpeechSynthesizer`; the identifier ("" = the system default).
     case system(String)
@@ -248,18 +211,21 @@ enum AgentVoice: Codable, Equatable, Hashable, Sendable {
     case kokoro(String)
     /// Qwen3-TTS voice clone; the reference clip's path.
     case clone(String)
+    /// An LFM3 voice id (`<language>-<female|male>`).
+    case lfm3(String)
 
     var engine: VoiceEngine {
         switch self {
         case .system: return .system
         case .kokoro: return .kokoro
         case .clone: return .clone
+        case .lfm3: return .lfm3
         }
     }
 
     var value: String {
         switch self {
-        case .system(let v), .kokoro(let v), .clone(let v): return v
+        case .system(let v), .kokoro(let v), .clone(let v), .lfm3(let v): return v
         }
     }
 
@@ -268,6 +234,7 @@ enum AgentVoice: Codable, Equatable, Hashable, Sendable {
         case .system: self = .system(value)
         case .kokoro: self = .kokoro(value)
         case .clone: self = .clone(value)
+        case .lfm3: self = .lfm3(value)
         }
     }
 
@@ -313,7 +280,7 @@ struct AgentCapabilities: Codable, Equatable, Sendable {
     static let loopTools: Set<AgentToolKind> = [
         .shell, .cwd, .readFile, .writeFile, .editFile, .searchFiles, .listFiles,
         .saveMemory, .createTask, .listProcesses, .readProcessOutput, .killProcess,
-        .generateImage, .generateSpeech, .generateMusic, .generateVideo,
+        .generateImage, .generateSpeech, .generateMusic, .generateSound, .generateVideo,
     ]
 
     static let webTools: Set<AgentToolKind> = [.browse, .webSearch]

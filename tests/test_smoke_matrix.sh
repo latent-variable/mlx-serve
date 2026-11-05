@@ -1,25 +1,16 @@
 #!/bin/bash
-# test_smoke_matrix.sh — quick hot smoke: every text arch on the box × server
-# configs × every API surface. Not a bench and not a correctness oracle: the
-# bar per cell is "answers, no leak, no crash", so a checkpoint's choices
-# (to think, to call the tool) are branched on, never asserted.
+# test_smoke_matrix.sh — quick hot smoke: one small checkpoint per text arch on the box x server configs x ~28 API
+# checks per boot. The bar per cell is "answers, no leak, no crash"; a checkpoint's choices are branched on.
 #
-#   ./tests/test_smoke_matrix.sh                 # every arch found, all configs
-#   SMOKE_ARCHES=gemma4,qwen3_5 ./tests/test_smoke_matrix.sh
-#   SMOKE_CONFIGS=default,kv4 ./tests/test_smoke_matrix.sh
-#   SMOKE_MAX_GB=20 ./tests/test_smoke_matrix.sh  # skip bigger packs
-#   SMOKE_EXTRA_FLAGS="--ctx-size 2048" ./tests/test_smoke_matrix.sh  # appended to every boot
+#   ./tests/test_smoke_matrix.sh      # SMOKE_ARCHES / SMOKE_CONFIGS (csv), SMOKE_MAX_GB, SMOKE_EXTRA_FLAGS, SMOKE_OUT
 #
-# Checkpoints are found on any model root and packs past this box's GPU budget
-# skip (tests/_lib_models.sh); ./tests/fetch_test_models.sh downloads the rest.
-#
-# Configs: default | kv4 (--kv-quant 4) | kv8 (--kv-quant 8) | mtp (--mtp, only
-# where the pack ships a head) | nospec (--no-pld --no-mtp --no-drafter) |
-# drafter / drafter_kv8 (a DFlash drafter, dense and 8-bit KV, where one is on disk).
-# Per boot: chat non-stream/stream, thinking on/off, tools, json_schema,
-# logprobs, max_tokens cap, prefix-cache hit, 2-way concurrency, /v1/completions,
-# /v1/messages (both modes), /v1/responses (both modes), Ollama /api/chat +
-# /api/generate, /v1/models, /metrics.json.
+# Configs: default | kv4 | kv8 | mtp (a head ships) | nospec | drafter / drafter_kv8 (a DFlash drafter on disk).
+# Checks: chat stream/non-stream, thinking on (stream and non-stream agree on the split) / off, a ~3k-token prompt
+# that must still read its first line, tools, json_schema, logprobs, max_tokens, prefix-cache hit, 2-way concurrency,
+# completions, messages, responses, Ollama, /v1/models, /metrics.json, alive + no `[mlx]` error.
+# Each boot has a scratch HOME (a saved model-settings profile outranks launch flags). Packs come from
+# tests/_lib_models.sh (fetch_test_models.sh downloads the rest); ~1 h for the full box.
+
 set -uo pipefail
 cd "$(dirname "$0")/.."
 source tests/_lib_models.sh
@@ -47,14 +38,19 @@ ARCHES=(
     "lfm2_vl|yes|mlx-community/LFM2.5-VL-1.6B-4bit"
     "llama|no|mlx-community/Llama-3.2-3B-Instruct-4bit"
     "mistral|no|mlx-community/Mistral-7B-Instruct-v0.3-4bit"
-    "nemotron_h|yes|mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4|Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
-    "muse_glimmer|yes|ddalcu/Muse-Glimmer-30B-MLX-Serve-4bit"
+    "nemotron_h|yes|mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4|Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit|mlx-community/NVIDIA-Nemotron-3-Nano-4B-4bit"
+    "muse_glimmer|yes|ddalcu/Muse-Glimmer-30B-MLX-Serve-4bit|ddalcu/Muse-Glimmer-30B-MLX-Serve-8bit"
     "spark2_5|yes|abenzerps/Spark-X2.5-4B-MLX-8bit|abenzerps/Spark-X2.5-4B-MLX-4bit"
     "k2_horizon|yes|mlx-community/K2-Horizon-7B-oQ6e"
     "laguna|yes|poolside/Laguna-XS-2.1-NVFP4-mlx"
     "gguf_llama|yes|unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-IQ4_XS.gguf|gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_K_M.gguf|unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-IQ2_XXS.gguf|unsloth/Qwen3.5-4B-GGUF/Qwen3.5-4B-IQ4_NL.gguf"
-    "qwen4_exp|yes|ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit|ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw"
+    "qwen4_exp|yes|ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit|ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw|ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-4.7bpw"
     "qwen4_exp_sushi|yes|beamster/Qwen3.8-Flash-Next-Sushi-2bpw"
+    "bailing_hybrid|yes|rapid-mlx/Ling-3.0-tiny-MLX-4bit"
+    "mimo_v2|yes|ddalcu/MiMo-V2.6-Flash-MLX-Serve-MXFP4-Q8"
+    "mimo_v2_sushi|yes|beamster/MiMo-V2.6-Flash-Sushi-2.3bpw"
+    "glm5_next|yes|ddalcu/GLM-5.3-Flash-MLX-Serve-iQ-MLX-5.1bpw"
+    "glm5_next_sushi|yes|beamster/GLM-5.3-Flash-Sushi-2bpw"
 )
 CONFIGS="${SMOKE_CONFIGS:-default,kv4,kv8,mtp,nospec,drafter,drafter_kv8}"
 # A DFlash drafter per arch when the pack carries none in drafter/.
@@ -131,7 +127,7 @@ run_checks() { # $1 thinking yes/no, $2 has_spec yes/no
     r=$(post /v1/chat/completions "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"$Q\"}],\"max_tokens\":8,\"temperature\":0}")
     rc=$(echo "$r" | J 'd["usage"]["prompt_tokens_details"]["cached_tokens"]')
     # llama.cpp cannot roll recurrent state back one token, so a hybrid GGUF re-prefills an identical prompt.
-    if [[ "$model" == *.gguf ]] && grep -q 'llama_memory_recurrent' "$OUT/$CELL.server.log"; then
+    if [[ "$model" == *.gguf ]] && grep -q 'recurrent state cannot roll back' "$OUT/$CELL.server.log"; then
         skip "prefix cache: repeat reports cached_tokens>0" "recurrent GGUF re-prefills a full match"
     else
     check "prefix cache: repeat reports cached_tokens>0" "$([[ "${rc:-0}" -gt 0 ]] && echo 0 || echo 1)" "cached=$rc"; fi
@@ -186,6 +182,19 @@ print(json.dumps({"c":c,"rc":rc}))' 2>/dev/null)
         check "thinking off: content" "$([[ -n "$c" ]] && echo 0 || echo 1)" "$(echo "$r" | head -c 300)"
     fi
 
+    # 3b. a ~3k-token prompt still reads its first line: a window or rope wrong only
+    # past 1-2k tokens answers short prompts fine (Llama 3.x 1024-token windows).
+    r=$(post /v1/chat/completions "$(python3 -c '
+import json
+fill = "".join(f"Line {i}: the quick brown fox jumps over the lazy dog near the river bank.\n" for i in range(160))
+p = "My favourite number is 4417.\n" + fill + "What is my favourite number? Reply with the number only."
+print(json.dumps({"model": "m", "messages": [{"role": "user", "content": p}], "max_tokens": 60, "temperature": 0, "enable_thinking": False}))')")
+    # A model that thinks with thinking off (LFM2.5-8B-A1B) quotes the line in its reasoning: either proves it read it.
+    c=$(echo "$r" | J '(d["choices"][0]["message"].get("content") or "") + (d["choices"][0]["message"].get("reasoning_content") or "")')
+    # 4-bit KV rounds the sink rows by a whole quant step, so a model at the margin can miss there (Mistral-7B on M1).
+    if [[ "$cfg" == kv4 ]] && ! echo "$c" | grep -q 4417; then skip "long prompt: answers from its first line" "4-bit KV miss '${c:0:60}'"
+    else check "long prompt: answers from its first line" "$(echo "$c" | grep -q 4417 && echo 0 || echo 1)" "prompt=$(echo "$r" | J 'd["usage"]["prompt_tokens"]') '${c:0:80}'"; fi
+
     # 4. tools: 200 + valid args when the model calls
     r=$(post /v1/chat/completions "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"Use the tool to get the weather in Paris.\"}],\"tools\":$TOOLS,\"max_tokens\":300,\"temperature\":0}")
     local tcn; tcn=$(echo "$r" | J 'len(d["choices"][0]["message"].get("tool_calls") or [])')
@@ -193,7 +202,9 @@ print(json.dumps({"c":c,"rc":rc}))' 2>/dev/null)
         local nm args; nm=$(echo "$r" | J 'd["choices"][0]["message"]["tool_calls"][0]["function"]["name"]')
         args=$(echo "$r" | J 'json.loads(d["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]).get("city","")')
         check "tools: call names declared tool with city" "$([[ "$nm" == get_weather && -n "$args" ]] && echo 0 || echo 1)" "$nm($args)"
-        check "tools: finish_reason tool_calls" "$([[ "$(echo "$r" | J 'd["choices"][0]["finish_reason"]')" == tool_calls ]] && echo 0 || echo 1)"
+        # A call that ran into max_tokens reports "length": the cap is the honest reason it stopped.
+        local fr ct; fr=$(echo "$r" | J 'd["choices"][0]["finish_reason"]'); ct=$(echo "$r" | J 'd["usage"]["completion_tokens"]')
+        check "tools: finish_reason tool_calls (length at the cap)" "$([[ "$fr" == tool_calls || ( "$fr" == length && "${ct:-0}" -ge 300 ) ]] && echo 0 || echo 1)" "$fr after $ct tokens"
     else
         c=$(echo "$r" | J 'd["choices"][0]["message"]["content"] or ""')
         check "tools: answered without call (200, no markup leak)" "$([[ -n "$c" ]] && ! echo "$c" | grep -Eq '<tool_call>|<function=' && echo 0 || echo 1)" "$(echo "$r" | head -c 300)"
@@ -318,7 +329,7 @@ for entry in "${ARCHES[@]}"; do
         if [[ "$cfg" == drafter* ]]; then
             check "drafter: engaged in the log" "$(grep -q 'spec-stats\] mode=dflash' "$OUT/$CELL.server.log" && echo 0 || echo 1)"
             # Past 2k KV tokens, with packed-KV reads forced: drafted bytes == serial bytes on one load.
-            long=$(python3 -c "print(open('src/rowqmv.zig').read()[:12000])" | python3 -c 'import sys,json; print(json.dumps("Here is a file:\n"+sys.stdin.read()+"\nList its public functions."))')
+            long=$(python3 -c "print(open('src/sdk/blocks/qmm/rowqmv.zig').read()[:12000])" | python3 -c 'import sys,json; print(json.dumps("Here is a file:\n"+sys.stdin.read()+"\nList its public functions."))')
             a=$(post /v1/chat/completions "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":$long}],\"max_tokens\":160,\"temperature\":0,\"enable_thinking\":false,\"kv_attn_mode\":\"fused\",\"enable_drafter\":false,\"enable_mtp\":false,\"enable_pld\":false}" | J '(d["choices"][0]["message"].get("reasoning_content") or "") + (d["choices"][0]["message"]["content"] or "")')
             b=$(post /v1/chat/completions "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":$long}],\"max_tokens\":160,\"temperature\":0,\"enable_thinking\":false,\"kv_attn_mode\":\"fused\",\"enable_drafter\":true}" | J '(d["choices"][0]["message"].get("reasoning_content") or "") + (d["choices"][0]["message"]["content"] or "")')
             # The whole reply (a model can think with thinking off). Bytes match only on the row-exact

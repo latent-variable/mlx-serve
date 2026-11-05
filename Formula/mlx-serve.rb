@@ -1,8 +1,8 @@
 class MlxServe < Formula
   desc "Native LLM server for Apple Silicon with OpenAI & Anthropic compatible APIs"
   homepage "https://github.com/ddalcu/mlx-serve"
-  version "26.9.6"
-  sha256 "bb4ec3f6ee250745a1d04ef685d3f15b734b560f482a65d0e8bacb512e78bacf"
+  version "26.11.1"
+  sha256 "9acaa7a21b294536c3db9f2683d85079727b4e8db725d34260020499523dc267"
   url "https://github.com/ddalcu/mlx-serve/releases/download/v#{version}/mlx-serve-bin-macos-arm64.tar.gz"
 
   depends_on macos: :sonoma
@@ -29,6 +29,12 @@ class MlxServe < Formula
            "@loader_path/libmlx.dylib",
            "#{libexec}/libmlx.dylib",
            "#{libexec}/libmlxc.dylib"
+
+    # The server also links libmlx directly, through rpaths that reach neither bin/ nor libexec/.
+    system "install_name_tool", "-change",
+           "@rpath/libmlx.dylib",
+           "#{libexec}/libmlx.dylib",
+           "#{bin}/mlx-serve"
 
     # libwebp ships bundled with install_name @executable_path/lib/libwebp.dylib;
     # repoint to libexec since Homebrew splits bin/ and libexec/.

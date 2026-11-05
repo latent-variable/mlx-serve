@@ -1,27 +1,12 @@
 #!/bin/bash
-# Regression tests for client-disconnect handling during long prefills.
+# test_disconnect_cancel.sh — client disconnects during a long prefill: SSE keepalives flow every 5 s while a request
+# waits for its first token (Anthropic `ping`, OpenAI `: keepalive`), and a vanished client cancels its slot within
+# one probe interval (the chunk loop aborts with error.Cancelled) instead of prefilling for a ghost.
 #
-# Pins the 2026-06-10 live failure: Claude Code with a huge MCP toolset sent a
-# ~40K-token prompt to gemma-4-12b, timed out waiting on the multi-minute cold
-# prefill, disconnected, and RETRIED — but the server only checks the peer
-# socket after a token arrives, so the handler sat blocked in waitNext for the
-# whole prefill. Abandoned prefills piled up serially; `lsof` showed ZERO
-# clients connected while the GPU ground away for minutes. The server looked
-# dead ("not returning anything") and memory climbed with each ghost KV.
-#
-# Two contracts:
-#   1. Keepalive: during a long prefill, streaming responses emit periodic
-#      SSE pings (Anthropic `event: ping` / OpenAI `: keepalive` comments) so
-#      clients don't hit their idle timeout in the first place.
-#   2. Disconnect-cancel: when the client vanishes mid-prefill, the server
-#      notices within one keepalive interval, cancels the slot (aborting the
-#      prefill at the next chunk boundary), and the next request isn't stuck
-#      behind a ghost.
-#
-# Usage: ./tests/test_disconnect_cancel.sh [model_dir] [port]
-#   Starts its own server. Default model: Gemma 4 E4B 8-bit.
+#   ./tests/test_disconnect_cancel.sh [model_dir] [port]   # starts its own server; default Gemma 4 E4B 8-bit
 
 set -u
+source "$(dirname "$0")/lib/server.sh"
 
 source "$(dirname "$0")/_lib_models.sh"
 # The ~27k-token prompt needs ~4 GB of KV beside the weights.
@@ -54,27 +39,28 @@ fi
 pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
 sleep 1
 # --no-pld for predictable prefill timing; big ctx for the long prompt.
-"$BINARY" --model "$MODEL" --serve --port "$PORT" --ctx-size 32768 --no-pld --log-level debug > "$LOG" 2>&1 &
+# A prefill shorter than the 5 s keepalive period observes nothing: on a chip that
+# prefills E4B past 8k tok/s (M5 Ultra, 3.2 s for the default prompt) raise the word count.
+WORDS="${DISCONNECT_PROMPT_WORDS:-9000}"
+CTX=$(( (WORDS * 3 + 8191) / 8192 * 8192 + 8192 ))
+"$BINARY" --model "$MODEL" --serve --port "$PORT" --ctx-size "$CTX" --no-pld --metrics --log-level debug > "$LOG" 2>&1 &
 SERVER_PID=$!
-trap 'kill $SERVER_PID 2>/dev/null' EXIT
+trap 'srv_stop $SERVER_PID' EXIT
 
-for _ in $(seq 1 120); do
-    curl -sf "$BASE/health" >/dev/null 2>&1 && break
-    sleep 2
-done
-curl -sf "$BASE/health" >/dev/null 2>&1 || { echo "FAIL: server did not come up"; exit 1; }
+srv_wait_health "$BASE" 120 2 || { echo "FAIL: server did not come up"; exit 1; }
 
 # ~27K-token unique-ish prompts (≈40-60s cold prefill on E4B) — slow enough
 # that keepalives and the disconnect window are clearly observable. Distinct
 # seeds per check: a shared prompt would let check 2's ghost ride check 1's
 # hot-prefix-cache entry and skip the cold prefill entirely.
 big_body() { # $1 = seed -> JSON on stdout
-    python3 - "$1" <<'EOF'
+    python3 - "$1" "$WORDS" <<'EOF'
 import json, random, sys
 random.seed(int(sys.argv[1]))
+n_words = int(sys.argv[2])
 words = ["alpha","bridge","cobalt","delta","ember","fjord","glacier","harbor",
          "isotope","jasper","kelvin","lumen","meridian","nectar","onyx","prism"]
-text = " ".join(random.choice(words) + str(i % 97) for i in range(9000))
+text = " ".join(random.choice(words) + str(i % 97) for i in range(n_words))
 print(json.dumps({
     "model": "m", "max_tokens": 40, "stream": True,
     "messages": [{"role": "user", "content": "Summarize this in one word: " + text}],
@@ -107,8 +93,27 @@ check "follow-up request succeeded" "$([ $? -eq 0 ] && echo 1 || echo 0)"
 # Post-fix: ghost noticed within one keepalive interval (10s) + chunk abort.
 # Pre-fix: the follow-up waits out the ghost's entire remaining prefill+decode.
 check "follow-up completed in <12s (ghost cancelled)" "$([ "$ELAPSED" -lt 12 ] && echo 1 || echo 0)"
+# A follow-up admitted at a chunk boundary can finish before the next liveness probe.
+for _ in $(seq 1 15); do grep -q "client disconnected" "$LOG" && break; sleep 1; done
 grep -q "client disconnected" "$LOG"
 check "server logged the disconnect-cancel" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+
+echo "3. disconnect mid-decode cancels a non-stream ghost (stream=false)"
+# A non-stream request never idles once tokens flow, so an idle-only peer probe misses a client that left mid-decode.
+# ignore_eos keeps it decoding past the client's 5 s even when the checkpoint abbreviates the count.
+curl -s -m 5 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
+    -d '{"model":"m","max_tokens":6000,"stream":false,"ignore_eos":true,"messages":[{"role":"user","content":"Count from 1 to 3000, one number per line."}]}' > /dev/null 2>&1
+# A batching server serves a follow-up beside a ghost, so timing cannot tell; the running count can.
+sleep 8
+LIVE=$(curl -s -m 10 "$BASE/metrics.json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("gauges",{}).get("requests_running",-1))')
+echo "    -> requests still running 8s after the client left: $LIVE"
+check "no request still decoding for the departed client" "$([ "$LIVE" = 0 ] && echo 1 || echo 0)"
+SMALL=$(curl -s -m 120 "$BASE/v1/messages" -H 'Content-Type: application/json' \
+    -d '{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"Say OK."}]}')
+echo "$SMALL" | grep -q '"type":"message"'
+check "follow-up request succeeded" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+grep -q "client disconnected while decoding (non-stream)" "$LOG"
+check "server logged the non-stream decode cancel" "$([ $? -eq 0 ] && echo 1 || echo 0)"
 
 echo ""
 echo "===== $PASS passed, $FAIL failed ====="

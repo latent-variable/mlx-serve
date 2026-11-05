@@ -24,12 +24,12 @@ struct ChatSession: Identifiable, Codable {
     var attachedFolderPath: String?
     /// Non-nil marks this session as the transient vehicle for an unattended task
     /// run (see TaskScheduler). Such sessions are filtered out of the chat sidebar
-    /// and never persisted to chat-history.json — their transcript lives under
+    /// and never persisted by `ChatStore` — their transcript lives under
     /// ~/.mlx-serve/tasks/<taskId>/<runId>/transcript.json instead.
     var taskRunId: UUID?
     /// True marks this as a transient vehicle for an external messaging bridge
     /// (e.g. the Telegram bot). Like task-run sessions these are kept out of the
-    /// chat sidebar and never persisted to chat-history.json — the conversation
+    /// chat sidebar and never persisted by `ChatStore` — the conversation
     /// lives on the messaging platform, not in the app's chat list.
     var isExternalBridge: Bool
     /// Per-session toolbar toggles. Persisted here (not as view `@State` or the
@@ -50,6 +50,9 @@ struct ChatSession: Identifiable, Codable {
     var agentId: UUID?
     /// Tools this chat has switched OFF in the Tools menu, by wire name.
     var disabledTools: [String]
+    /// Its sidebar group (nil = the root) and dragged position (`SidebarChatRows.Placement`).
+    var groupId: UUID?
+    var sidebarPosition: Int?
 
     init(title: String = "New Chat") {
         self.id = UUID()
@@ -67,6 +70,8 @@ struct ChatSession: Identifiable, Codable {
         self.useMCP = false
         self.agentId = nil
         self.disabledTools = []
+        self.groupId = nil
+        self.sidebarPosition = nil
     }
 
     /// Resolve stored names to tools, silently dropping any this build no longer
@@ -75,10 +80,11 @@ struct ChatSession: Identifiable, Codable {
         Set(names.compactMap(AgentToolKind.init(rawValue:)))
     }
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case id, title, messages, createdAt, updatedAt, mode, workingDirectory, attachedFolderPath, taskRunId, isExternalBridge, enableThinking, useMCP, agentId
         case disabledTools
         case reasoningEffort
+        case groupId, sidebarPosition
     }
 
     init(from decoder: Decoder) throws {
@@ -111,6 +117,8 @@ struct ChatSession: Identifiable, Codable {
         // Absent (every session saved before the Tools menu) → nothing disabled,
         // i.e. exactly the behaviour that build had.
         disabledTools = try c.decodeIfPresent([String].self, forKey: .disabledTools) ?? []
+        groupId = try c.decodeIfPresent(UUID.self, forKey: .groupId)
+        sidebarPosition = try c.decodeIfPresent(Int.self, forKey: .sidebarPosition)
     }
 
     /// Shared default cwd for all chat sessions — a SETTING since 2026-07-20
@@ -178,8 +186,7 @@ struct ChatImage: Identifiable, Codable, Equatable {
     /// Optional so a history written before attachments moved to disk still
     /// DECODES: its `data` key is simply unknown here and `path` is absent, so
     /// the record survives and only its picture is gone. A required field would
-    /// throw instead, and `loadChatHistory`'s `?? []` turns one throw into an
-    /// EMPTY history — the whole file, not one image.
+    /// throw instead, and `ChatStore` would leave the whole message out.
     ///
     /// Also nil for bytes that were never meant to outlive the turn: a Telegram
     /// photo, whose session is never persisted at all, and a `browse`
@@ -293,12 +300,25 @@ struct ChatAudio: Identifiable, Codable, Equatable {
 struct ChatVideo: Identifiable, Codable, Equatable {
     let id: UUID
     let name: String // original filename, for the attachment chip
-    let frames: [Data] // JPEG bytes, one per sampled frame
+    /// The folder of frame JPEGs under `~/.mlx-serve/attachments/`, when there is one.
+    var path: String?
+    var frames: [Data] // JPEG bytes, one per sampled frame; empty when the folder is gone
 
-    init(name: String, frames: [Data]) {
+    enum CodingKeys: String, CodingKey { case id, name, path }
+
+    init(name: String, frames: [Data], path: String? = nil) {
         self.id = UUID()
         self.name = name
         self.frames = frames
+        self.path = path
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        path = try c.decodeIfPresent(String.self, forKey: .path)
+        frames = path.map { AttachmentStore.videoFrames(at: $0) } ?? []
     }
 
     var frameCount: Int { frames.count }
@@ -458,6 +478,11 @@ struct ModelInfo {
     /// only BERT entries, loaded or stub). DocumentIndex uses this to pick a
     /// GPU embedder for folder indexing.
     var supportsEmbeddings: Bool = false
+    /// True when the model answers in speech itself (`output_modalities` holds `audio`: LFM3-Audio, Omni). Voice
+    /// mode then sends what the user said and plays what the model says, instead of dictation + a system voice.
+    var speaks: Bool = false
+    /// The voices a model that speaks answers in (`<language>-<female|male>`), as its row lists them.
+    var voices: [String] = []
     /// Raw `capabilities` array as the server sent it ("chat", "vision",
     /// "image", "video", "audio", "embeddings", …). `slotKind` classifies a
     /// registry entry into a tray slot from these.
@@ -509,10 +534,19 @@ struct ModelInfo {
     /// `<model>@<peer>` and requests are proxied to that host). nil = local.
     var lanPeer: String? = nil
     /// Set when this entry is a configured upstream provider (`provider`
-    /// badge, `src/providers.zig`). Routing is identical to a LAN peer — the
+    /// badge, `src/host/api/providers.zig`). Routing is identical to a LAN peer — the
     /// id is `<model>@<name>` and the server proxies — so `lanPeer` is set
     /// too; this field only decides the picker heading and the label.
     var provider: String? = nil
+    /// `agent_budget`: what an agent CLI declares for this model, as the server
+    /// computes it (`src/host/launch/budget.zig`). nil on a non-chat row or an older server.
+    var agentBudget: AgentBudget.Budget? = nil
+    /// `modality`: a media row's create pane ("image", "speech", "music", "sound",
+    /// "video", "3d", "decisions", "diarization"); nil for a language model.
+    var modality: String? = nil
+    /// `engines`: what can serve this pack ("mlx", "ane", "ds4", "llama") — the
+    /// Model Settings engine picker's choices. Empty on older servers.
+    var engines: [String] = []
 
     /// Whether this LAN-mirrored entry serves `capability` — the tray
     /// empty-state and the "On Your Network" pickers count through this, not
@@ -526,7 +560,7 @@ struct ModelInfo {
         guard lanPeer != nil else { return false }
         // "audio" is the MODALITY, and the server advertises a music backend
         // ADDITIVELY as ["audio","music"] on both the ready and stub paths
-        // (src/server.zig) — so a peer running ACE-Step or MiniMax Music 3
+        // (src/host/http/server.zig) — so a peer running ACE-Step or MiniMax Music 3
         // matched the Voice pane's "audio" ask and offered itself as a TTS
         // voice. Speech is audio-and-not-music; the Music pane's own "music"
         // ask was already exact, because no TTS backend advertises it.
@@ -576,6 +610,22 @@ struct ModelInfo {
         if mtpLoaded { return "+MTP" }
         if drafterLoaded { return "+Drafter" }
         return nil
+    }
+
+    /// The engine serving it, for the tray's badge.
+    var engineBadge: String {
+        switch engineName {
+        case "ane": return "ANE"
+        case "sushi": return "Sushi"
+        case "mlx-stream": return "Stream"
+        default: break
+        }
+        switch engine {
+        case .mlx: return "MLX"
+        case .llama: return "GGUF"
+        case .dsv4: return "DS4"
+        case .mlxGguf: return "MLX GGUF"
+        }
     }
 
     /// "KV4" / "KV8" while this model stores a quantized KV cache.
@@ -648,16 +698,6 @@ enum ServerEngine: String, CaseIterable {
     /// A `.gguf` served on the MLX path by lib/mlx-serve-gguf (`--mlx-gguf`).
     case mlxGguf
 
-    /// Short human label for the running-model badge / section headings.
-    var label: String {
-        switch self {
-        case .mlx:     return "MLX"
-        case .llama:   return "llama.cpp (GGUF)"
-        case .dsv4:    return "ds4 (DSV4-Flash)"
-        case .mlxGguf: return "mlx-serve-gguf (GGUF on MLX)"
-        }
-    }
-
     /// The MLX forward, whatever the weights' container: MLX-only knobs
     /// (spec decode, kv-quant, prefix cache) apply here.
     var isMlxPath: Bool { self == .mlx || self == .mlxGguf }
@@ -728,13 +768,9 @@ struct SpecCostInfo: Equatable {
 struct MemoryInfo {
     var activeBytes: Int64
     var peakBytes: Int64
-    /// RAM available for a new allocation, computed server-side with the SAME
-    /// formula as the model-load pre-flight (`status.getAvailableMemBytes` =
-    /// total − wired − compressor). This is reclaimable-available, not unused:
-    /// it counts file cache and pageable memory that macOS evicts under
-    /// allocation pressure, so it's typically much larger than "free". 0 when the
-    /// server build predates the field — the tray hides the line then. Distinct
-    /// axis from `activeBytes` (the MLX GPU-allocator footprint).
+    /// RAM available for a new allocation — the server's pre-flight number
+    /// (`status.getAvailableMemBytes`): reclaimable, not "free". 0 on older
+    /// server builds (tray hides the line); distinct axis from `activeBytes`.
     var availableBytes: Int64
     var maxSafeContext: Int
     /// MLX's reclaimable buffer pool — memory the server process HOLDS but is
@@ -1035,6 +1071,9 @@ struct LocalModel: Identifiable, Hashable {
     /// tell two builds of one scheme apart. nil ⇒ derive it from the filename.
     var quantLabel: String? = nil
 
+    /// The files' size on disk, which `sizeFormatted` prints.
+    var sizeBytes: Int64 = 0
+
     /// Non-nil when this directory cannot serve as a model. See `ModelDefect`.
     /// A defective row is listed so you can see and remove it, and is excluded
     /// from every picker.
@@ -1044,6 +1083,7 @@ struct LocalModel: Identifiable, Hashable {
 
     var isSupportedArchitecture: Bool {
         supportedModelTypes.contains(modelType) || isMediaModelType(modelType)
+            || OutsidePlugins.served.chat.contains(modelType) || OutsidePlugins.served.media.contains(modelType)
     }
 
     /// True only for models physically in `~/.mlx-serve/models` (source
@@ -1080,14 +1120,15 @@ struct LocalModel: Identifiable, Hashable {
     /// a base checkpoint whose architecture serves chat completions. Excludes
     /// drafters, media models (LTX "AudioVideo", FLUX/Krea, Qwen3-TTS,
     /// Hunyuan3D, AceStep), image classifiers ("vit"), and
-    /// embeddings-only "bert" encoders — those live under ~/.mlx-serve/models
+    /// embeddings-only "bert" and "embedding_gemma2" encoders — those live under ~/.mlx-serve/models
     /// as gen-pane / doc-RAG dependencies and load by path, never as the
     /// tray's primary model. The Model Browser's Downloaded tab still lists
     /// them (size + delete) and, since they ARE supported architectures,
     /// no longer flags them "Unsupported".
     var isChatPickable: Bool {
         guard defect == nil, !isDownloading else { return false }
-        return kind == .base && isSupportedArchitecture && modelType != "bert" && !isMediaModelType(modelType)
+        return kind == .base && isSupportedArchitecture && modelType != "bert" && modelType != "embedding_gemma2" && modelType != "qwen3_asr" && modelType != "qwen3_forced_aligner" && !isMediaModelType(modelType)
+            && !OutsidePlugins.served.media.contains(modelType)
     }
 
     /// Likely tool/function-calling support (name heuristic, shared with the
@@ -1233,16 +1274,13 @@ struct GemmaModelOption: Identifiable {
     /// downloader resolves a single `.gguf` artifact and the server loads it
     /// through the embedded ds4 engine instead of the MLX/safetensors path.
     let ggufFilename: String?
-    /// Minimum host RAM (bytes) before this entry is surfaced in the UI. 0 = no gate.
-    let minHostRamBytes: UInt64
 
-    init(id: String, displayName: String, repoId: String, sizeEstimate: String, ggufFilename: String? = nil, minHostRamBytes: UInt64 = 0) {
+    init(id: String, displayName: String, repoId: String, sizeEstimate: String, ggufFilename: String? = nil) {
         self.id = id
         self.displayName = displayName
         self.repoId = repoId
         self.sizeEstimate = sizeEstimate
         self.ggufFilename = ggufFilename
-        self.minHostRamBytes = minHostRamBytes
     }
 }
 
@@ -1271,37 +1309,13 @@ let gemmaModelOptions: [GemmaModelOption] = [
     // speculative decode (26 -> 75 tok/s on code, M4 Max). Supersedes the
     // Qwen 3.6 27B MTP entry: same geometry, newer weights, images too.
     GemmaModelOption(id: "qwen38-27b-4bit", displayName: "Qwen 3.8 27B (4-bit, MTP)", repoId: "ddalcu/Qwen3.8-27B-MLX-Serve-4bit", sizeEstimate: "~18.2 GB, needs 24 GB+ RAM"),
-    // DeepSeek-V4-Flash on the NATIVE deepseek_v4 MLX arch — 128 GB Macs only.
-    GemmaModelOption(
-        id: "dsv4-flash-mlx",
-        displayName: "DeepSeek-V4-Flash (iQ-MLX 3.3 bpw)",
-        repoId: "ddalcu/DeepSeek-V4-Flash-0731-iQ-MLX-3.3bpw",
-        sizeEstimate: "~130 GB, needs 128 GB RAM",
-        minHostRamBytes: 128 * (UInt64(1) << 30)
-    ),
-    // Tencent Hunyuan 3 (hy_v3): 295B-A21B MoE, 256K context, Apache 2.0.
-    GemmaModelOption(
-        id: "hy3-oq2e",
-        displayName: "Hunyuan 3 295B-A21B (2-bit)",
-        repoId: "mlx-community/Hy3-oQ2e",
-        sizeEstimate: "~84 GB, needs 128 GB RAM",
-        minHostRamBytes: 128 * (UInt64(1) << 30)
-    ),
 ]
 
 /// Subset of `gemmaModelOptions` surfaced in the menu-bar Download Models
 /// popover. 4-bit quants are the default tray choice — they fit the widest
 /// range of Macs (the 4-bit 31B is ~18 GB vs 33 GB at 8-bit) so most users
 /// can install something useful without bouncing into the full Model Browser.
-/// DSV4 has only the one GGUF, so it rides along unconditionally.
 /// Excludes Gemma 3/4 12B and E2B since they're available in the model browser.
 let gemmaModelOptionsTrayMenu = gemmaModelOptions.filter {
-    !$0.id.contains("12b") && !$0.id.contains("e2b") && ($0.id.contains("4bit") || $0.id.contains("dsv4"))
-}
-
-/// Subset of `gemmaModelOptions` visible on the current host. Hides entries
-/// whose `minHostRamBytes` exceeds the system RAM.
-var availableGemmaModelOptions: [GemmaModelOption] {
-    let ram = ProcessInfo.processInfo.physicalMemory
-    return gemmaModelOptions.filter { $0.minHostRamBytes <= ram }
+    !$0.id.contains("12b") && !$0.id.contains("e2b") && $0.id.contains("4bit")
 }

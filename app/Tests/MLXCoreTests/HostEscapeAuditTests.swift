@@ -22,16 +22,22 @@ final class HostEscapeAuditTests: XCTestCase {
 
     /// file name → why its spawns are still here.
     private static let known: [String: String] = [
+        "ClusterSetup.swift":
+            "ibv_devinfo to list the Thunderbolt RDMA ports, and ifconfig behind the macOS admin prompt to give one its cluster address — Settings ▸ Cluster only. RDMA (JACCL) is unreachable from the App Sandbox anyway, so the Thunderbolt cluster is a Developer-ID feature.",
         "CLIInstaller.swift":
             "osascript + login shell to symlink into /usr/local/bin. Runtime-gated on the compile-time BuildFeatures.cliInstaller flag (false under MAS_BUILD); UI hidden with it.",
         "CLILauncher.swift":
             "login zsh to detect+launch claude/pi/opencode. Runtime-gated on the compile-time BuildFeatures.cliLauncher flag (false under MAS_BUILD); UI hidden with it.",
+        "AppRelaunch.swift":
+            "sleep + /usr/bin/open to relaunch the app's own bundle after a change that only lands on the next start — the Settings ▸ Interface ▸ Language row and UpdateChecker's swap-in-place share this one helper, and the bundle path rides as a positional argument. MAS live behavior is a release-validation item.",
         "UpdateChecker.swift":
             "hdiutil/ditto to swap the installed .app. Runtime-gated on the compile-time BuildFeatures.selfUpdate flag (false under MAS_BUILD); UI hidden with it.",
         "LoginShellEnv.swift":
             "login zsh to read the user's HF_HOME / HF_HUB_CACHE / XDG_CACHE_HOME — a Finder-launched bundle has no shell environment. Callers gate it: primeHuggingFace() on the compile-time BuildFeatures.customModelFolders flag (false under MAS_BUILD, where an out-of-container cache is unreadable anyway); CLIInstaller on its own flag.",
         "MCPSpawner.swift":
             "HostMCPSpawner's login zsh, used only when the Agent Sandbox is OFF. Compiled out under MAS_BUILD.",
+        "PluginManager.swift":
+            "Model Browser ▸ Plugins: git clone/fetch, xcode-select, the catalog's build.sh (the pinned Zig compile) and this app's `mlx-serve plugin install` on the host. Needs the Xcode Command Line Tools, so it cannot work in the App Sandbox; the pane is not yet hidden under MAS_BUILD.",
         "ProcessRegistry.swift":
             "login zsh for the agent's host shell tool. Guest-only under MAS_BUILD (Phase 4).",
         "SandboxSSH.swift":

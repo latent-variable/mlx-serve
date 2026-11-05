@@ -3,7 +3,10 @@ import AppKit
 
 @MainActor
 class DownloadManager: ObservableObject {
-    @Published var downloads: [String: DownloadState] = [:]
+    @Published var downloads: [String: DownloadState] = [:] {
+        // Any download event can change what is on disk.
+        didSet { readyCache.removeAll() }
+    }
     /// New files per checked pack, keyed by repo (`PackUpdateCheck`).
     @Published var packUpdates: [String: PackUpdate] = [:]
     /// Latest HF listing per checked repo (path -> size), read by the socket's gem catalog.
@@ -169,6 +172,7 @@ class DownloadManager: ObservableObject {
     ///   convention; live: `DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf` in
     ///   antirez/deepseek-v4-gguf). Not loadable as a chat model — it's a
     ///   dependency of the main quant, downloaded alongside it.
+    /// - `*-Vision.gguf` — DeepSeek-V4.1's DS4 vision tower, loaded beside the set.
     ///
     /// This has to be exhaustive because discovery lists EVERY quant in a folder
     /// as a separately selectable model — anything not filtered here becomes a
@@ -183,8 +187,11 @@ class DownloadManager: ObservableObject {
         // 0731's replacement for the legacy MTP draft head — same --mtp slot
         // server-side, never a servable chat quant.
         return lower.hasPrefix("mmproj") || lower.contains("tokenizer")
+            || lower.hasPrefix("mtp-") // llama.cpp's head-only `convert --mtp` export
+            || lower.hasPrefix("dspark-") // Unsloth's DeepSeek-V4.1 stage bundle
             || lower.contains("-mtp-") || lower.contains("-mtp.")
             || lower.contains("-dspark-") || lower.contains("-dspark.")
+            || lower.hasSuffix("-vision.gguf") // DeepSeek-V4.1's DS4 vision tower beside the set
     }
 
     /// Retained for the mmproj-specific call sites (the Swift mirror of the
@@ -243,31 +250,35 @@ class DownloadManager: ObservableObject {
 
     /// Filter a HuggingFace `/tree/main?recursive=true` listing down to the
     /// files a model download actually needs: top-level config / tokenizer /
-    /// weight files, PLUS the MTP multi-token-prediction sidecar the server
-    /// auto-loads. Two nested sidecar layouts are pulled: `mtp/weights.safetensors`
+    /// weight files, PLUS the speculation sidecars the server auto-loads (the
+    /// pack's `drafter/`, and the MTP head). Two nested sidecar layouts are pulled: `mtp/weights.safetensors`
     /// (mlx-serve native) and `optiq/mtp.safetensors` (oMLX OptiQ). Without them
     /// an MTP model silently loses its speculative-decoding speedup because a
     /// non-recursive listing returns the dir as a bare entry that the
-    /// `type == "file"` filter drops. Everything else nested — `optiq/optiq_vision.safetensors`
-    /// (the server can't use a relocated vision tower, ~GB), `original/` or
-    /// alternate-precision shadow copies — is skipped so we don't pull tens of
-    /// GB of unused weights. This allowlist mirrors `mtp.sidecar_rel_paths`; keep
-    /// them in sync. Returns (path, size) pairs.
-    nonisolated static func selectNeededFiles(from entries: [[String: Any]], selection: FileSelection = .chatDefault) -> [(String, Int64)] {
+    /// `type == "file"` filter drops. A nested file the shard index names
+    /// (`indexedShards`) is part of the checkpoint and rides along; any other
+    /// nested file — `original/` or alternate-precision shadow copies — is
+    /// skipped so we don't pull tens of GB of unused weights. The sidecar
+    /// allowlist mirrors `mtp.sidecar_rel_paths`; keep them in sync. Returns
+    /// (path, size) pairs.
+    nonisolated static func selectNeededFiles(from entries: [[String: Any]], selection: FileSelection = .chatDefault,
+                                              indexedShards: Set<String> = []) -> [(String, Int64)] {
         // `.bin` is allowed because some packs ship an engine-READ binary
         // sidecar (qwen4_exp's `ngram_table.bin`, mmapped at serve time); the
         // extension allowlist used to drop it, so app-downloaded packs failed
         // to load while `mlx-serve pull` (a denylist) got it. Torch/flax shadow
         // weights stay out on both sides — same rule as `cli.shouldDownload`,
-        // keep them in sync.
-        let neededExtensions: Set<String> = ["json", "safetensors", "jinja", "model", "txt", "bin"]
+        // keep them in sync. `.tiktoken` is YuE2's tokenizer (rank file, no
+        // tokenizer.json): without it a downloaded pack never reaches ready.
+        let neededExtensions: Set<String> = ["json", "safetensors", "jinja", "model", "txt", "bin", "u32", "tiktoken"]
         return entries.compactMap { file -> (String, Int64)? in
             guard let path = file["path"] as? String,
                   let ftype = file["type"] as? String, ftype == "file" else { return nil }
             // Depth gate. Variant: exactly the named subfolder's own files
             // (`4bit/config.json`), never anything deeper. Chat default:
-            // top-level files + the MTP sidecar (native `mtp/` dir, or OptiQ's
-            // single `optiq/mtp.safetensors`). Media (recursive): keep nested
+            // top-level files + the pack's `drafter/` + the MTP sidecar (native
+            // `mtp/` dir, or OptiQ's single `optiq/mtp.safetensors`) + DeepSeek-V4.1's
+            // `engram/` tables + ModelOpt's `tensors/` shards (same list as `cli.shouldDownload`). Media (recursive): keep nested
             // weight subdirs (FLUX's transformer/vae/text_encoder, TTS's
             // speech_tokenizer).
             if let folder = selection.packFolder {
@@ -276,7 +287,10 @@ class DownloadManager: ObservableObject {
                 guard path.hasPrefix(sub + "/") else { return nil }
                 guard !path.dropFirst(sub.count + 1).contains("/") else { return nil }
             } else if !selection.recursive {
-                guard !path.contains("/") || path.hasPrefix("mtp/") || path == "optiq/mtp.safetensors" else { return nil }
+                guard !path.contains("/") || path.hasPrefix("mtp/") || path.hasPrefix(DrafterGems.packFolder + "/")
+                    || path.hasPrefix("engram/") || path.hasPrefix("tensors/") || path == "optiq/mtp.safetensors"
+                    || path.hasPrefix("audio_tokenizer/")   // a model that speaks: its speech codec (LFM3-Audio, Omni)
+                    || indexedShards.contains(path) else { return nil }
             }
             let ext = (path as NSString).pathExtension.lowercased()
             guard neededExtensions.contains(ext) || (path as NSString).lastPathComponent == "chat_template.jinja" else { return nil }
@@ -329,7 +343,7 @@ class DownloadManager: ObservableObject {
     /// root markers made its complete 8.9 GB download read as absent forever
     /// (the Kokoro-vs-`tts()` bug: the pane offers Download, the click reverts).
     /// The server has the same problem and solves it the same way — it
-    /// classifies that repo from the DiT's weight NAMES (`peekMfluxFlux2`), not
+    /// classifies that repo from the DiT's weight NAMES (the flux2 plugin's `claims`), not
     /// from a root file.
     nonisolated static func holdsWeightLayout(_ dir: String) -> Bool {
         let fm = FileManager.default
@@ -354,7 +368,13 @@ class DownloadManager: ObservableObject {
         case "AudioVideo": return "connector.safetensors"
         case "minimax_h3": return "transformer.safetensors"
         case "minimax_music3": return "vocoder.safetensors"
+        case "yue2": return "vae.safetensors"
         case "acestep": return "text_encoder/model.safetensors"
+        case "stable_audio3": return "t5gemma-b-b-ul2/model.safetensors"
+        case "moss_image": return "vae/diffusion_pytorch_model.safetensors"
+        case "trellis2": return "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16.safetensors"
+        case "pixal3d": return "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors"
+        case "idol": return "vae/model.safetensors"
         default: return nil
         }
     }
@@ -363,27 +383,86 @@ class DownloadManager: ObservableObject {
     /// completeness marker is missing.
     nonisolated static func holdsCompleteMediaPack(_ dir: String) -> Bool {
         let fm = FileManager.default
-        guard let data = fm.contents(atPath: (dir as NSString).appendingPathComponent("config.json")),
-              let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let mt = cfg["model_type"] as? String,
+        let cfg = fm.contents(atPath: (dir as NSString).appendingPathComponent("config.json"))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        guard let mt = cfg?["model_type"] as? String ?? markerModelType(inDir: dir),
               let marker = requiredMediaMarker(modelType: mt) else { return true }
         return fm.fileExists(atPath: (dir as NSString).appendingPathComponent(marker))
     }
 
     /// Laya typed-decision checkpoints ship no root config.json; these two
-    /// files identify one. Twin of `model_discovery.peekLayaCheckpoint`.
+    /// files identify one. Twin of the laya plugin's `claims`.
     nonisolated static let layaMarkers = ["rl_agent_config.json", "encoder/config.json"]
 
     /// The model_type a marker file decides, or nil. Laya has no root config.json;
     /// a Kev pack's names its Qwen trunk, so `kev_config.json` wins. Twin of
-    /// `model_discovery.peekKevPack`.
+    /// the kev plugin's `claims`.
     nonisolated static func markerModelType(inDir dir: String) -> String? {
         let fm = FileManager.default
+        if fm.fileExists(atPath: (dir as NSString).appendingPathComponent("joint_head_config.json")) { return "clef" }
         if layaMarkers.allSatisfy({ fm.fileExists(atPath: (dir as NSString).appendingPathComponent($0)) }) {
             return "laya"
         }
         if fm.fileExists(atPath: (dir as NSString).appendingPathComponent("kev_config.json")) { return "kev" }
+        if isD1Config(atPath: (dir as NSString).appendingPathComponent("config.json")) { return "d1" }
+        if isStableAudio3Config(atPath: (dir as NSString).appendingPathComponent("model_config.json")) { return "stable_audio3" }
+        if isIdolConfig(atPath: (dir as NSString).appendingPathComponent("config.json")) { return "idol" }
+        if isPixal3dPipeline(inDir: dir) { return "pixal3d" }
+        if isTrellis2Pipeline(atPath: (dir as NSString).appendingPathComponent("pipeline.json")) { return "trellis2" }
+        if qwen3AsrThinker(dir) == "qwen3_forced_aligner" { return "qwen3_forced_aligner" }
         return nil
+    }
+
+    /// A D1 decision checkpoint (LiquidAI/d1-3B): its LFM2-VL config's `auto_map` names the card's own class,
+    /// which is what tells it from a chat LFM2.5-VL. Twin of the d1 plugin's `claims`.
+    nonisolated static func isD1Config(atPath path: String) -> Bool {
+        guard let data = FileManager.default.contents(atPath: path),
+              let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let map = cfg["auto_map"] as? [String: Any] else { return false }
+        return map["AutoModel"] as? String == "modeling_d1.D1Model"
+    }
+
+    /// speridlabs' Idol release: its config.json has no `model_type`, its denoiser's class name tells it. Twin of the
+    /// idol plugin's `claims`.
+    nonisolated static func isIdolConfig(atPath path: String) -> Bool {
+        guard let data = FileManager.default.contents(atPath: path),
+              let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return (cfg["denoiser"] as? [String: Any])?["name"] as? String == "LatentSeqMMFlowModel"
+    }
+
+    /// Microsoft's TRELLIS.2 image-to-3D pack: no root config.json, its `pipeline.json` names the pipeline.
+    /// Twin of `model_discovery.peekTrellis2Pipeline`.
+    nonisolated static func isTrellis2Pipeline(atPath path: String) -> Bool {
+        guard let data = FileManager.default.contents(atPath: path),
+              let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return cfg["name"] as? String == "Trellis2ImageTo3DPipeline"
+    }
+
+    /// TencentARC's Pixal3D pack: TRELLIS.2's pipeline.json, name and all, over flows whose own config reads
+    /// `"image_attn_mode": "proj"`. Twin of `model_discovery.peekPixal3dPipeline`.
+    nonisolated static func isPixal3dPipeline(inDir dir: String) -> Bool {
+        let pipe = (dir as NSString).appendingPathComponent("pipeline.json")
+        guard isTrellis2Pipeline(atPath: pipe),
+              let data = FileManager.default.contents(atPath: pipe),
+              let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = (cfg["args"] as? [String: Any])?["models"] as? [String: Any],
+              let ss = models["sparse_structure_flow_model"] as? String,
+              let flowData = FileManager.default.contents(atPath: (dir as NSString).appendingPathComponent(ss + ".json")),
+              let flow = try? JSONSerialization.jsonObject(with: flowData) as? [String: Any] else { return false }
+        return (flow["args"] as? [String: Any])?["image_attn_mode"] as? String == "proj"
+    }
+
+    /// A stable-audio-tools inpainting model conditioned on T5Gemma: the
+    /// Stable Audio 3 family as Stability publishes it. Twin of
+    /// the stable_audio3 plugin's `claims`.
+    nonisolated static func isStableAudio3Config(atPath path: String) -> Bool {
+        guard let data = FileManager.default.contents(atPath: path),
+              let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              cfg["model_type"] as? String == "diffusion_cond_inpaint",
+              let model = cfg["model"] as? [String: Any],
+              let cond = model["conditioning"] as? [String: Any],
+              let configs = cond["configs"] as? [[String: Any]] else { return false }
+        return configs.contains { $0["type"] as? String == "t5gemma" }
     }
 
     /// File size in bytes, resolving symlinks first. Hugging Face snapshots
@@ -751,7 +830,16 @@ class DownloadManager: ObservableObject {
                 throw URLError(.cannotParseResponse)
             }
 
-            let neededFiles = Self.selectNeededFiles(from: files, selection: selection)
+            // The shard index lists the checkpoint's own parts; `weightDefect`
+            // flags the folder "Missing shards" for any it names that is absent.
+            // Unreadable = the old allowlist alone.
+            var indexed: Set<String> = []
+            if files.contains(where: { ($0["path"] as? String) == "model.safetensors.index.json" }),
+               let indexURL = URL(string: "https://huggingface.co/\(repoId)/resolve/main/model.safetensors.index.json"),
+               let (indexData, _) = try? await DownloadSession.shared.data(for: Self.hfApiRequest(indexURL)) {
+                indexed = Self.indexedShardNames(fromIndexData: indexData) ?? []
+            }
+            let neededFiles = Self.selectNeededFiles(from: files, selection: selection, indexedShards: indexed)
 
             // A download that matches NOTHING must say so. `LiquidAI/LFM2.5-2.6B-MLX`
             // keeps every model in a quant subfolder and has no loadable file at
@@ -899,6 +987,7 @@ class DownloadManager: ObservableObject {
             await self?.download(repoId: repoId)
             self?.finalizeIfCancelled(repoId: repoId)
             await self?.autoFillSocket(for: repoId)
+            await self?.fetchCompanions(for: repoId)
             self?.activeTasks.removeValue(forKey: repoId)
             onFinish()
         }
@@ -998,6 +1087,12 @@ class DownloadManager: ObservableObject {
         downloads.removeValue(forKey: gem.repo)
     }
 
+    /// The model's own bytes for a gem fit check: `fits` bills the gem, so the
+    /// pack's `drafter/` must not be counted on both sides.
+    nonisolated static func packBytesWithoutDrafter(_ entries: [[String: Any]]) -> Int64 {
+        selectNeededFiles(from: entries, selection: .chatWithoutDrafter).reduce(0) { $0 + $1.1 }
+    }
+
     /// A fresh download fills its socket with the default gem when it fits in
     /// RAM and the user has not chosen one. A pack's own `drafter/` stays
     /// "auto" (the server finds it); a separate repo is written as a path.
@@ -1010,7 +1105,7 @@ class DownloadManager: ObservableObject {
         let files = PackUpdateCheck.sizes(entries)
         packListings[repoId] = files
         let gems = DrafterGems.gems(forRepoId: repoId, packFiles: files, localDrafter: false, mtpAvailable: false)
-        let modelGB = Double(Self.selectNeededFiles(from: entries).reduce(0) { $0 + $1.1 }) / 1e9
+        let modelGB = Double(Self.packBytesWithoutDrafter(entries)) / 1e9
         guard let gem = DrafterGems.defaultGem(gems),
               DrafterGems.fits(gem, modelGB: modelGB, memory: .current()) else { return }
         if gemPath(gem, modelDir: modelDir) == nil {
@@ -1022,6 +1117,33 @@ class DownloadManager: ObservableObject {
         DrafterSocket.gem(gem).write(into: &o, gemPath: path)
         file.set(o, for: modelDir)
         try? file.save()
+    }
+
+    // MARK: - Qwen3-ASR's companions
+
+    /// The model the server times transcripts with (verbose_json, srt, vtt).
+    nonisolated static let alignerRepo = "mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
+    /// The model it labels their speakers with (diarized_json).
+    nonisolated static let diarizerRepo = "mlx-community/Nemotron-3-Diarization-8bit"
+
+    /// The thinker's model_type in a Qwen3-ASR pack: `qwen3_asr`, or `qwen3_forced_aligner` for its
+    /// aligner, whose root says `qwen3_asr` too. Nil for any other model.
+    nonisolated static func qwen3AsrThinker(_ dir: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: (dir as NSString).appendingPathComponent("config.json")),
+              let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              cfg["model_type"] as? String == "qwen3_asr" else { return nil }
+        return (cfg["thinker_config"] as? [String: Any])?["model_type"] as? String
+    }
+
+    /// A fresh Qwen3-ASR download brings the aligner and the diarizer beside
+    /// it, into the same root the server discovers them in. Failures stay
+    /// silent: the user asked for the ASR, which serves without them.
+    private func fetchCompanions(for repoId: String) async {
+        guard !Task.isCancelled, downloads[repoId]?.status == .completed,
+              let dir = existingModelDir(for: repoId), Self.qwen3AsrThinker(dir) == "qwen3_asr" else { return }
+        for repo in [Self.alignerRepo, Self.diarizerRepo] where existingModelDir(for: repo) == nil {
+            await download(repoId: repo, alertOnFailure: false)
+        }
     }
 
     // MARK: - Turbo LoRA (on demand)
@@ -1120,7 +1242,7 @@ class DownloadManager: ObservableObject {
 
     private static func fileSelections(_ selection: UpdateSelection) -> [FileSelection] {
         switch selection {
-        case .chat(let drafter): return [.chatDefault] + (drafter ? [.packFolder(DrafterGems.packFolder)] : [])
+        case .chat(let drafter): return [drafter ? .chatDefault : .chatWithoutDrafter]
         case .variant(let sub): return [.mlxVariant(sub)]
         case .media(let sel): return [sel]
         case .gguf: return []
@@ -1222,8 +1344,18 @@ class DownloadManager: ObservableObject {
         bundle.components.allSatisfy { componentReady($0) }
     }
 
+    /// Panes ask this from their `body`, which re-runs whenever anything they observe publishes;
+    /// every answer is a walk of the model folders. Remembered for a moment, and dropped by any
+    /// download event (`downloads` changing) and on delete.
+    private var readyCache: [String: (ready: Bool, at: Date)] = [:]
+    private static let readyCacheSeconds: TimeInterval = 3
+
     func componentReady(_ comp: MediaComponent) -> Bool {
-        Self.componentReady(comp, roots: readRoots)
+        let key = comp.repo + "|" + comp.readyMarkers.joined(separator: ",")
+        if let hit = readyCache[key], Date().timeIntervalSince(hit.at) < Self.readyCacheSeconds { return hit.ready }
+        let ready = Self.componentReady(comp, roots: readRoots)
+        readyCache[key] = (ready, Date())
+        return ready
     }
 
     /// Multi-root form: ready in ANY owned root — a pack downloaded before the
@@ -1802,7 +1934,8 @@ class DownloadManager: ObservableObject {
                     source: source,
                     kind: .base,
                     quantFile: primaryBase,
-                    quantLabel: quant.label
+                    quantLabel: quant.label,
+                    sizeBytes: Int64(size)
                 )
             }
         }
@@ -1843,6 +1976,7 @@ class DownloadManager: ObservableObject {
             numExperts: meta.numExperts,
             activeExperts: meta.activeExperts,
             hasMtpHead: dirHasMtpHead(atDir: resolved),
+            sizeBytes: Int64(size),
             defect: defect
         )]
     }
@@ -1876,11 +2010,16 @@ class DownloadManager: ObservableObject {
     nonisolated static func missingIndexedShards(inDir dir: String) -> Bool? {
         let indexPath = (dir as NSString).appendingPathComponent("model.safetensors.index.json")
         guard let data = FileManager.default.contents(atPath: indexPath),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let map = obj["weight_map"] as? [String: String] else { return nil }
-        let declared = Set(map.values)
-        if declared.isEmpty { return nil }
+              let declared = indexedShardNames(fromIndexData: data) else { return nil }
         return declared.contains { !FileManager.default.fileExists(atPath: (dir as NSString).appendingPathComponent($0)) }
+    }
+
+    /// The shards a `model.safetensors.index.json` names (paths relative to the
+    /// checkpoint dir, nested ones included); nil when it names none.
+    nonisolated static func indexedShardNames(fromIndexData data: Data) -> Set<String>? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let map = obj["weight_map"] as? [String: String], !map.isEmpty else { return nil }
+        return Set(map.values)
     }
 
     /// Classify a safetensors directory: nil when it holds a loadable
@@ -1930,7 +2069,7 @@ class DownloadManager: ObservableObject {
         guard let data = fm.contents(atPath: (dir as NSString).appendingPathComponent("model.safetensors.index.json")),
               let text = String(data: data, encoding: .utf8) else { return false }
         return ["\"mtp.fc.weight\"", "\"language_model.mtp.fc.weight\"", "\"mtp.eh_proj.weight\"",
-                "\"language_model.mtp.eh_proj.weight\"", "\"language_model.mtp.fc_hidden.weight\""]
+                "\"language_model.mtp.eh_proj.weight\"", "\"language_model.mtp.fc_hidden.weight\"", "\"mtp.fc_hidden.weight\""]
             .contains { text.contains($0) }
     }
 
@@ -2263,6 +2402,7 @@ class DownloadManager: ObservableObject {
     }
 
     func deleteModel(repoId: String) {
+        readyCache.removeAll()
         removeFromDisk(repoId: repoId)
     }
 
@@ -2277,6 +2417,7 @@ class DownloadManager: ObservableObject {
     /// because the DEFAULT must stay refusal: every other caller keeps the
     /// old behaviour by not passing it.
     func deleteModel(_ model: LocalModel, unlocked: Bool = false) {
+        readyCache.removeAll()
         // Only ~/.mlx-serve/models is ours to delete. LM Studio, the Hugging Face
         // hub cache, and custom-root models are owned by another tool or the user
         // (deleting an HF snapshot orphans shared blobs and dangles refs/main; the

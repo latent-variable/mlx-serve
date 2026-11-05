@@ -12,6 +12,10 @@ import AppKit
 @main
 struct MLXCoreEntryPoint {
     static func main() {
+        // Before anything localizes a string: a catalog is read per process.
+        AppLanguageOverride.install(
+            preference: UserDefaults.standard.string(forKey: InterfacePrefKey.language),
+            localizations: Bundle.main.localizations)
         let args = CommandLine.arguments.dropFirst()
         if args.first == "bench" { BenchmarkCLI.main(Array(args.dropFirst())) }
         let env = ProcessInfo.processInfo.environment
@@ -138,6 +142,7 @@ struct MLXCoreApp: App {
                 .environmentObject(appState.videoGen)
                 .environmentObject(appState.audioGen)
                 .environmentObject(appState.musicGen)
+                .environmentObject(appState.soundGen)
                 .environmentObject(appState.model3dGen)
                 // Settings, Tasks and Agents render here as modes too, so their
                 // objects ride this scene (`ChatWorkspace`).
@@ -195,8 +200,8 @@ struct MLXCoreApp: App {
         }
         .defaultSize(width: 1040, height: 680)
 
-        Window("Decisions", id: "layaDecisions") {
-            LayaDecisionsWindow()
+        Window("Decisions", id: "decisions") {
+            DecisionsWindow()
                 .environmentObject(appState)
                 .environmentObject(appState.server)
                 .appAppearance()
@@ -285,11 +290,12 @@ struct MLXCoreApp: App {
 
                 // Pull in the latest built-in prompt and skills when ours have moved
                 // ahead of the on-disk copies. Backs up the user's edits first.
+                // Always enabled: this scene observes nothing, so a disabled
+                // check would go stale; the flow says when nothing is outdated.
                 Button {
                     AgentPrompt.runSystemPromptUpdateFlow()
                 } label: { Text("Update System Prompt and Skills to Latest…")
                     .font(.app(.body)) }
-                .disabled(!AgentPrompt.isPromptOrSkillsOutdated())
 
                 Button {
                     let path = NSString(string: "~/.mlx-serve/memory.md").expandingTildeInPath
@@ -385,7 +391,7 @@ struct MLXCoreApp: App {
                     Button {
                         launchClaudeCodeWithPicker(
                             baseURL: appState.server.baseURL,
-                            serverContextLength: appState.server.chatModelInfo?.contextLength)
+                            serverBudget: appState.server.chatModelInfo?.agentBudget)
                     } label: { Text("Launch Claude Code…")
                         .font(.app(.body)) }
                 }
@@ -414,10 +420,12 @@ private struct MenuBarLabel: View {
     @ObservedObject var server: ServerManager
     @ObservedObject var voice: VoiceModeController
     @ObservedObject var browser: BrowserManager
+    /// A transcript can start by itself (camera on), so the icon says when one is recording.
+    @ObservedObject var transcript = TrayTranscript.shared
     let open: (String) -> Void
 
     var body: some View {
-        Image(nsImage: voice.isActive ? activeIcon : MLXCoreApp.menuBarIcon(for: server.status))
+        Image(nsImage: voice.isActive || transcript.isRecording ? activeIcon : MLXCoreApp.menuBarIcon(for: server.status))
             // A tapped task notification: the Tasks pane is part of the chat
             // window, so this brings that window up on it and TaskListPane
             // consumes the id in .onAppear/.onChange.

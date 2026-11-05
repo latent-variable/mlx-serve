@@ -1,35 +1,16 @@
 #!/bin/bash
-# Guard: every model answers with ITS OWN tokenizer, template and grammar table.
+# test_hot_switch_state.sh — every model answers with ITS OWN tokenizer, template and grammar table. Several models
+# interleave on one server (A, B, C, then A again: a singleton built by A leaks into B, and A's second visit catches a
+# table rebuilt for B).
 #
-# The per-model grammar-table bug (2026-08-11) was exactly this class and showed
-# up only as bad OUTPUT: the JSON grammar mask's token->bytes table was a
-# process-wide singleton built by whichever model served the first constrained
-# request, so with the multi-model registry every OTHER model masked its logits
-# with a foreign vocabulary and `json_object` answered "## Attributes" /
-# "郑重(郑重)". Nothing crashed, nothing logged an error.
+#   ./tests/test_hot_switch_state.sh [model_dir_root] [port]   # HOT_SWITCH_MODELS=<csv of ids>
 #
-# Anything DERIVED from a model — tokenizer, chat template, grammar table,
-# prefix cache — has to be per-model, and a hot switch is where a leak shows.
-# So: several models in sequence on ONE server, interleaved and then repeated,
-# each asked something that exercises a different derived structure.
-#
-# Per model, per round:
-#   • tokenizer  — /tokenize round-trips a mixed digits+unicode string to
-#                  exactly the byte sequence it was given, and the token COUNT
-#                  is stable for that model across rounds (a foreign tokenizer
-#                  changes the count, e.g. the digit-grouping class)
-#   • template   — a plain chat turn answers non-empty with no markup leak
-#   • grammar    — response_format json_object yields PARSEABLE JSON, and the
-#                  server logs a grammar build for THIS model
-#
-# The interleaving is the point: model A, then B, then A again. A singleton
-# built by A survives into B, and the second visit to A is where a table
-# rebuilt for B would be caught.
-#
-# Usage: ./tests/test_hot_switch_state.sh [model_dir_root] [port]
-#   HOT_SWITCH_MODELS=<csv of ids>  — override the models used
+# Per model per round: /tokenize returns a stable token count for that model across switches, a plain turn answers
+# with no markup leak, `json_object` yields parseable JSON, and the log shows a grammar build for that model. A
+# failure is bad OUTPUT, not a crash (the per-model grammar table story in docs/gotchas/server-http.md).
 
 set -u
+source "$(dirname "$0")/lib/server.sh"
 
 ROOT="${1:-$HOME/.mlx-serve/models}"
 PORT="${2:-8134}"
@@ -44,15 +25,14 @@ bad() { echo -e "  ${RED}FAIL${NC} $1"; shift; for l in "$@"; do echo "        $
 [ -x ./zig-out/bin/mlx-serve ] || { echo "FAIL: build first (zig build -Doptimize=ReleaseFast)"; exit 1; }
 
 LOG=$(mktemp /tmp/hot_switch.XXXXXX)
-pkill -f "bin/mlx-serve" 2>/dev/null; sleep 1
+pkill -f "mlx-serve.*--port $PORT" 2>/dev/null; sleep 1
 ./zig-out/bin/mlx-serve serve --port "$PORT" --host 127.0.0.1 --model-dir "$ROOT" \
     --log-level debug > "$LOG" 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; rm -f "$LOG" "${TOKCOUNT_FILE:-}"; }
 trap cleanup EXIT
 
-for i in $(seq 1 90); do curl -sf "$BASE/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "$BASE/health" >/dev/null 2>&1 || { echo "FAIL: server did not start"; exit 1; }
+srv_wait_health "$BASE" 90 1 || { echo "FAIL: server did not start"; exit 1; }
 
 # Pick the smallest text models the box actually has — this test is about state
 # leaking BETWEEN models, so the cheapest two or three that differ in family are
@@ -70,7 +50,8 @@ def ok(m):
     meta = m.get('meta') or {}
     # Local packs only: a provider or LAN row is someone else's server.
     local = 'provider' not in m and m.get('state') != 'remote'
-    return local and 'chat' in caps and (meta.get('bytes_on_disk') or m.get('bytes_on_disk') or 0) < 12e9
+    # An embedder on a decoder arch advertises chat too, and only babbles.
+    return local and 'chat' in caps and 'embeddings' not in caps and (meta.get('bytes_on_disk') or m.get('bytes_on_disk') or 0) < 12e9
 picked = [m['id'] for m in sorted(d, key=lambda m: m.get('bytes_on_disk') or 0) if ok(m)]
 print('\n'.join(picked[:3]))
 " 2>/dev/null)

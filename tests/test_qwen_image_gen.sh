@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
-# Qwen-Image-2.1 on the ONE main server: headless boot -> load the converted
-# pack by absolute path -> txt2img PNG of the requested size -> real CFG engages
-# (two forwards per step, by the log) and changes the render -> img2img ->
-# instruction edit (mode:"edit", the pack's Qwen3-VL tower): happy path,
-# no-size output aspect from the LAST reference, multi-reference + the cap,
-# edit CFG, the named 400s, the OpenAI multipart surface -> a SECOND
-# short-lived server on a towerless pack refusing edits by name -> unload.
+# test_qwen_image_gen.sh — Qwen-Image-2.1 end to end on a tower pack: load by path (`image` capability + the backend's
+# ready line), txt2img PNG at the requested size, CFG by ENGAGEMENT (`one forward per step` at guidance 1.0, `two
+# forwards per step` with guidance_scale, and the render differs), img2img, instruction edit (mode:"edit": `[qwen-image]
+# edit … refs=N`; a sizeless edit takes the LAST reference's aspect, 4:3 -> 1184x896 exact; multi-ref refs=3 + the
+# 4-image cap 400; edit CFG; the named 400s), the OpenAI multipart surface, `transparent:true` RGBA (JSON, SSE, edit)
+# and RGB restored after, the Q4 wide-GEMM arm at 768x768 on a 4-bit pack, and a SECOND server on a towerless pack
+# refusing edits by name. Alive + no MLX error. 6 steps: the wire contract, never picture quality.
 #
-# SKIPs without a pack (tests/convert_qwen_image21_weights.py). Few steps:
-# only the wire contract is asserted, never picture quality.
+#   QWEN_IMAGE_MODEL=<dir> ./tests/test_qwen_image_gen.sh [port]
+#   QWEN_IMAGE_NOTOWER_MODEL=<dir>   pack without model.visual.* (default: the tiny fixture pack under ~/claude-tmp)
 #
-# Usage: QWEN_IMAGE_MODEL=<dir> ./tests/test_qwen_image_gen.sh [port]
-#        QWEN_IMAGE_NOTOWER_MODEL=<dir> — pack without model.visual.* for the
-#        400 arm (default: the tiny fixture pack under ~/claude-tmp)
+# SKIPs without a pack. Parity: tests/dump_qwen_image21_fixtures.py + QWEN_IMAGE_TEST_MODEL / QWEN_IMAGE_FIXTURE.
+
 set -uo pipefail
+source "$(dirname "$0")/lib/server.sh"
 PORT="${1:-11398}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/zig-out/bin/mlx-serve"
 [ -x "$BIN" ] || { echo "FAIL: build first (zig build -Doptimize=ReleaseFast)"; exit 1; }
 MODEL="${QWEN_IMAGE_MODEL:-$(ls -d /Users/Shared/mlx-serve/ddalcu/Qwen-Image-2.1-MLX-Serve-* ~/.mlx-serve/models/ddalcu/Qwen-Image-2.1-MLX-Serve-* 2>/dev/null | head -1)}"
-[ -n "$MODEL" ] && [ -f "$MODEL/config.json" ] || { echo "SKIP: no Qwen-Image-2.1 pack (set QWEN_IMAGE_MODEL)"; exit 0; }
+[ -n "$MODEL" ] && { [ -f "$MODEL/config.json" ] || [ -f "$MODEL/model_index.json" ]; } || { echo "SKIP: no Qwen-Image-2.1 pack (set QWEN_IMAGE_MODEL)"; exit 0; }
+# A pack with its own sampling grid (Turbo's `sample_sigmas`) runs that many steps whatever is requested.
+STEPS="$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1])).get('sample_sigmas') or [0]*6))" "$MODEL/model_index.json" 2>/dev/null || echo 6)"
 NOTOWER="${QWEN_IMAGE_NOTOWER_MODEL:-$HOME/claude-tmp/qwen21-edit/run1/pack-notower}"
 
 OUT="$(mktemp -d)"
@@ -28,11 +30,7 @@ LOG="$OUT/server.log"
 SRV=$!
 SRV2=""
 trap 'kill $SRV $SRV2 2>/dev/null' EXIT
-for _ in $(seq 1 60); do
-  curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
-  kill -0 $SRV 2>/dev/null || { echo "FAIL: server did not start"; tail -5 "$LOG"; exit 1; }
-  sleep 1
-done
+srv_wait_health "http://127.0.0.1:$PORT" 60 1 "$SRV" || kill -0 "$SRV" 2>/dev/null || { echo "FAIL: server did not start"; tail -5 "$LOG"; exit 1; }
 FAILS=0
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
@@ -77,6 +75,9 @@ m = [x for x in json.load(sys.stdin)['data'] if x['id'] == '$ID']
 assert m and m[0]['state'] == 'ready' and 'image' in m[0]['capabilities'], m" \
   && pass "load by path -> ready with the image capability" || fail "pack did not load as an image model"
 grep -q "\[image\] Qwen-Image-2.1 ready" "$LOG" && pass "qwen_image backend engaged" || fail "no backend ready line"
+if [ "$STEPS" != 6 ]; then
+  grep -q "$STEPS steps from sample_sigmas)" "$LOG" && pass "the pack's sample_sigmas grid sets $STEPS steps" || fail "sample_sigmas grid not engaged"
+fi
 
 # Loaded and unloaded rows must both report the pack's real model_type, never
 # the image modality's "flux2" marker (a client watching the list would see
@@ -105,8 +106,10 @@ b = base64.b64decode(json.load(open(sys.argv[1]))["data"][0]["b64_json"])
 assert b[:8] == b"\x89PNG\r\n\x1a\n" and struct.unpack(">II", b[16:24]) == (768, 768)
 PY
   png_ok=$?
-  [ "$code" = 200 ] && [ "$png_ok" = 0 ] && grep -q '\[mf-linear\] dq-gemm engaged (rows=' "$LOG" \
-    && pass "Q4 wide GEMM engages at 768x768" || fail "Q4 wide GEMM did not engage"
+  # On NAX with the int8 DiT route (the default past 64 GiB) the packed wide GEMM is replaced by
+  # the int8 GEMM: either engagement line is the 4-bit wide path doing its work.
+  [ "$code" = 200 ] && [ "$png_ok" = 0 ] && grep -qE '\[mf-linear\] dq-gemm engaged \(rows=|\[w8a8\] engaged' "$LOG" \
+    && pass "Q4 wide GEMM (or the int8 route) engages at 768x768" || fail "neither the Q4 wide GEMM nor the int8 route engaged"
 fi
 
 [ "$(gen "$OUT/b.json" '"prompt":"a red fox in the snow","guidance_scale":4,"negative_prompt":"blurry"')" = 200 ] && png_check "$OUT/b.json" \
@@ -156,10 +159,12 @@ done
 [ "$(gen "$OUT/e1.json" "\"prompt\":\"add a small red hat to the subject\",\"mode\":\"edit\",\"strength\":0.5,\"image\":\"$(cat "$OUT/src43.b64")\"")" = 200 ] \
   && [ "$(png_dims "$OUT/e1.json")" = "512x512" ] \
   && pass "instruction edit -> 512x512 PNG (valid strength accepted+ignored)" || fail "instruction edit"
-grep -q "\[qwen-image\] edit 512x512 refs=1 steps=6 guidance=1.0 refres=1024 (one forward per step)" "$LOG" \
+grep -q "\[qwen-image\] edit 512x512 refs=1 steps=$STEPS guidance=1.0 refres=1024 (one forward per step)" "$LOG" \
   && pass "edit engaged (one forward per step)" || fail "no edit engagement line"
 grep -q "\[image\] edit: reference .* bytes (byte-based backend)" "$LOG" \
   && pass "byte-based edit transport engaged" || fail "no byte-based edit reference line"
+[ "$(gen "$OUT/e1a.json" "\"prompt\":\"remove the background\",\"mode\":\"edit\",\"transparent\":true,\"image\":\"$(cat "$OUT/src43.b64")\"")" = 200 ] \
+  && png_check "$OUT/e1a.json" 6 && pass "transparent edit -> RGBA PNG" || fail "transparent edit"
 
 # ── no size: the output follows the LAST reference's aspect at 1024², snapped
 # /32 — the pinned qwenEditDims chain (4:3 -> 1184x896 EXACT; a floor would
@@ -175,14 +180,15 @@ grep -q "edit: target 1024x1024 -> 1184x896 (last reference is 512x384, size mat
 [ "$(genq "$OUT/e3.json" "\"prompt\":\"compose the subject and the two references into one image\",\"mode\":\"edit\",\"image\":\"$(cat "$OUT/src43.b64")\",\"ref_images\":[\"$(cat "$OUT/ref256.b64")\",\"$(cat "$OUT/refp.b64")\"]")" = 200 ] \
   && [ "$(png_dims "$OUT/e3.json")" = "896x1184" ] \
   && pass "multi-ref edit -> 896x1184 (LAST reference's aspect)" || fail "multi-ref edit"
-grep -q "\[qwen-image\] edit 896x1184 refs=3 steps=6 guidance=1.0 refres=1024 (one forward per step)" "$LOG" \
+grep -q "\[qwen-image\] edit 896x1184 refs=3 steps=$STEPS guidance=1.0 refres=1024 (one forward per step)" "$LOG" \
   && pass "multi-ref edit engaged (refs=3)" || fail "no multi-ref engagement line"
 grep -q "\[image\] edit ref 3: .* bytes (byte-based backend)" "$LOG" \
   && pass "second extra reference engaged (edit ref 3)" || fail "no edit ref 3 line"
 
 # ── the cap: image + 10 dummy refs (11 total) -> 400 by name BEFORE any
 # denoise (qwen's cap is 10 total — the other editors' is 4)
-code="$(gen "$OUT/e4.json" "\"prompt\":\"x\",\"mode\":\"edit\",\"image\":\"QQ==\",\"ref_images\":[\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\"]")"
+R="\"$(cat "$OUT/ref256.b64")\""
+code="$(gen "$OUT/e4.json" "\"prompt\":\"x\",\"mode\":\"edit\",\"image\":\"$(cat "$OUT/src43.b64")\",\"ref_images\":[$R,$R,$R,$R,$R,$R,$R,$R,$R,$R]")"
 [ "$code" = 400 ] && grep -q "too many reference images" "$OUT/e4.json" && grep -q "at most 9" "$OUT/e4.json" \
   && pass "image + 10 ref_images -> 400 (cap: 10 total)" || fail "over-cap edit returned $code"
 
@@ -205,17 +211,22 @@ code="$(curl -s -m 60 "http://127.0.0.1:$PORT/v1/images/generations" -H 'Content
   -o "$OUT/e10.json" -w '%{http_code}')"
 [ "$code" = 400 ] && grep -q "ref_resolution.*\[256,1024\]" "$OUT/e10.json" \
   && pass "ref_resolution 1536 -> 400 (named range)" || fail "ref_resolution out-of-range returned $code"
-grep -q "\[qwen-image\] edit 256x256 refs=5 steps=6 guidance=1.0 refres=1024 (one forward per step)" "$LOG" \
+grep -q "\[qwen-image\] edit 256x256 refs=5 steps=$STEPS guidance=1.0 refres=1024 (one forward per step)" "$LOG" \
   && pass "5-ref edit engaged (refs=5)" || fail "no 5-ref engagement line"
 
 # ── the request-scope residency bill: a joint sequence past any working set
 #    refuses BY NAME (the #496 regime: high ref counts used to hang the first
-#    denoise step with no error). 10 refs + a 2048x2048 target bills >100 GB.
+#    denoise step with no error). 10 refs + a 2048x2048 target bills >100 GB,
+#    which a 192 GB+ Mac holds, so there it is a real job, not a refusal.
+if [ "$(sysctl -n hw.memsize)" -ge $((192 * 1024 * 1024 * 1024)) ]; then
+  echo "SKIP: over-budget edit: the >100 GB bill fits this Mac's working set"
+else
 code="$(curl -s -m 60 "http://127.0.0.1:$PORT/v1/images/generations" -H 'Content-Type: application/json' \
-  -d "{\"model\":\"$ID\",\"size\":\"2048x2048\",\"steps\":6,\"seed\":3,\"prompt\":\"compose\",\"mode\":\"edit\",\"image\":\"QQ==\",\"ref_images\":[\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\",\"QQ==\"]}" \
+  -d "{\"model\":\"$ID\",\"size\":\"2048x2048\",\"steps\":6,\"seed\":3,\"prompt\":\"compose\",\"mode\":\"edit\",\"image\":\"$(cat "$OUT/src43.b64")\",\"ref_images\":[$R,$R,$R,$R,$R,$R,$R,$R,$R]}" \
   -o "$OUT/e11.json" -w '%{http_code}')"
 [ "$code" = 400 ] && grep -q "working set" "$OUT/e11.json" \
   && pass "over-budget edit -> 400 named (bill vs headroom)" || fail "over-budget edit returned $code"
+fi
 
 # ── edit CFG: guidance 2.5 + negative prompt runs TWO forwards per step and
 # changes the render (same seed/steps/source/prompt as the happy path — only
@@ -223,7 +234,7 @@ code="$(curl -s -m 60 "http://127.0.0.1:$PORT/v1/images/generations" -H 'Content
 [ "$(gen "$OUT/e5.json" "\"prompt\":\"add a small red hat to the subject\",\"mode\":\"edit\",\"guidance_scale\":2.5,\"negative_prompt\":\"blurry, low quality\",\"image\":\"$(cat "$OUT/src43.b64")\"")" = 200 ] \
   && [ "$(png_dims "$OUT/e5.json")" = "512x512" ] \
   && pass "guided edit -> PNG" || fail "guided edit"
-grep -q "\[qwen-image\] edit 512x512 refs=1 steps=6 guidance=2.5 refres=1024 (two forwards per step)" "$LOG" \
+grep -q "\[qwen-image\] edit 512x512 refs=1 steps=$STEPS guidance=2.5 refres=1024 (two forwards per step)" "$LOG" \
   && pass "edit CFG engaged (two forwards per step)" || fail "edit CFG did not engage"
 cmp -s "$OUT/e1.json" "$OUT/e5.json" && fail "edit guidance did not change the render" || pass "edit guidance changes the render"
 
@@ -250,8 +261,8 @@ code="$(curl -s -m 3600 -X POST "http://127.0.0.1:$PORT/v1/images/edits" \
   -F "size=256x256" -F "steps=6" -F "ref_resolution=512" -o "$OUT/mp.json" -w '%{http_code}')"
 [ "$code" = 200 ] && [ "$(png_dims "$OUT/mp.json")" = "256x256" ] \
   && pass "/v1/images/edits (multipart, 2 files) -> 256x256 PNG" || fail "multipart edit returned $code"
-grep -q "\[qwen-image\] edit 256x256 refs=2 steps=6 guidance=1.0 refres=512 (one forward per step)" "$LOG" \
-  && pass "multipart carried both files + the sampling knobs (refs=2 steps=6 refres=512)" || fail "multipart edit lost a reference or a knob"
+grep -q "\[qwen-image\] edit 256x256 refs=2 steps=$STEPS guidance=1.0 refres=512 (one forward per step)" "$LOG" \
+  && pass "multipart carried both files + the sampling knobs (refs=2 steps=$STEPS refres=512)" || fail "multipart edit lost a reference or a knob"
 
 curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && pass "server alive" || fail "server died"
 grep -q "\[mlx\]" "$LOG" && fail "MLX error in the log"
@@ -265,11 +276,7 @@ if [ -f "$NOTOWER/config.json" ]; then
   "$BIN" --model "$NOTOWER" --serve --port "$PORT2" >"$LOG2" 2>&1 &
   SRV2=$!
   up2=""
-  for _ in $(seq 1 60); do
-    curl -sf "http://127.0.0.1:$PORT2/health" >/dev/null 2>&1 && { up2=1; break; }
-    kill -0 $SRV2 2>/dev/null || break
-    sleep 1
-  done
+  srv_wait_health "http://127.0.0.1:$PORT2" 60 1 "$SRV2" && up2=1
   if [ -n "$up2" ]; then
     code="$(curl -s "http://127.0.0.1:$PORT2/v1/images/generations" -H 'Content-Type: application/json' \
       -d "{\"prompt\":\"add a small red hat\",\"mode\":\"edit\",\"image\":\"$(cat "$OUT/src43.b64")\"}" \

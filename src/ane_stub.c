@@ -7,6 +7,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#ifndef _WIN32
+#include <netdb.h>
+#include <sys/socket.h>
+#endif
 
 typedef struct MsvAneMlp MsvAneMlp;
 typedef struct MsvAneBank MsvAneBank;
@@ -22,6 +26,65 @@ void msv_ane_cache_variant(const char *group, char *out, int out_len) {
     (void)group;
     (void)out;
     (void)out_len;
+}
+void msv_ane_cache_prune(void) {}
+void msv_ane_cache_sweep(void) {}
+
+// lib/ane/ane_bridge.h's LM engine programs (src/engines/ane/rt.zig).
+typedef struct msv_ane_program msv_ane_program;
+typedef struct msv_ane_request msv_ane_request;
+int msv_ane_bridge_available(void) { return 0; }
+uint32_t msv_ane_resident(void) { return 0; }
+void *msv_ane_bridge_surface(size_t bytes) {
+    (void)bytes;
+    return NULL;
+}
+msv_ane_program *msv_ane_program_create(const char *name, const char *mil, void *weights,
+                                        size_t weight_bytes, uint32_t instances,
+                                        const uint32_t *ane_hints, char *error, size_t error_size) {
+    (void)name; (void)mil; (void)weights; (void)weight_bytes; (void)instances; (void)ane_hints;
+    if (error != NULL && error_size > 0)
+        snprintf(error, error_size, "ANE unavailable on this platform");
+    return NULL;
+}
+void msv_ane_program_free(msv_ane_program *program) { (void)program; }
+int msv_ane_program_procedure(msv_ane_program *program, const char *function) {
+    (void)program; (void)function;
+    return -1;
+}
+uint32_t msv_ane_program_io_count(msv_ane_program *program, uint32_t procedure, int output) {
+    (void)program; (void)procedure; (void)output;
+    return 0;
+}
+int msv_ane_program_io(msv_ane_program *program, uint32_t procedure, int output,
+                       uint32_t index, void *out) {
+    (void)program; (void)procedure; (void)output; (void)index; (void)out;
+    return -1;
+}
+msv_ane_request *msv_ane_request_create(msv_ane_program *program, uint32_t instance,
+                                        uint32_t procedure, void *const *inputs, uint32_t n_in,
+                                        void *const *outputs, uint32_t n_out,
+                                        char *error, size_t error_size) {
+    (void)program; (void)instance; (void)procedure; (void)inputs; (void)n_in;
+    (void)outputs; (void)n_out;
+    if (error != NULL && error_size > 0)
+        snprintf(error, error_size, "ANE unavailable on this platform");
+    return NULL;
+}
+int msv_ane_request_eval(msv_ane_request *request, char *error, size_t error_size) {
+    (void)request;
+    if (error != NULL && error_size > 0)
+        snprintf(error, error_size, "ANE unavailable on this platform");
+    return -1;
+}
+void msv_ane_request_free(msv_ane_request *request) { (void)request; }
+double msv_ane_program_compile_seconds(const msv_ane_program *program) {
+    (void)program;
+    return 0;
+}
+_Bool msv_ane_program_cache_hit(const msv_ane_program *program) {
+    (void)program;
+    return 0;
 }
 
 MsvAnePlane *msv_ane_plane_create(size_t bytes) {
@@ -48,9 +111,10 @@ int msv_ane_bank_add_mlp(MsvAneBank *b, uint32_t hidden, uint32_t ffn,
                          uint32_t rows, const int8_t *gate_q,
                          const float *gate_s, const int8_t *up_q,
                          const float *up_s, const int8_t *down_q,
-                         const float *down_s, char *err, size_t err_size) {
+                         const float *down_s, float limit, char *err,
+                         size_t err_size) {
     (void)b; (void)hidden; (void)ffn; (void)rows; (void)gate_q; (void)gate_s;
-    (void)up_q; (void)up_s; (void)down_q; (void)down_s;
+    (void)up_q; (void)up_s; (void)down_q; (void)down_s; (void)limit;
     if (err != NULL && err_size > 0)
         snprintf(err, err_size, "ANE unavailable on Linux");
     return -1;
@@ -109,15 +173,29 @@ uint64_t msv_volume_free_for_use(const char *path) {
     return 0;
 }
 
+#ifndef _WIN32
 // Avahi's libdns_sd compat layer (Linux Bonjour) does not implement
-// DNSServiceGetAddrInfo, so lan.zig's peer address resolution gets an
-// explicit NotSupported (-65537) instead of a link error. Peer BROWSE and
-// RESOLVE still work through the real Avahi symbols.
+// DNSServiceGetAddrInfo, so resolve the peer's host with getaddrinfo (nss-mdns /
+// systemd-resolved answer .local) and deliver every IPv4 answer synchronously:
+// *ref stays NULL and lan.zig's pump sees the reply already done. The call blocks
+// the LAN thread for the resolver's own timeout, not pumpUntil's deadline.
+typedef void (*mlxserve_addr_reply)(void *ref, unsigned int flags, unsigned int interface, int err,
+                                     const char *hostname, const struct sockaddr *address,
+                                     unsigned int ttl, void *ctx);
 int DNSServiceGetAddrInfo(void **ref, unsigned int flags, unsigned int interface,
                           unsigned int protocol, const char *hostname,
                           void *cb, void *ctx) {
-    (void)flags; (void)interface; (void)protocol; (void)hostname; (void)cb; (void)ctx;
+    (void)flags; (void)interface; (void)protocol;
     if (ref != NULL)
         *ref = NULL;
-    return -65537; /* kDNSServiceErr_NotSupported */
+    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(hostname, NULL, &hints, &res) != 0)
+        return -65554; /* kDNSServiceErr_NoSuchRecord */
+    for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next)
+        ((mlxserve_addr_reply)cb)(NULL, ai->ai_next ? 0x1u /* MoreComing */ : 0u, 0, 0,
+                                  hostname, ai->ai_addr, 0, ctx);
+    freeaddrinfo(res);
+    return 0;
 }
+#endif

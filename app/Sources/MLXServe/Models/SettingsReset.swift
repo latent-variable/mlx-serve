@@ -29,18 +29,17 @@ enum SettingsReset {
     /// sections with nothing of their own to reset.
     static func fields(for category: SettingsCategory) -> [SettingsFieldReset] {
         switch category {
-        // Model Folders' two paths live in `ModelRoots` (UserDefaults), not in
-        // ServerOptions, and each row carries its own Clear/Reset button beside
-        // the path it clears; Updates holds no settings, and About is links
-        // only. None offers a section Reset button (`isResettable`), rather
+        // Updates holds no settings, and About is links only. None offers a section Reset button (`isResettable`), rather
         // than a button that does nothing. Interface is the same shape:
         // `@AppStorage`-backed display prefs, not a `ServerOptions` field —
         // each of its rows (appearance/accent/text size/compact/shortcut)
         // carries its own control default or Reset (the shortcut row's).
         // Providers live in providers.json, edited row by row in their own pane.
-        case .modelFolders, .updates, .about, .interface, .providers:
+        case .updates, .about, .interface, .providers:
             return []
 
+        // The model folder rows inside Server live in `ModelRoots` (UserDefaults), not in
+        // ServerOptions: each carries its own Clear/Reset, so Server's Reset never touches them.
         case .server:
             return [
                 f("host") { $0.host = $1.host },
@@ -64,6 +63,11 @@ enum SettingsReset {
                 f("lanSharedModels") { $0.lanSharedModels = $1.lanSharedModels },
                 f("lanDiscoverEnabled") { $0.lanDiscoverEnabled = $1.lanDiscoverEnabled },
                 f("lanName") { $0.lanName = $1.lanName },
+                f("clusterRole") { $0.clusterRole = $1.clusterRole },
+                f("clusterMode") { $0.clusterMode = $1.clusterMode },
+                f("clusterModelPath") { $0.clusterModelPath = $1.clusterModelPath },
+                f("clusterDevice") { $0.clusterDevice = $1.clusterDevice },
+                f("clusterCoordinator") { $0.clusterCoordinator = $1.clusterCoordinator },
             ]
 
         case .specDecode:
@@ -79,11 +83,12 @@ enum SettingsReset {
         case .memory:
             return [
                 f("skipMemPreflight") { $0.skipMemPreflight = $1.skipMemPreflight },
-                f("osMemoryReserve") { $0.osMemoryReserve = $1.osMemoryReserve },
+                f("osReserveGiB") { $0.osReserveGiB = $1.osReserveGiB },
                 f("maxResidentMemGB") { $0.maxResidentMemGB = $1.maxResidentMemGB },
                 f("maxResidentModels") { $0.maxResidentModels = $1.maxResidentModels },
                 f("idleEvictSecs") { $0.idleEvictSecs = $1.idleEvictSecs },
                 f("kvQuant") { $0.kvQuant = $1.kvQuant },
+                f("hotPrefixCacheEnabled") { $0.hotPrefixCacheEnabled = $1.hotPrefixCacheEnabled },
                 f("prefixCacheEntries") { $0.prefixCacheEntries = $1.prefixCacheEntries },
                 f("prefixCacheMem") { $0.prefixCacheMem = $1.prefixCacheMem },
                 f("pleGpu") { $0.pleGpu = $1.pleGpu },
@@ -105,6 +110,8 @@ enum SettingsReset {
                 f("aneImage") { $0.aneImage = $1.aneImage },
                 f("aneVideo") { $0.aneVideo = $1.aneVideo },
                 f("aneAudio") { $0.aneAudio = $1.aneAudio },
+                f("w8a8") { $0.w8a8 = $1.w8a8 },
+                f("aneSlots") { $0.aneSlots = $1.aneSlots },
             ]
 
         case .engines:
@@ -112,6 +119,8 @@ enum SettingsReset {
                 f("mlxGguf") { $0.mlxGguf = $1.mlxGguf },
                 f("llamaKvQuant") { $0.llamaKvQuant = $1.llamaKvQuant },
                 f("llamaCacheEntries") { $0.llamaCacheEntries = $1.llamaCacheEntries },
+                f("llamaMtpDrafts") { $0.llamaMtpDrafts = $1.llamaMtpDrafts },
+                f("llamaUbatch") { $0.llamaUbatch = $1.llamaUbatch },
                 f("ssdStreaming") { $0.ssdStreaming = $1.ssdStreaming },
             ]
 
@@ -140,7 +149,12 @@ enum SettingsReset {
                 f("voiceCloneLabel") { $0.voiceCloneLabel = $1.voiceCloneLabel },
                 f("voiceEngine") { $0.voiceEngine = $1.voiceEngine },
                 f("kokoroVoice") { $0.kokoroVoice = $1.kokoroVoice },
+                f("lfm3Voice") { $0.lfm3Voice = $1.lfm3Voice },
                 f("wakePhrase") { $0.wakePhrase = $1.wakePhrase },
+                f("transcribeEngine") { $0.transcribeEngine = $1.transcribeEngine },
+                f("transcriptNotesModel") { $0.transcriptNotesModel = $1.transcriptNotesModel },
+                f("transcriptAutoStopMinutes") { $0.transcriptAutoStopMinutes = $1.transcriptAutoStopMinutes },
+                f("transcriptAutoStartCamera") { $0.transcriptAutoStartCamera = $1.transcriptAutoStartCamera },
             ]
 
         case .sandbox:
@@ -218,12 +232,13 @@ enum SettingsReset {
     static func confirmMessage(_ selection: SettingsSelection) -> String {
         switch selection {
         case .all:
-            return "This resets every section — Server, Speculative Decoding, Performance, Per-Request Defaults, Voice, Agent Sandbox and Messaging — not just the one you're looking at. Your Telegram bot token is kept, since only @BotFather can reissue it. The running server keeps its current flags until you hit Restart Now."
+            return "This resets every section — Server, Speculative Decoding, Performance, Generation Defaults, Voice, Agent Sandbox and Messaging — not just the one you're looking at. Your Telegram bot token is kept, since only @BotFather can reissue it. Generation defaults apply to the next request; launch flags apply after Restart Now."
         case .category(let c):
             let scope = "This resets only the \(c.sidebarLabel) section. Every other section is left untouched."
             let tail = c == .messaging
                 ? " Your Telegram bot token is kept, since only @BotFather can reissue it."
                 : ""
+            if c == .requestDefaults { return scope + " Generation defaults apply to the next request without a restart. Per-model rules are kept." }
             return scope + tail + " The running server keeps its current flags until you hit Restart Now."
         }
     }

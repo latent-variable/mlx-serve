@@ -9,6 +9,7 @@
 # Usage: ./tests/test_multi_model_concurrent.sh [model_dir_root] [port]
 
 set -e
+source "$(dirname "$0")/lib/server.sh"
 
 ROOT="${1:-$HOME/.mlx-serve/models}"
 PORT="${2:-8097}"
@@ -43,10 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 30); do
-    curl -fs "$BASE/health" >/dev/null 2>&1 && break
-    sleep 1
-done
+srv_wait_health "$BASE" 30 1 || true
 
 # Warm both up sequentially first so cold-load doesn't race with the
 # concurrent fire (the timing of two cold loads is well-tested elsewhere).
@@ -77,7 +75,8 @@ check() {
         return
     fi
     local content
-    content=$(python3 -c "import sys,json; print(json.load(open('$file'))['choices'][0]['message'].get('content','') or '')")
+    # A thinking model can spend the budget on reasoning: either field proves the request ran on it.
+    content=$(python3 -c "import sys,json; m=json.load(open('$file'))['choices'][0]['message']; print(m.get('content') or m.get('reasoning_content') or '')")
     if [ -z "$content" ]; then
         echo -e "${RED}FAIL${NC} $name: empty content"
         FAIL=1

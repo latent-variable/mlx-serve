@@ -1,26 +1,22 @@
 #!/bin/bash
-# test_logprobs.sh — the logprobs wire contract, on every surface that serves it.
+# test_logprobs.sh — the logprobs wire contract on every surface that serves it. [1-3] at temp 0 rank 1 of
+# top_logprobs IS the emitted token, its logprob does not move between temp 0 and 2 (the model's distribution, not
+# the sampler's), no saturation to 0.0, and /v1/completions answers the legacy shape. [4][5] STREAMING carries them and
+# agrees with non-streaming token and value for value; legacy text_offset ascends across chunks. [4b] with a stop
+# string the entries never run ahead of the delivered content. [6] the entries reconstruct message.content on a
+# thinking request and number fewer than completion_tokens (they describe the answer, not the stripped thought);
+# streaming is held to its own deltas. [7] every body is valid UTF-8. [7b] completions `echo`: one entry per prompt
+# and generated token, the first null, a warm repeat returns every row, echo + stream a named 400.
 #
-# Three defects fixed 2026-08-05 (temperature-scaled logits, float-equality id
-# recovery, a one-token offset) all reduce to ONE observable bar: at temp 0 the
-# emitted token IS the argmax, so rank 1 of top_logprobs must equal it. A broken
-# instrument is worse than none — an early "-0.004, therefore 99.6% confident"
-# read off this field sent a quantization hunt down the wrong path for a day.
+#   LOGPROBS_TEST_MODEL=<dir> ./tests/test_logprobs.sh [port]   # any chat model; default LFM2.5-2.6B-8bit, SKIP without
 #
-# Section [4] pins the class those three did NOT cover: STREAMING chat accepted
-# `logprobs`, disabled speculation to honor it (paying the throughput), had the
-# generator compute every entry — and then dropped them, because the SSE chunk
-# template had no `logprobs` field at all. Silently-ignored-field class. It is
-# invisible to llmprobe (which probes logprobs non-streaming only, and scored
-# this server 100% on `Logprob consistency` while streaming returned nothing),
-# and invisible to any output-equality test, since the deltas are unchanged.
-#
-#   LOGPROBS_TEST_MODEL=<dir> ./tests/test_logprobs.sh [port]
-#
-# Any chat model works; defaults to LFM2.5-2.6B-8bit. SKIPs without one.
-set -uo pipefail
+# Hermetic twins: computeLogprobs, formatCompletionsLogprobs, contentTokenRange, the UTF-8 lossy escape.
+source "$(dirname "$0")/_lib_models.sh"
 
-MODEL="${LOGPROBS_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/LFM2.5-2.6B-8bit}"
+set -uo pipefail
+source "$(dirname "$0")/lib/server.sh"
+
+MODEL="${LOGPROBS_TEST_MODEL:-$(find_model mlx-community/LFM2.5-2.6B-8bit || echo "$HOME/.mlx-serve/models/mlx-community/LFM2.5-2.6B-8bit")}"
 PORT="${1:-11293}"
 BIN="${BINARY:-./zig-out/bin/mlx-serve}"
 BASE="http://127.0.0.1:$PORT"
@@ -35,8 +31,7 @@ pkill -f "mlx-serve --serve.*port $PORT" 2>/dev/null; sleep 1
 SRV=$!
 trap 'kill $SRV 2>/dev/null; rm -f "$LOG"' EXIT
 
-for _ in $(seq 1 180); do curl -sf -m 2 "$BASE/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf -m 2 "$BASE/health" >/dev/null 2>&1 || { echo "fail: server never came up"; tail -20 "$LOG"; exit 1; }
+srv_wait_health "$BASE" 180 1 || { echo "fail: server never came up"; tail -20 "$LOG"; exit 1; }
 
 python3 - "$BASE" "$ID" <<'PY'
 import json, sys, urllib.request
@@ -91,6 +86,7 @@ def entries_ok(label, content):
 print("── [1/8] chat non-streaming ──")
 r = post("/v1/chat/completions", {**REQ, "stream": False})
 ns = (r["choices"][0].get("logprobs") or {}).get("content") or []
+chat_text = r["choices"][0]["message"].get("content") or ""
 ck("[non-stream] logprobs present", bool(ns), f"got {r['choices'][0].get('logprobs')}")
 if ns:
     entries_ok("non-stream", ns)
@@ -169,6 +165,33 @@ if st:
     ck("[stream] tokens match non-streaming", not tok_mismatch, f"{tok_mismatch[:5]}")
     lp_mismatch = [i for i in range(n) if abs(st[i]["logprob"] - ns[i]["logprob"]) > 1e-6]
     ck("[stream] logprob VALUES match non-streaming", not lp_mismatch, f"{lp_mismatch[:5]}")
+
+print("── [4b] STREAMING + a stop string: entries never run ahead of the delivered content ──")
+# A stop string that spans several tokens makes the stream HOLD a token's tail until the
+# next token decides it; the held token's logprob entry must wait with its bytes.
+if len(chat_text) < 24:
+    ck("[stream+stop] reference answer long enough to carve a stop string from", False, repr(chat_text))
+else:
+    stop = chat_text[len(chat_text) // 3:][:7]
+    resp = post("/v1/chat/completions", {**REQ, "stream": True, "stop": [stop]}, stream=True)
+    text, toks, ahead = "", "", []
+    for raw in resp:
+        line = raw.decode().strip()
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        for ch in json.loads(line[6:]).get("choices", []):
+            text += (ch.get("delta") or {}).get("content") or ""
+            toks += "".join(e["token"] for e in ((ch.get("logprobs") or {}).get("content") or []))
+            if not text.startswith(toks):
+                ahead.append((toks[-20:], text[-20:]))
+    ck("[stream+stop] entries never run ahead of the content", not ahead, f"{ahead[:2]}")
+    # The cut lands INSIDE a token: that token's bytes before the cut ship, its entry (for a
+    # token the client never saw whole) does not.
+    ck("[stream+stop] entries describe the delivered content",
+       text.startswith(toks) and len(text.encode()) - len(toks.encode()) <= 16,
+       f"entries {toks[-30:]!r} vs content {text[-30:]!r}")
+    ck("[stream+stop] the stop string never reached the client", stop not in text, repr(stop))
+
 
 print("── [5/8] STREAMING /v1/completions carries the legacy shape ──")
 CREQ = {"model": MODEL, "prompt": "Count from one to five:", "max_tokens": 24,
@@ -312,6 +335,52 @@ ch = post("/v1/chat/completions", {**FREQ, "response_format": SCHEMA, "enable_th
                                    "max_tokens": 1000})["choices"][0]
 format_entries_ok("json_schema thinking", (ch.get("logprobs") or {}).get("content") or [],
                   ch["message"].get("content") or "")
+
+print("── [7b] /v1/completions echo: every prompt token carries its logprob ──")
+# lm-eval's loglikelihood reads sum(token_logprobs[ctxlen:-1]); an echo that drops the
+# prompt rows hands it an empty sum it reports as perplexity 1.
+EPROMPT = "Water boils at one hundred degrees Celsius at sea level. At higher altitudes the boiling point drops."
+ids = post("/tokenize", {"content": EPROMPT})["tokens"]
+EREQ = {"model": MODEL, "prompt": ids, "max_tokens": 1, "temperature": 0, "logprobs": 5, "echo": True}
+r = post("/v1/completions", EREQ)
+elp = r["choices"][0]["logprobs"]
+n = r["usage"]["prompt_tokens"] + r["usage"]["completion_tokens"]
+ck("[echo] one entry per prompt and generated token",
+   all(len(elp[k]) == n for k in ("tokens", "token_logprobs", "top_logprobs", "text_offset")),
+   f"{[len(elp[k]) for k in elp]} vs {n}")
+ck("[echo] the first prompt token is unscored", elp["token_logprobs"][0] is None and elp["top_logprobs"][0] is None)
+ck("[echo] every other logprob is <= 0", all(v <= 1e-6 for v in elp["token_logprobs"][1:]))
+unpaired = [i for i, (t, v, m) in enumerate(zip(elp["tokens"], elp["token_logprobs"], elp["top_logprobs"]))
+            if m and t in m and abs(m[t] - v) > 1e-4]
+ck("[echo] each entry describes its own token", not unpaired, f"{unpaired[:5]}")
+plain = post("/v1/completions", {**EREQ, "echo": False})["choices"][0]["logprobs"]
+ck("[echo] the generated token matches the plain request",
+   elp["tokens"][-1] == plain["tokens"][0] and abs(elp["token_logprobs"][-1] - plain["token_logprobs"][0]) < 1e-4,
+   f"{elp['tokens'][-1]!r} {elp['token_logprobs'][-1]} vs {plain['tokens'][0]!r} {plain['token_logprobs'][0]}")
+# Row alignment: row i is the distribution a plain request on ids[:i] samples from, so their
+# rank-1 entries agree. A shifted row picks other tokens; the median absorbs bf16 logit steps.
+same, deltas = 0, []
+for i in range(1, len(ids)):
+    pt, pv = max(post("/v1/completions", {**EREQ, "prompt": ids[:i], "echo": False})["choices"][0]["logprobs"]["top_logprobs"][0].items(), key=lambda kv: kv[1])
+    et, ev = max(elp["top_logprobs"][i].items(), key=lambda kv: kv[1])
+    if pt == et:
+        same += 1
+        deltas.append(abs(pv - ev))
+deltas.sort()
+ck("[echo] prompt rows hold the distribution a plain request on that prefix samples",
+   same >= 0.8 * (len(ids) - 1) and deltas[len(deltas) // 2] < 0.05,
+   f"rank 1 agrees on {same}/{len(ids) - 1}, median |d| {deltas[len(deltas) // 2] if deltas else None}")
+again = post("/v1/completions", EREQ)["choices"][0]["logprobs"]["token_logprobs"]
+ck("[echo] a repeat (prefix cache warm) returns every row again", again == elp["token_logprobs"],
+   f"{len(again)} vs {len(elp['token_logprobs'])}")
+t = post("/v1/completions", {**EREQ, "prompt": EPROMPT, "logprobs": None})["choices"][0]
+ck("[echo] without logprobs the prompt text leads the completion", t["text"].startswith(EPROMPT) and t["logprobs"] is None,
+   repr(t["text"][:60]))
+try:
+    post("/v1/completions", {**EREQ, "stream": True}).read()
+    ck("[echo] echo + stream is refused by name", False, "got 200")
+except urllib.error.HTTPError as e:
+    ck("[echo] echo + stream is refused by name", e.code == 400 and b"echo" in e.read(), str(e.code))
 
 print("── [8/8] every response body is valid UTF-8 ──")
 ck("no response carried a split multi-byte token as raw bytes", not utf8_bad,

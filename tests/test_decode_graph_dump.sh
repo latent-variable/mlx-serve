@@ -1,5 +1,5 @@
 #!/bin/bash
-# test_decode_graph_dump.sh — end-to-end guard for MLX_SERVE_DECODE_GRAPH_DUMP.
+# test_decode_graph_dump.sh — end-to-end guard for diag decode-graph-dump.
 #
 # Boots a real model with the decode forward micro-bench and the graph dump
 # armed, then checks that the dump names the primitives of one decode forward.
@@ -10,13 +10,15 @@
 #                             rerun on the same model and build and diff it
 #   server.log                the boot log
 #
-# Usage: ./tests/test_decode_graph_dump.sh <model-dir> [extra mlx-serve flags...]
+# Usage: ./tests/test_decode_graph_dump.sh [model-dir] [extra mlx-serve flags...]
 
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_lib_models.sh
 
-MODEL="${1:?usage: test_decode_graph_dump.sh <model-dir> [flags...]}"
-shift
+MODEL="${1:-$(find_model mlx-community/Qwen3.5-0.8B-MLX-4bit)}"
+[ -n "$MODEL" ] && [ -d "$MODEL" ] || { echo "SKIP test_decode_graph_dump: no model (pass <model-dir>)"; exit 0; }
+shift || true
 PORT="${PORT:-8098}"
 BIN="${BIN:-./zig-out/bin/mlx-serve}"
 OUT="${OUT:-/tmp/decode-graph-dump-$PORT}"
@@ -32,7 +34,7 @@ fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1"; }
 mkdir -p "$OUT"
 rm -f "$DUMP" "$SUMMARY"
 
-MLX_SERVE_DECODE_GRAPH_DUMP="$DUMP" MLX_SERVE_DECODE_FWD_UBENCH=2 \
+MLX_SERVE_DIAG="decode-graph-dump=$DUMP,decode-fwd-ubench=2" \
   "$BIN" --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" --log-level info \
   --log-file off "$@" >"$LOG" 2>&1 &
 SRV=$!

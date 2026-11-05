@@ -9,21 +9,38 @@
 # to it. build.zig links against lib/llama, and release.yml / app/build.sh
 # bundle + re-sign the dylib exactly like libmlxc.dylib.
 #
+# On Linux it stages the release's CUDA build instead: libllama + the ggml
+# backend plugins (libggml-cuda, libggml-cpu-*) it loads from beside itself, and
+# the headers from the tagged source (the Linux archive ships none).
+#
+# LLAMA_TARGET=windows stages the Windows CUDA build into lib/llama-win for the
+# cross-compiled mlx-serve.exe: bin/ = the release's DLLs (to ship beside the exe;
+# the CUDA runtime is the user's installed toolkit, which MLX shares), lib/ = import
+# libraries made from the DLL exports (the release ships none; llvm-readobj, or MSVC's
+# dumpbin on Windows),
+# include/ = the tagged headers.
+#
 # This is the single source of truth for the pinned llama.cpp version.
 # Bump LLAMA_TAG to upgrade; CI and local builds re-fetch automatically.
 set -euo pipefail
 
-LLAMA_TAG="${LLAMA_TAG:-b10809}"
+# Release v0.6.0 is commit b11429; its tag ships no binaries, the build tag does.
+LLAMA_TAG="${LLAMA_TAG:-b11429}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+OS="$(uname -s)"
+case "$OS" in MINGW*|MSYS*|CYGWIN*) OS=Windows ;; esac # Git Bash
+if [ "${LLAMA_TARGET:-}" = windows ]; then OS=Windows; fi
 DEST="$REPO_ROOT/lib/llama"
+if [ "$OS" = Windows ]; then DEST="$REPO_ROOT/lib/llama-win"; fi
 DEST_LIB="$DEST/lib"
 DEST_INC="$DEST/include"
 STAMP="$DEST/.version"
+case "$OS" in Linux) LIB=libllama.so ;; Windows) LIB=llama.lib ;; *) LIB=libllama.dylib ;; esac
 
 # Idempotent: skip when the staged copy already matches the pinned tag.
-if [ -f "$STAMP" ] && [ -f "$DEST_LIB/libllama.dylib" ] && [ -f "$DEST_INC/llama.h" ]; then
+if [ -f "$STAMP" ] && [ -f "$DEST_LIB/$LIB" ] && [ -f "$DEST_INC/llama.h" ]; then
   if [ "$(cat "$STAMP")" = "$LLAMA_TAG" ]; then
     echo "[fetch-llama] lib/llama already at $LLAMA_TAG — nothing to do"
     exit 0
@@ -31,12 +48,54 @@ if [ -f "$STAMP" ] && [ -f "$DEST_LIB/libllama.dylib" ] && [ -f "$DEST_INC/llama
   echo "[fetch-llama] staged version '$(cat "$STAMP")' != '$LLAMA_TAG' — refetching"
 fi
 
-ASSET="llama-${LLAMA_TAG}-xcframework.zip"
-URL="https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/${ASSET}"
-
+RELEASE="https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+if [ "$OS" = Windows ]; then
+  ZIG="${ZIG:-$REPO_ROOT/.zig-toolchain/zig}"
+  f="llama-${LLAMA_TAG}-bin-win-cuda-13.4-x64.zip"
+  echo "[fetch-llama] downloading $RELEASE/$f"
+  curl -fSL --retry 3 -o "$TMP/$f" "$RELEASE/$f"
+  curl -fSL --retry 3 -o "$TMP/src.tgz" "https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_TAG}.tar.gz"
+  mkdir -p "$TMP/src"
+  tar -xzf "$TMP/src.tgz" -C "$TMP/src" --strip-components=1 --wildcards '*/include/*.h'
+  rm -rf "$DEST"
+  mkdir -p "$DEST/bin" "$DEST_LIB" "$DEST_INC"
+  for f in "$TMP"/*.zip; do unzip -q -o "$f" -d "$DEST/bin"; done
+  cp "$TMP/src/include/"*.h "$TMP/src/ggml/include/"*.h "$DEST_INC/"
+  exports() { # the names a DLL exports, one per line
+    if command -v llvm-readobj >/dev/null; then llvm-readobj --coff-exports "$1" | sed -n 's/^  Name: //p'
+    else dumpbin -nologo -exports "$1" | awk '$1 ~ /^[0-9]+$/ && $3 ~ /^[0-9A-F]+$/ { print $4 }'; fi | tr -d '\r'
+  }
+  for dll in llama ggml ggml-base; do
+    { echo "LIBRARY $dll.dll"; echo EXPORTS; exports "$DEST/bin/$dll.dll" | sed 's/^/  /'; } > "$TMP/$dll.def"
+    "$ZIG" dlltool -m i386:x86-64 -d "$TMP/$dll.def" -l "$DEST_LIB/$dll.lib" -D "$dll.dll"
+  done
+  echo "$LLAMA_TAG" > "$STAMP"
+  echo "[fetch-llama] staged llama.cpp ($LLAMA_TAG, Windows CUDA) in $DEST"
+  exit 0
+fi
+
+if [ "$OS" = Linux ]; then
+  case "$(uname -m)" in x86_64) ARCH=x64 ;; aarch64) ARCH=arm64 ;; *) echo "[fetch-llama] ERROR: unsupported arch $(uname -m)" >&2; exit 1 ;; esac
+  URL="$RELEASE/llama-${LLAMA_TAG}-bin-ubuntu-cuda-13.4-${ARCH}.tar.gz"
+  echo "[fetch-llama] downloading $URL"
+  curl -fSL --retry 3 -o "$TMP/bin.tgz" "$URL"
+  curl -fSL --retry 3 -o "$TMP/src.tgz" "https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_TAG}.tar.gz"
+  mkdir -p "$TMP/bin" "$TMP/src"
+  tar -xzf "$TMP/bin.tgz" -C "$TMP/bin"
+  tar -xzf "$TMP/src.tgz" -C "$TMP/src" --strip-components=1 --wildcards '*/include/*.h'
+  rm -rf "$DEST_LIB" "$DEST_INC"
+  mkdir -p "$DEST_LIB" "$DEST_INC"
+  find "$TMP/bin" \( -name 'libllama.so*' -o -name 'libggml*.so*' \) -exec cp -P {} "$DEST_LIB/" \;
+  cp "$TMP/src/include/"*.h "$TMP/src/ggml/include/"*.h "$DEST_INC/"
+  echo "$LLAMA_TAG" > "$STAMP"
+  echo "[fetch-llama] staged libllama ($LLAMA_TAG, CUDA) in $DEST_LIB"
+  exit 0
+fi
+
+URL="$RELEASE/llama-${LLAMA_TAG}-xcframework.zip"
 echo "[fetch-llama] downloading $URL"
 curl -fSL --retry 3 -o "$TMP/xcf.zip" "$URL"
 
@@ -45,7 +104,7 @@ unzip -q "$TMP/xcf.zip" -d "$TMP/xcf"
 
 FW="$(find "$TMP/xcf" -type d -path '*macos-arm64*/llama.framework' | head -1)"
 if [ -z "$FW" ]; then
-  echo "[fetch-llama] ERROR: no macos-arm64 llama.framework in $ASSET" >&2
+  echo "[fetch-llama] ERROR: no macos-arm64 llama.framework in $URL" >&2
   exit 1
 fi
 FW_BIN="$FW/Versions/A/llama"

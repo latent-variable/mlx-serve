@@ -65,6 +65,8 @@ class AppState: ObservableObject {
                         // Register-by-path failed (unsupported arch, partial
                         // download) or the load 503'd (memory) — a full
                         // restart with only the new model is the net.
+                        // A later switch, or a remote pick since, owns the server now.
+                        guard self.modelSwitchGeneration == generation, mgr.lanChatModelId == nil else { return }
                         print("[AppState] hot-switch failed (\(error)) — falling back to restart")
                         mgr.stop()
                         mgr.start(modelPath: self.selectedModelPath, options: self.serverOptions)
@@ -146,32 +148,60 @@ class AppState: ObservableObject {
     /// Sandbox terminals (pi / hermes / shell in the guest): rows of the
     /// Chats section, owned here so closing the chat window ends nothing.
     lazy var terminals = TerminalSessionStore(server: server,
-                                              options: { [unowned self] in self.serverOptions })
-    /// The sidebar's dragged order over conversations and terminals (ids in
-    /// visual order). Empty = newest first. Persisted.
-    @Published var sidebarOrder: [UUID] = (UserDefaults.standard.stringArray(forKey: "sidebarRowOrder") ?? [])
-        .compactMap(UUID.init) {
-        didSet {
-            UserDefaults.standard.set(sidebarOrder.map(\.uuidString), forKey: "sidebarRowOrder")
-        }
+                                              options: { [unowned self] in self.serverOptions },
+                                              store: sidebarStore)
+
+    /// The sidebar's user-made groups (Move to Group). Each row names its own
+    /// group; a change that moves rows goes through the doors below.
+    @Published var sidebarGroups = SidebarGroups() {
+        didSet { sidebarStore?.saveGroups(sidebarGroups) }
     }
 
-    /// The sidebar's user-made groups (Move to Group). Persisted.
-    @Published var sidebarGroups: SidebarGroups = UserDefaults.standard.data(forKey: "sidebarGroups")
-        .flatMap { try? JSONDecoder().decode(SidebarGroups.self, from: $0) } ?? SidebarGroups() {
-        didSet {
-            UserDefaults.standard.set(try? JSONEncoder().encode(sidebarGroups), forKey: "sidebarGroups")
-        }
+    /// Conversations and terminals in sidebar order, before the split into groups.
+    var sidebarRows: [SidebarChatRows.Row] {
+        SidebarChatRows.merge(chats: visibleChatSessions, terminals: terminals.sessions.sessions)
     }
 
-    /// Drag-to-reorder: `visible` is the whole panel in its current visual
-    /// order, so the result is a complete order and stale ids self-prune.
+    func sidebarGroup(of row: UUID) -> UUID? {
+        chatSessions.first { $0.id == row }?.groupId ?? terminals.sessions.session(row)?.groupId
+    }
+
+    /// Drag-to-reorder: `visible` is the whole panel in its current visual order.
     func moveSidebarRow(_ id: UUID, onto target: UUID, visible: [UUID]) {
-        var groups = sidebarGroups
-        groups.join(id, groupOf: target)
-        if groups != sidebarGroups { sidebarGroups = groups }
-        let next = SidebarChatRows.moved(id, onto: target, in: visible)
-        if next != visible { sidebarOrder = next }
+        let rows = Dictionary(uniqueKeysWithValues: sidebarRows.map { ($0.id, $0) })
+        setSidebarPlacements(SidebarChatRows.dropped(id, onto: target, in: visible.compactMap { rows[$0] }))
+    }
+
+    /// Move to Group, a drop on a group's heading, nil = out of every group.
+    /// The rows land among the group's undragged ones, by date.
+    func moveToSidebarGroup(_ ids: some Sequence<UUID>, group: UUID?) {
+        let moving = Set(ids).filter { sidebarGroup(of: $0) != group }
+        setSidebarPlacements(Dictionary(uniqueKeysWithValues: moving.map { ($0, .init(group: group, position: nil)) }))
+    }
+
+    func createSidebarGroup(named name: String, with ids: some Sequence<UUID>) {
+        guard let group = sidebarGroups.create(name) else { return }
+        moveToSidebarGroup(ids, group: group)
+    }
+
+    /// Its rows and subgroups move up to its parent; nothing in it is deleted.
+    func deleteSidebarGroup(_ id: UUID) {
+        let parent = sidebarGroups.parent(of: id)
+        setSidebarPlacements(SidebarChatRows.dissolving(id, into: parent, rows: sidebarRows))
+        sidebarGroups.delete(id)
+    }
+
+    private func setSidebarPlacements(_ placements: [UUID: SidebarChatRows.Placement]) {
+        guard !placements.isEmpty else { return }
+        var changed = false
+        for i in chatSessions.indices {
+            guard let p = placements[chatSessions[i].id] else { continue }
+            chatSessions[i].groupId = p.group
+            chatSessions[i].sidebarPosition = p.position
+            changed = true
+        }
+        if changed { saveChatHistory() }
+        terminals.setPlacements(placements)
     }
 
     /// "Rename…" on a sidebar row (a chat or a terminal): the sidebar's one
@@ -227,13 +257,19 @@ class AppState: ObservableObject {
     @Published var documentIndexes: [UUID: DocumentIndex] = [:]
     let testServer = TestServer()
     lazy var imageGen = ImageGenService()
+    /// `mlx-serve worker` while Settings ▸ Cluster makes this Mac a worker.
+    let clusterWorker = ClusterWorker()
     lazy var videoGen = VideoGenService()
     lazy var audioGen = AudioGenService()
-    lazy var musicGen = MusicGenService()
+    lazy var musicGen: MusicGenService = {
+        let service = MusicGenService()
+        MusicTransport.shared.attach(service)
+        return service
+    }()
+    lazy var soundGen = SoundGenService()
     lazy var model3dGen = Model3DGenService()
-    @Published var autoStartServer: Bool {
-        didSet { UserDefaults.standard.set(autoStartServer, forKey: "autoStartServer") }
-    }
+    /// The server always starts with the app; tests that build an AppState opt out.
+    private let startServerAtLaunch: Bool
     /// Whether launch loads a model with the server (`StartupModelChoice.launch`).
     /// Default OFF, with no migration: auto-start alone must not read a checkpoint.
     @Published var loadModelAtStart: Bool {
@@ -262,6 +298,7 @@ class AppState: ObservableObject {
     @Published var serverOptions: ServerOptions {
         didSet {
             serverOptions.save()
+            clusterWorker.reconcile(serverOptions)
             // Reconcile the Telegram bridge whenever options change (cheap no-op
             // unless the bot token / enabled flag actually moved).
             telegramBridge.reconcile()
@@ -345,6 +382,15 @@ class AppState: ObservableObject {
     /// the thing that opens it is a menu command with no view to talk to.
     @Published var modelPalettePresented = false
 
+    /// Is the usage dashboard up? A sheet on the chat window like the palette, opened from the status strip's speed line.
+    @Published var usageDashboardPresented = false
+
+    /// Refused while the welcome sheet is up, for the one-sheet rule.
+    func showUsageDashboard() {
+        guard !showWelcome else { return }
+        usageDashboardPresented = true
+    }
+
     /// Open the model switcher — the ONE way in, same shape as `showModels()`:
     /// it must both raise the picker AND bring the chat window forward, or ⌘L
     /// from the tray opens a sheet on a window nobody is looking at.
@@ -379,8 +425,21 @@ class AppState: ObservableObject {
     }
 
     /// Show the model browser — the ONE way in.
-    func showModels(_ section: ModelBrowserSection = .recommended) {
-        chatWorkspace = .models(section)
+    /// The fix a voice setup notice offers: the microphone's privacy pane, or Qwen3-ASR's download.
+    func fixVoiceSetup(_ issue: VoicePreflight.Issue) {
+        if let s = VoicePreflight.settingsURLString(for: issue), let url = URL(string: s) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        downloads.start(repoId: VoiceASR.repo) { [weak self] in
+            self?.refreshModels()
+            self?.server.rescanModels()
+        }
+        showModels(.downloads)
+    }
+
+    func showModels(_ section: ModelBrowserSection? = nil) {
+        chatWorkspace = .modelBrowserEntry(section: section, localModels: localModels)
         pendingChatOpenTick += 1
     }
 
@@ -411,7 +470,7 @@ class AppState: ObservableObject {
         DispatchQueue.main.async { [self] in
             guard let workspace = terminalWorkspace(askingFor: agent?.displayName) else { return }
             let id = terminals.start(agent: agent, workspace: workspace)
-            sidebarGroups.assign([id], to: group)
+            moveToSidebarGroup([id], group: group)
             showTerminal(id)
         }
     }
@@ -423,7 +482,7 @@ class AppState: ObservableObject {
         DispatchQueue.main.async { [self] in
             guard let workspace = terminalWorkspace(askingFor: cli == .shell ? nil : cli.displayName) else { return }
             let id = terminals.startHost(cli: cli, workspace: workspace)
-            sidebarGroups.assign([id], to: group)
+            moveToSidebarGroup([id], group: group)
             showTerminal(id)
         }
     }
@@ -490,21 +549,6 @@ class AppState: ObservableObject {
         chatWorkspace = .create(experiment)
     }
 
-    /// "Send to Chat" on a Create-pane result: open a NEW conversation holding
-    /// it, and switch to Chats so the user SEES where it went.
-    @discardableResult
-    func sendGeneratedMediaToNewChat(path: String, prompt: String,
-                                     kind: ChatMediaRef.Kind) -> UUID {
-        let sessionId = newChatSession(agentId: defaultAgentId)
-        if let idx = chatSessions.firstIndex(where: { $0.id == sessionId }) {
-            chatSessions[idx].messages.append(
-                GeneratedMediaHandoff.message(path: path, prompt: prompt, kind: kind))
-            saveChatHistory()
-        }
-        showConversation()
-        return sessionId
-    }
-
     /// Back to the transcript. Selecting a conversation does this too — the
     /// sidebar's mode switcher is the visible version of it.
     func showConversation() {
@@ -537,6 +581,8 @@ class AppState: ObservableObject {
     /// Runs unattended scheduled/on-demand agent tasks (the "claw" spine). Lazily
     /// created so it only spins up the first time the Tasks window is opened.
     lazy var taskScheduler = TaskScheduler(appState: self)
+    /// Asks to join a Mac on the network that waits for a Thunderbolt pair.
+    let pairInvites = PairInvites()
 
     /// The persistent, window-independent voice assistant. Owned here (not in a
     /// view) so it survives chat-window open/close and runs from the menu-bar
@@ -547,20 +593,29 @@ class AppState: ObservableObject {
         return controller
     }()
 
-    private let historyPath: String = {
-        let dir = NSString(string: "~/.mlx-serve").expandingTildeInPath
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        return (dir as NSString).appendingPathComponent("chat-history.json")
+    /// The chat window's voice (the composer button and orb): its own instance, so turning it on or off never
+    /// touches the tray's. While it is on, the tray keeps its toggle but leaves the microphone to it.
+    lazy var chatVoice: VoiceModeController = {
+        let controller = VoiceModeController(server: server, chatMode: true)
+        controller.bind(appState: self)
+        controller.$isActive.removeDuplicates().sink { [weak self] on in self?.voice.yieldMicrophone(on) }
+            .store(in: &cancellables)
+        return controller
     }()
 
-    init() {
+    /// The chats on disk (`~/.mlx-serve/mlx-serve.db`). Nil when the file could
+    /// not be opened: nothing is then written over it.
+    private var chatStore: ChatStore?
+    private var sidebarStore: SidebarStore?
+
+    init(startServerAtLaunch: Bool = true) {
+        self.startServerAtLaunch = startServerAtLaunch
         // Defaults to ON when the key is absent — `UserDefaults.bool` would
         // read a never-set key as false, which is why a fresh install used to
         // download a model and then sit there with the server stopped. Safe with
         // no model on disk: the launch gate below starts headless unless told to
         // load. No migration: existing users who never touched the toggle get
         // it turned on, which is the intent.
-        self.autoStartServer = UserDefaults.standard.object(forKey: "autoStartServer") as? Bool ?? true
         self.loadModelAtStart = UserDefaults.standard.bool(forKey: "loadModelAtStart")
         self.startupModelMode = UserDefaults.standard.string(forKey: "startupModelMode")
             .flatMap(StartupModelChoice.Mode.init(rawValue:)) ?? .default
@@ -589,6 +644,7 @@ class AppState: ObservableObject {
         self.defaultAgentId = UserDefaults.standard.string(forKey: "defaultAgentId")
             .flatMap(UUID.init(uuidString:))
         self.quickLauncherEnabled = UserDefaults.standard.bool(forKey: "quickLauncherEnabled")
+        clusterWorker.reconcile(opts)
         server.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
@@ -616,11 +672,11 @@ class AppState: ObservableObject {
             }
         }
         loadChatHistory()
-        sidebarGroups.retain(only: Set(chatSessions.map(\.id) + terminals.sessions.sessions.map(\.id)))
         // Start background task scheduling (catch-up + timer arming). Notifications
         // route back here to resume paused runs / deep-link into the Tasks window.
         TaskNotifier.shared.appState = self
         taskScheduler.start()
+        if Bundle.main.bundleURL.pathExtension == "app" { pairInvites.start(appState: self) }
         if ProcessInfo.processInfo.environment["TESTING_MODE"] != nil {
             testServer.start(appState: self)
         }
@@ -636,6 +692,11 @@ class AppState: ObservableObject {
 
         // And the quick launcher's global ⌃Space hotkey.
         if quickLauncherEnabled { quickLauncher.setEnabled(true) }
+
+        // The tray transcript starts with the camera, stops after a silence and
+        // picks up a recording left behind, without the tray open.
+        TrayTranscript.shared.attach(self)
+        VoiceASR.app = self
 
         // The app-level agent's voice, applied once at launch (didSet doesn't
         // fire for the init assignment above). Everything else it owns is
@@ -682,10 +743,10 @@ class AppState: ObservableObject {
             showWelcome = true
         }
 
-        // Auto-start is headless unless "Preload the model when the server starts" resolves an installed
-        // model.
+        guard startServerAtLaunch else { return }
+        // The server starts headless unless "Preload the model when the server starts" resolves an
+        // installed model.
         let launchPlan = StartupModelChoice.launch(
-            autoStart: autoStartServer,
             loadModelAtStart: loadModelAtStart,
             mode: startupModelMode,
             pinnedPath: startupModelPinnedPath,
@@ -693,8 +754,6 @@ class AppState: ObservableObject {
             installedPaths: localModels.filter(\.isChatPickable).map(\.path)
         )
         switch launchPlan {
-        case .doNothing:
-            break
         case .headless:
             server.startHeadless(modelsDir: ServerManager.modelsRoot, options: serverOptions)
         case .load(let path):
@@ -708,17 +767,15 @@ class AppState: ObservableObject {
         }
 
         // Fallback health detection — runs detached to avoid blocking MainActor
-        if autoStartServer {
-            let checkPort = server.port
-            let mgr = server
-            Task.detached {
-                let api = APIClient()
-                for _ in 0..<120 {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    if let ok = try? await api.checkHealth(port: checkPort), ok {
-                        await mgr.forceRunning()
-                        return
-                    }
+        let checkPort = server.port
+        let mgr = server
+        Task.detached {
+            let api = APIClient()
+            for _ in 0..<120 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if let ok = try? await api.checkHealth(port: checkPort), ok {
+                    await mgr.forceRunning()
+                    return
                 }
             }
         }
@@ -737,7 +794,7 @@ class AppState: ObservableObject {
     /// LAN), else headless over the models root. Launch passes its plan's choice.
     func ensureServerForLan(modelPath: String? = nil) {
         guard server.status != .running, server.status != .starting else { return }
-        let path = modelPath ?? selectedModelPath
+        let path = modelPath ?? server.localChatLoadPath(selectedPath: selectedModelPath) ?? ""
         if !path.isEmpty {
             server.start(modelPath: path, options: serverOptions)
         } else {
@@ -751,8 +808,7 @@ class AppState: ObservableObject {
     func startServer(loadingSelection: Bool) {
         guard server.status != .running, server.status != .starting else { return }
         server.startHeadless(modelsDir: ServerManager.modelsRoot, options: serverOptions)
-        guard loadingSelection, !selectedModelPath.isEmpty else { return }
-        let path = selectedModelPath
+        guard loadingSelection, let path = server.localChatLoadPath(selectedPath: selectedModelPath) else { return }
         let mgr = server
         modelSwitchGeneration += 1
         let generation = modelSwitchGeneration
@@ -879,7 +935,8 @@ class AppState: ObservableObject {
     }
     var visibleChatSessions: [ChatSession] { Self.sidebarSessions(from: chatSessions) }
 
-    func newChatSession(agentId: UUID? = nil) -> UUID {
+    @discardableResult
+    func newChatSession(agentId: UUID? = nil, group: UUID? = nil) -> UUID {
         // An agent's thread is called "New agent" until it has something to be
         // named after — the sidebar lists it under Agents, where "New Chat"
         // would describe the wrong thing.
@@ -889,6 +946,7 @@ class AppState: ObservableObject {
         // then remembers its own choice (ChatSession.useMCP/enableThinking).
         session.useMCP = mcpMode
         session.agentId = agentId
+        session.groupId = group
         chatSessions.insert(session, at: 0)
         activeChatId = session.id
         saveChatHistory()
@@ -1333,24 +1391,24 @@ class AppState: ObservableObject {
 
     // MARK: - Persistence
 
+    /// Writes what changed since the last save. Task-run and bridge sessions are
+    /// never written: their transcripts live elsewhere (`ChatStore.save`).
     func saveChatHistory() {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = .prettyPrinted
-        // Transient task-run sessions live in `chatSessions` only while their run is
-        // in flight (the agent loop reads/appends through AppState). They are never
-        // persisted here — their transcript is saved out of line by TaskScheduler.
-        let persisted = chatSessions.filter { $0.taskRunId == nil && !$0.isExternalBridge }
-        guard let data = try? encoder.encode(persisted) else { return }
-        try? data.write(to: URL(fileURLWithPath: historyPath))
+        sidebarStore?.retryUnsavedGroups()
+        chatStore?.save(chatSessions)
     }
 
     private func loadChatHistory() {
-        guard FileManager.default.fileExists(atPath: historyPath),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: historyPath)) else { return }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        chatSessions = (try? decoder.decode([ChatSession].self, from: data)) ?? []
+        do {
+            let store = try ChatStore(legacySidebar: LegacySidebar(defaults: .standard))
+            chatStore = store
+            sidebarStore = SidebarStore(database: store.database)
+            LegacySidebar.retire(from: .standard, backupPath: LegacySidebar.backupPath)
+        } catch {
+            NSLog("[chats] %@", "could not open \(ChatStore.defaultPath): \(error)")
+        }
+        chatSessions = chatStore?.load() ?? []
+        sidebarGroups = sidebarStore?.loadGroups() ?? SidebarGroups()
         activeChatId = chatSessions.first?.id
     }
 

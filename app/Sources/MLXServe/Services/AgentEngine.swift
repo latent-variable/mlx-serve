@@ -27,6 +27,10 @@ enum AgentEngine {
     /// Rough soft-token cost of one image sent in history (a screenshot's grid).
     static let imageTokenEstimate = 1024
 
+    private static func carriesMedia(_ msg: ChatMessage) -> Bool {
+        !(msg.images ?? []).isEmpty || !(msg.videos ?? []).isEmpty || !(msg.audio ?? []).isEmpty
+    }
+
     static func tokenCostForMessage(_ msg: ChatMessage, withImages: Bool = false) -> Int {
         var cost = 4  // role + formatting envelope
         cost += roughTokenCount(msg.content)
@@ -76,16 +80,16 @@ enum AgentEngine {
     ///   - messages: All chat messages in the session.
     ///   - contextLength: Effective context window size.
     ///   - maxTokens: Max generation tokens (capped to 40% of context for budget math).
-    ///   - buildMultimodalContent: Optional closure to build image content blocks for
-    ///     user messages. Pass nil to skip image handling (e.g. in TestServer).
-    ///   - historyImages: send every user message's images (the server renders each
+    ///   - buildMultimodalContent: Optional closure to build the content blocks of a user
+    ///     message carrying media. Pass nil to skip media handling (e.g. in TestServer).
+    ///   - historyImages: send every user message's media (the server renders each
     ///     where it was sent), not only the last one's. Off for Gemma's raw-pixel
     ///     format, ~9 MB an image against the server's body cap.
     static func buildAgentHistory(
         messages allMessages: [ChatMessage],
         contextLength: Int,
         maxTokens: Int,
-        buildMultimodalContent: ((String, [ChatImage]) -> Any)? = nil,
+        buildMultimodalContent: ((String, ChatMessage) -> Any)? = nil,
         historyImages: Bool = false
     ) -> [[String: Any]] {
 
@@ -179,6 +183,11 @@ enum AgentEngine {
         let window = Array(allMessages[includeStartIdx..<allMessages.count])
         let totalToolResults = window.filter { $0.toolCallId != nil }.count
         var toolResultsSeen = 0
+        // Results after the model's last reply are ones it has not seen yet: they go in
+        // full, or it re-reads the file it just asked for in ever smaller pieces (#605).
+        let lastReplyIdx = window.lastIndex {
+            $0.role == .assistant && !$0.isAgentSummary && (!$0.content.isEmpty || !($0.toolCalls ?? []).isEmpty)
+        }
 
         // --- Assemble history ---
 
@@ -187,8 +196,8 @@ enum AgentEngine {
         // Emit pinned user messages that fell outside the window (in original order).
         for idx in pinnedUserOutside {
             let m = allMessages[idx]
-            if sendsImages, let multimodal = buildMultimodalContent, let imgs = m.images, !imgs.isEmpty {
-                history.append(["role": "user", "content": multimodal(m.content, imgs)])
+            if sendsImages, let multimodal = buildMultimodalContent, carriesMedia(m) {
+                history.append(["role": "user", "content": multimodal(m.content, m)])
             } else {
                 history.append(["role": "user", "content": m.content])
             }
@@ -203,21 +212,8 @@ enum AgentEngine {
             if content.count > 500 {
                 content = String(content.prefix(500)) + "..."
             }
-            var dict: [String: Any] = ["role": "assistant"]
-            if !content.isEmpty { dict["content"] = content }
-            if let tcs = msg.toolCalls, !tcs.isEmpty {
-                dict["tool_calls"] = tcs.map { tc -> [String: Any] in
-                    [
-                        "id": tc.id,
-                        "type": "function",
-                        "function": [
-                            "name": tc.name,
-                            "arguments": tc.arguments
-                        ] as [String: Any]
-                    ]
-                }
-            }
-            history.append(dict)
+            // Text only: its tool results fell outside the window, and a strict API 400s on unanswered calls.
+            history.append(["role": "assistant", "content": content])
         }
 
         // Without history images only the last user message carries its images.
@@ -226,12 +222,16 @@ enum AgentEngine {
             : nil
 
         // Emit messages from the backward-walk window.
-        for msg in window {
+        var openCalls = Set<String>()
+        for (i, msg) in window.enumerated() {
             if msg.failedRetry { continue }
-            // Tool responses — progressive truncation
+            // Tool responses — progressive truncation once the model has answered them
             if let callId = msg.toolCallId {
+                // A result whose call fell outside the window is an orphan a strict API refuses.
+                guard openCalls.remove(callId) != nil else { continue }
                 let isRecent = toolResultsSeen >= totalToolResults - 2
-                let limit = isRecent ? recentLimit : olderLimit
+                let unanswered = lastReplyIdx.map { i > $0 } ?? true
+                let limit = unanswered ? msg.content.count : (isRecent ? recentLimit : olderLimit)
                 toolResultsSeen += 1
                 history.append([
                     "role": "tool",
@@ -268,6 +268,7 @@ enum AgentEngine {
                         ] as [String: Any]
                     ]
                 }
+                openCalls.formUnion(tcs.map(\.id))
                 history.append(dict)
                 continue
             }
@@ -283,13 +284,14 @@ enum AgentEngine {
             if msg.role == .assistant && content.count > 500 {
                 content = String(content.prefix(500)) + "..."
             }
-            if content.isEmpty { continue }
+            // A media-only turn (a clip, a recording, a picture) has no text and still counts.
+            let multimodalHere = buildMultimodalContent != nil && msg.role == .user
+                && (sendsImages || msg.id == lastUserMsgId) && carriesMedia(msg)
+            if content.isEmpty && !multimodalHere { continue }
 
             var dict: [String: Any] = ["role": msg.role.rawValue]
-            if let multimodal = buildMultimodalContent,
-               msg.role == .user, sendsImages || msg.id == lastUserMsgId,
-               let imgs = msg.images, !imgs.isEmpty {
-                dict["content"] = multimodal(content, imgs)
+            if multimodalHere, let multimodal = buildMultimodalContent {
+                dict["content"] = multimodal(content, msg)
             } else {
                 dict["content"] = content
             }

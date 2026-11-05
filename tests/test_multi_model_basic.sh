@@ -12,6 +12,7 @@
 # Defaults: root = ~/.mlx-serve/models, port = 8095.
 
 set -e
+source "$(dirname "$0")/lib/server.sh"
 
 ROOT="${1:-$HOME/.mlx-serve/models}"
 PORT="${2:-8095}"
@@ -24,7 +25,7 @@ if [ ! -d "$ROOT" ]; then
 fi
 
 # Find the first two model dirs with a supported model_type — see
-# tests/_lib_supported_models.sh and src/model_discovery.zig. Picking by
+# tests/_lib_supported_models.sh and src/host/registry/discovery.zig. Picking by
 # config.json existence alone is not enough: a partial download of an
 # unsupported arch (e.g. deepseek_v4) would crash mlx-serve on load.
 source "$(dirname "$0")/_lib_supported_models.sh"
@@ -58,10 +59,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Wait for server.
-for _ in $(seq 1 30); do
-    if curl -fs "$BASE/health" >/dev/null 2>&1; then break; fi
-    sleep 1
-done
+srv_wait_health "$BASE" 30 1 || true
 if ! curl -fs "$BASE/health" >/dev/null 2>&1; then
     echo -e "${RED}FAIL${NC} server did not start in 30s. Log:"
     tail -30 "$LOGFILE"
@@ -80,7 +78,8 @@ fire() {
         return 1
     fi
     local content
-    content=$(echo "$resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["choices"][0]["message"].get("content","") or "")')
+    # A thinking model can spend 8 tokens on reasoning: either field proves the request ran on it.
+    content=$(echo "$resp" | python3 -c 'import sys,json; m=json.load(sys.stdin)["choices"][0]["message"]; print(m.get("content") or m.get("reasoning_content") or "")')
     if [ -z "$content" ]; then
         echo -e "${RED}FAIL${NC} empty content. Response: $resp"
         return 1

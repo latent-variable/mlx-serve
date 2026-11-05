@@ -13,6 +13,7 @@
 # Usage: ./tests/test_model_discovery.sh [models_root] [port]
 
 set -uo pipefail
+source "$(dirname "$0")/lib/server.sh"
 
 MODELS_ROOT="${1:-$HOME/.mlx-serve/models}"
 PORT="${2:-19060}"
@@ -23,19 +24,15 @@ BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
 [[ -d "$MODELS_ROOT" ]] || { echo "SKIP: root not found: $MODELS_ROOT"; exit 0; }
 [[ -d "$MODELS_ROOT/$LOADED_MODEL" ]] || { echo "SKIP: no checkpoint at $MODELS_ROOT/$LOADED_MODEL"; exit 0; }
 
-trap 'pkill -9 -x mlx-serve 2>/dev/null; true' EXIT
+trap 'pkill -9 -f "mlx-serve.*--port $PORT" 2>/dev/null; true' EXIT
 
 # Test 1: --model + --model-dir → discovery enriches /v1/models
-pkill -9 -x mlx-serve 2>/dev/null; sleep 1
+pkill -9 -f "mlx-serve.*--port $PORT" 2>/dev/null; sleep 1
 "$BINARY" --model "$MODELS_ROOT/$LOADED_MODEL" --model-dir "$MODELS_ROOT" \
     --serve --port "$PORT" --ctx-size 4096 --log-level warn \
     --no-warmup-eager > /tmp/test_disc.log 2>&1 &
 PID=$!
-for _ in $(seq 1 240); do
-    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
-    sleep 0.5
-    kill -0 "$PID" 2>/dev/null || { echo "FAIL: server died" >&2; exit 1; }
-done
+srv_wait_health "http://127.0.0.1:$PORT" 240 0.5 "$PID" || kill -0 "$PID" 2>/dev/null || { echo "FAIL: server died" >&2; exit 1; }
 
 resp=$(curl -sf "http://127.0.0.1:$PORT/v1/models")
 if [[ -z "$resp" ]]; then
@@ -91,7 +88,7 @@ if [[ "$sibling_bytes" -le 0 ]]; then
 fi
 echo "  PASS"
 
-pkill -9 -x mlx-serve 2>/dev/null
+pkill -9 -f "mlx-serve.*--port $PORT" 2>/dev/null
 sleep 1
 
 # Test 3: --model-dir alone (no --model) auto-selects first discovered
@@ -100,11 +97,7 @@ echo "=== Test 3: --model-dir auto-select ==="
     --serve --port "$PORT" --ctx-size 4096 --log-level info \
     --no-warmup-eager > /tmp/test_disc2.log 2>&1 &
 PID=$!
-for _ in $(seq 1 240); do
-    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
-    sleep 0.5
-    kill -0 "$PID" 2>/dev/null || { echo "FAIL: server died (auto-select path)" >&2; cat /tmp/test_disc2.log; exit 1; }
-done
+srv_wait_health "http://127.0.0.1:$PORT" 240 0.5 "$PID" || kill -0 "$PID" 2>/dev/null || { echo "FAIL: server died (auto-select path)" >&2; cat /tmp/test_disc2.log; exit 1; }
 
 # --model-dir WITHOUT --model starts headless: no primary model is loaded and
 # every discovery is registered as a stub that loads on demand. The old
@@ -126,6 +119,6 @@ fi
 echo "  headless: 0 loaded, $stub_count stub(s) registered on demand"
 echo "  PASS"
 
-pkill -9 -x mlx-serve 2>/dev/null
+pkill -9 -f "mlx-serve.*--port $PORT" 2>/dev/null
 echo
 echo "=== ALL DISCOVERY TESTS PASSED ==="

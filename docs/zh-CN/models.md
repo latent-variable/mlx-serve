@@ -6,7 +6,6 @@
 |---|---|---|---|---|
 | **Gemma 4** | `gemma4`, `gemma4_unified` | `gemma-4-e2b-it-4bit`、`gemma-4-e4b-it-8bit`、`gemma-4-26b-a4b-it-4bit`、`gemma-4-12b-unified` | Gemma 轮次 | SigLIP（unified 增加音频） |
 | **Gemma 3** | `gemma3` | `gemma-3-12b-it-qat-4bit` | Gemma 轮次 | -- |
-| **DiffusionGemma** | `diffusion_gemma` | `diffusiongemma-26B-A4B-it-4bit` | Gemma 轮次（块扩散） | -- |
 | **Qwen 2 / 3 / 3.5 / 3.6 / 3.8** | `qwen2`, `qwen3`, `qwen3_moe`, `qwen3_5`, `qwen3_5_moe`, `qwen3_next` | `Qwen3-4B`、`Qwen3.5-4B`、`Qwen3.6-27B`、`Qwen3.6-35B-A3B`、[`Qwen3.8-27B`](https://huggingface.co/ddalcu/Qwen3.8-27B-MLX-Serve-4bit)（18.2 GB，内置草稿头，effort 档位 `xhigh`/`medium`/`low`） | ChatML | Qwen3-VL |
 | **Muse-Glimmer** | `muse_glimmer` | Meta 的 Muse-Glimmer-30B（[4-bit](https://huggingface.co/ddalcu/Muse-Glimmer-30B-MLX-Serve-4bit) / [8-bit](https://huggingface.co/ddalcu/Muse-Glimmer-30B-MLX-Serve-8bit)，内置 DFlash 配套草稿模型，M4 Max 上最高 75 tok/s） | Harmony 频道 + ATEM 工具 | Muse ViT（图像） |
 | **Ling 3.0** | `bailing_hybrid` | inclusionAI Ling 3.0，例如 `rapid-mlx/Ling-3.0-tiny-MLX-4bit`（4.2 GB，KDA + MLA 混合 MoE） | GLM 标签，思考默认开启 | -- |
@@ -20,7 +19,7 @@
 | **Mistral** | `mistral` | Mistral 7B Instruct v0.3 | Mistral 轮次 | -- |
 | **Laya**（类型化决策） | `laya` | `aac6fef/laya-multilingual-mlx`（mmBERT-base 编码器 + 决策头；`POST /v1/decisions`） | n/a | -- |
 | **Kev**（类型化决策） | `kev` | `aselea/Kev-4B-MLX-Serve-8bit`（Qwen3.5-4B + 指针头；`POST /v1/decisions`；由 `tests/convert_kev_weights.py` 生成） | n/a | -- |
-| **嵌入** | `bert`, `gemma3_text`, `qwen3` | bge、mxbai、EmbeddingGemma、Qwen3-Embedding（池化方式从检查点读取） | n/a | -- |
+| **嵌入** | `bert`, `gemma3_text`, `embedding_gemma2`, `qwen3` | bge、mxbai、EmbeddingGemma 1 和 2（2：768 维，`dimensions` 可低至 128，8192 个 token，文本、图片和视频）、Qwen3-Embedding（池化方式从检查点读取） | n/a | EmbeddingGemma 2：SigLIP（图片、视频） |
 | **其它一切以 GGUF 形式** | 通过内置 llama.cpp | HuggingFace 上任何 `.gguf` | 按模板 | -- |
 
 媒体模型位于同一个注册表里，分类方式也相同：FLUX.2、Krea-2 和 Mage-Flow（图像），Qwen3-TTS、Kokoro、ACE-Step 和 MiniMax Music 3（语音 + 音乐），LTX-Video 2.3 / 2.5 和 MiniMax-H3（视频），Hunyuan3D-2.1（3D）。聊天请求里点名其中之一，会收到一个 400，并指出应改用哪个端点。

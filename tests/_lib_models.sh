@@ -1,16 +1,16 @@
 #!/bin/bash
-# Shared model lookup for the live test scripts, so one tree runs on any Mac.
-# A script names a checkpoint by its <org>/<repo> (or <dir>/<file>.gguf) path
-# RELATIVE to a model root; the lib finds it on whatever roots this box has and
-# says whether it fits this box's GPU budget.
+# Shared model lookup for the live test scripts, so one tree runs on any Mac. A script names a checkpoint by its
+# <org>/<repo> (or <dir>/<file>.gguf) path RELATIVE to a model root; never hardcode a volume path in a test.
 #
 #   source "$(dirname "$0")/_lib_models.sh"
 #   MODEL="${MY_TEST_MODEL:-$(find_model mlx-community/gemma-4-e4b-it-8bit mlx-community/gemma-4-e4b-it-4bit)}"
 #   model_fits "$MODEL" || { echo "SKIP: $(model_gb "$MODEL") GB > $(max_model_gb) GB"; exit 0; }
 #
-# Roots: MLX_SERVE_MODEL_ROOTS (colon-separated) replaces the defaults, which are
-# ~/.mlx-serve/models, ~/.lmstudio/models and models|models-dl|Models|gguf on
-# every mounted volume. Budget: MAX_MODEL_GB overrides the derived one.
+# Roots: MLX_SERVE_MODEL_ROOTS (colon list) replaces ~/.mlx-serve/models, ~/.lmstudio/models and
+# models|models-dl|Models|gguf on every mounted volume. Budget (model_fits) mirrors the server's load preflight:
+# weights + min(weights/8, 6) + 1 GB against iogpu.wired_limit_mb when raised, else 3/4 of RAM (Linux: the first
+# NVIDIA GPU); MAX_MODEL_GB overrides, MODEL_HEADROOM_GB adds KV room. find_fitting_model skips packs past it.
+# Tests: bash tests/test_lib_models.sh (hermetic).
 
 model_roots() {
     if [[ -n "${MLX_SERVE_MODEL_ROOTS:-}" ]]; then
@@ -40,15 +40,23 @@ find_model() {
 
 # On-disk size in whole GB, rounded up, following symlinked shards.
 model_gb() {
-    local kb
+    local kb ngram
     kb=$(du -skL "$1" 2>/dev/null | cut -f1)
+    # qwen4_exp's n-gram table is mmapped and read by row, never wired: it is not GPU weight.
+    ngram=$(du -skL "$1/ngram_table.bin" 2>/dev/null | cut -f1)
+    kb=$(( ${kb:-0} - ${ngram:-0} ))
     echo $(( (${kb:-0} + 1048575) / 1048576 ))
 }
 
 # Metal's working set: iogpu.wired_limit_mb when it is raised, else the macOS
-# default of about 3/4 of RAM.
+# default of about 3/4 of RAM. Linux: the first NVIDIA GPU's memory.
 gpu_budget_gb() {
     local mb
+    if [[ "$(uname)" == Linux ]]; then
+        mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
+        echo $(( ${mb:-0} / 1024 ))
+        return
+    fi
     mb=$(sysctl -n iogpu.wired_limit_mb 2>/dev/null)
     [[ "${mb:-0}" -gt 0 ]] || mb=$(( $(sysctl -n hw.memsize) / 1048576 * 3 / 4 ))
     echo $(( mb / 1024 ))

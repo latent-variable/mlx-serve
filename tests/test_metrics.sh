@@ -1,25 +1,25 @@
 #!/bin/bash
 # Integration tests for the opt-in observability layer (--metrics):
 #   * GET /metrics       — Prometheus text exposition (headless scraping)
-#   * GET /metrics.json  — open JSON feed (drives the index-page panel)
-#   * GET /              — index page hosts a live metrics panel when --metrics
+#   * GET /metrics.json  — open JSON feed (drives the console's Monitoring pane)
 #
 # There is NO admin dashboard, NO auth, and NO admin mutations — the panel is
-# open and read-only. (The old tests/test_admin_api.sh is retired.)
+# open and read-only.
 #
 # Tests:
-#  1. Without --metrics: /metrics + /metrics.json → 503; index page has no panel.
-#  2. With    --metrics: /metrics → 200 Prometheus text; /metrics.json → 200 JSON;
-#                        index page embeds the panel + polls /metrics.json.
+#  1. Without --metrics: /metrics + /metrics.json → 503.
+#  2. With    --metrics: /metrics → 200 Prometheus text; /metrics.json → 200 JSON.
 #  3. After one chat request: counters/histograms increment; live-gauge holds
 #                             (live > 0 after a request, live == total at rest).
 #
 # Usage: ./tests/test_metrics.sh [model_dir] [port]
 #   Starts its own servers. Default model: Gemma 4 E4B 8-bit.
+source "$(dirname "$0")/_lib_models.sh"
 
 set -u
+source "$(dirname "$0")/lib/server.sh"
 
-MODEL="${1:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit}"
+MODEL="${1:-$(find_model mlx-community/gemma-4-e4b-it-8bit || echo "$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit")}"
 PORT="${2:-11291}"
 BASE="http://127.0.0.1:$PORT"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
@@ -49,34 +49,13 @@ pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 wait_health() {
-    for _ in $(seq 1 90); do
-        curl -sf "$BASE/health" >/dev/null 2>&1 && return 0
-        sleep 1
-    done
+    srv_wait_health "$BASE" 90 1 && return 0
     echo "FAIL: server never became healthy on port $PORT"
     return 1
 }
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 0: index-panel rate math (pure, no server, no GPU)
-# ════════════════════════════════════════════════════════════════════════════
-echo ""
-echo "── Phase 0: panel rate math (src/html/metrics.js) ──"
-NODE_BIN="$(command -v node || true)"
-if [ -z "$NODE_BIN" ]; then
-    echo "  SKIP: node not on PATH"
-else
-    if "$NODE_BIN" "$(dirname "$0")/metrics_panel_test.mjs" > /tmp/metrics_panel.out 2>&1; then
-        sed 's/^/  /' /tmp/metrics_panel.out | grep -E "PASS|ALL PASS"
-        check "panel rate math (no carry-forward; prefill 0 while decoding)" 1
-    else
-        sed 's/^/  /' /tmp/metrics_panel.out
-        check "panel rate math (no carry-forward; prefill 0 while decoding)" 0
-    fi
-fi
-
-# ════════════════════════════════════════════════════════════════════════════
-# Phase 1: Without --metrics, /metrics* return 503 and the index page has no panel
+# Phase 1: Without --metrics, /metrics* return 503
 # ════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "── Phase 1: without --metrics ──"
@@ -95,23 +74,17 @@ check "503 body mentions 'not enabled'" "$(echo "$BODY" | grep -q "not enabled" 
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/metrics.json")
 check "GET /metrics.json without --metrics → 503" "$([ "$STATUS" = "503" ] && echo 1 || echo 0)"
 
-INDEX=$(curl -s "$BASE/")
-check "index page renders (200-ish, console markup present)" \
-    "$(echo "$INDEX" | grep -q 'data-tab="chat"' && echo 1 || echo 0)"
-check "index page has NO metrics panel when --metrics off" \
-    "$(echo "$INDEX" | grep -q 'id=m-status' && echo 0 || echo 1)"
-
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true
 pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true; sleep 1
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 2: With --metrics, endpoints + index panel are present
+# Phase 2: With --metrics, the endpoints answer
 # ════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "── Phase 2: with --metrics (idle — no requests yet) ──"
 
 # --log-level info so the "Prometheus metrics: ENABLED" startup line is visible.
-"$BINARY" --model "$MODEL" --serve --port "$PORT" --metrics --no-pld --log-level info > "$LOG" 2>&1 &
+"$BINARY" --model "$MODEL" --serve --port "$PORT" --metrics --no-pld --ctx-size 32768 --log-level info > "$LOG" 2>&1 &
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true' EXIT
 wait_health
@@ -162,17 +135,6 @@ check "/metrics.json has 'histograms' key" "$(echo "$JBODY" | grep -q '"histogra
 check "/metrics.json has 'generation_tokens_live'" \
     "$(echo "$JBODY" | grep -q '"generation_tokens_live"' && echo 1 || echo 0)"
 check "/metrics.json has 'bucket_counts'"  "$(echo "$JBODY" | grep -q '"bucket_counts"' && echo 1 || echo 0)"
-
-# Index page hosts the live panel when --metrics is on
-INDEX=$(curl -s "$BASE/")
-check "index page HAS the metrics panel when --metrics on" \
-    "$(echo "$INDEX" | grep -q 'id=m-status' && echo 1 || echo 0)"
-check "index panel polls /metrics.json" \
-    "$(echo "$INDEX" | grep -q "/metrics.json" && echo 1 || echo 0)"
-check "index panel has decode + prefill tok/s tiles" \
-    "$(echo "$INDEX" | grep -q 'm-decode-tps' && echo "$INDEX" | grep -q 'm-prefill-tps' && echo 1 || echo 0)"
-check "index panel has decode + prefill sparklines" \
-    "$(echo "$INDEX" | grep -q 'm-spark-decode' && echo "$INDEX" | grep -q 'm-spark-prefill' && echo 1 || echo 0)"
 
 # ════════════════════════════════════════════════════════════════════════════
 # Phase 3: After one chat request, counters are non-zero

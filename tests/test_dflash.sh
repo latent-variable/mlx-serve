@@ -1,17 +1,15 @@
 #!/bin/bash
-# DFlash block-drafter integration test — env-gated on a local target +
-# assistant pair (Muse-Glimmer-30B + its DFlash assistant today):
+# test_dflash.sh — DFlash block-drafter live end to end (Muse-Glimmer-30B 8-bit + its assistant today): the sidecar
+# probe classifies it (`DFlash drafter ready`), rounds ENGAGE (`[spec-stats] mode=dflash attempts>0`: the fallback is
+# output-identical, so equality alone misses a dispatch hole), greedy dflash-on == off over an exact 30-token budget,
+# the adaptive gate (`runtime_disabled` only when avg_per_round < gate_min; either branch may be right), exact
+# stream and non-stream clipping at max_tokens=17, per-request opt-out, a tool round, machine-width resolution, and
+# an aligned assistant-context prefix restore ([12] is the live dflash disk arm).
 #
-#   DFLASH_TEST_MODEL=~/claude-tmp/muse-glimmer/Muse-Glimmer-30B-MLX-Serve-8bit \
-#   DFLASH_TEST_DRAFTER=~/.mlx-serve/models/meta-models/Muse-Glimmer-30B-assistant \
-#       ./tests/test_dflash.sh
+#   DFLASH_TEST_MODEL=<target dir> DFLASH_TEST_DRAFTER=<assistant dir> ./tests/test_dflash.sh   # DFLASH_TEST_PORT
 #
-# Pins the live contract: the sidecar probe classifies the assistant as
-# DFlash (boot log), rounds ENGAGE (`[spec-stats] mode=dflash attempts>0` —
-# engagement COUNTS, never output shape), greedy dflash-on equals greedy
-# dflash-off byte-for-byte over reasoning+content (always-thinking target),
-# per-request enable_drafter:false opts out, and tool calls still parse with
-# the drafter engaged.
+# SKIPs without the env vars. Hermetic twins: engines/mlx/spec/dflash/dflash.zig config/mask/forward/cache tests + fixture parity
+# (DFLASH_FIXTURES, tests/dump_dflash_fixtures.py), nextDflash greedy equivalence, specInitWiring / specTickMode.
 
 set -euo pipefail
 
@@ -42,7 +40,7 @@ trap cleanup EXIT
 
 echo "waiting for server..."
 for _ in $(seq 1 120); do
-    curl -s -m 2 "$BASE/health" > /dev/null 2>&1 && break
+    curl -sf -m 2 "$BASE/health" > /dev/null 2>&1 && break
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then
         echo "FAIL: server died during load"; tail -20 "$LOG"; exit 1
     fi
@@ -158,8 +156,7 @@ fi
 # block-wide `qmm` where serial decode runs `qmv`, and at 4 bits a near-tie
 # argmax flips between them — the sanctioned INT4 divergence class. Measured on
 # Muse-Glimmer-30B: the 8-bit build is byte-identical 6/6, the 4-bit build
-# diverges reproducibly while each arm stays perfectly self-consistent, and the
-# divergence is unchanged with MLX_SERVE_SLIDING_BLOCK_TRIM=0.
+# diverges reproducibly while each arm stays perfectly self-consistent.
 #
 # So: byte-equality at 8-bit or wider; at narrower widths assert what must still
 # hold — each arm REPRODUCIBLE (a broken verify or rollback shows as run-to-run
@@ -333,14 +330,36 @@ dc = cfg.get("dflash_config") or cfg
 print(dc.get("block_size", ""))
 ' "$DRAFTER/config.json")
 BLINE=$(grep -o "DFlash drafter ready (block_size=[0-9]*[^)]*" "$LOG" | head -1)
+# Trees on the tensor units draft past the trained block (dflash.TREE_NAX_BLOCK).
+TREE_NAX_BLOCK=16
 if echo "$BLINE" | grep -q ", capped ("; then
     ok "block capped for this machine's verify lanes ($BLINE)"
 elif echo "$BLINE" | grep -q "wide_verify_lane=true" && echo "$BLINE" | grep -q "block_size=$DECLARED_BLOCK,"; then
     ok "wide verify lane present, checkpoint block ($DECLARED_BLOCK) kept ($BLINE)"
-elif grep -q "draft trees engaged" "$LOG" && echo "$BLINE" | grep -q "block_size=$DECLARED_BLOCK,"; then
-    ok "draft tree cap keeps the checkpoint block ($DECLARED_BLOCK) ($BLINE)"
+elif grep -q "draft trees engaged" "$LOG" && echo "$BLINE" | grep -q "block_size=$TREE_NAX_BLOCK,"; then
+    ok "draft trees on NAX draft $TREE_NAX_BLOCK positions past the checkpoint block ($DECLARED_BLOCK) ($BLINE)"
 else
     bad "block resolves against the machine's verify lanes (declared=$DECLARED_BLOCK)" "$BLINE"
+fi
+
+# [10b] A draft-tree verify on a hybrid trunk runs the GDN tree kernels and,
+# on NAX, one joined q|k|v matmul per attention layer.
+if grep -q "draft trees engaged" "$LOG" && grep -q "\[gdn\]" "$LOG"; then
+    if grep -q "\[gdn\] verify tree engaged" "$LOG"; then ok "GDN tree verify engaged"; else bad "GDN tree verify engaged" "$(grep "\[gdn\]" "$LOG" | head -3)"; fi
+    if grep -q "lane kernels\|\[lane\]" "$LOG"; then
+        if grep -q "\[attn\] joined q|k|v engaged" "$LOG"; then ok "joined q|k|v engaged"; else bad "joined q|k|v engaged" "$(grep "\[attn\]" "$LOG" | head -3)"; fi
+    fi
+fi
+
+# [10c] A continuation the context backs is verified as a copied chain, and
+# the greedy output matches the drafter-off run.
+if grep -q "draft trees engaged" "$LOG"; then
+    COPY_TEXT="The lighthouse keeper climbed the spiral stairs at dusk, trimmed the wick, polished the great lens until it shone, and wrote in the logbook that the wind had backed to the southwest and the sea was rising."
+    copy_body() { printf '{"model":"mlx-serve","temperature":0,"max_tokens":120,"chat_template_kwargs":{"enable_thinking":false},%s"messages":[{"role":"user","content":"Repeat this paragraph exactly, twice, with nothing else: %s"}]}' "$1" "$COPY_TEXT"; }
+    ON=$(curl -s -m 180 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "$(copy_body '')" | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])')
+    OFF=$(curl -s -m 180 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "$(copy_body '"enable_drafter":false,')" | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])')
+    if grep -q "context copy verified" "$LOG"; then ok "context copy verified as a chain"; else bad "context copy verified as a chain" "$(grep "\[dflash\]" "$LOG" | tail -3)"; fi
+    if [ -n "$ON" ] && [ "$ON" = "$OFF" ]; then ok "copied rounds keep the drafter-off bytes"; else bad "copied rounds keep the drafter-off bytes" "$(printf '%s\n---\n%s' "$ON" "$OFF" | head -c 400)"; fi
 fi
 
 # [11] The assistant context rides the prefix cache. A restore forwards no
@@ -359,11 +378,12 @@ else
 fi
 
 # [11b] The first request of a burst is admitted alone and arms DFlash; once the
-# others arrive it must yield and decode in the batched group, not tick serial beside it.
+# others reach the crowd threshold (`mtpCrowdThresholdFor`: up to 9 on a dense target)
+# it must yield and decode in the batched group, not tick serial beside it.
 gen "Write a long story about a lighthouse keeper and the winter storms." 200 ", \"enable_drafter\": true" > /dev/null &
 BURST_PIDS="$!"
 sleep 1
-for i in 2 3 4; do
+for i in $(seq 2 10); do
     gen "Write a long story about harbour pilot number $i and the fog." 120 "" > /dev/null &
     BURST_PIDS="$BURST_PIDS $!"
 done

@@ -285,7 +285,7 @@ enum H3TimeEstimate {
                         steps: Int, fast: Bool, hardware: H3Hardware = .current,
                         promptTokens: Int = 250) -> Double {
         let r = H3Plan.rows(width: width, height: height, frames: frames, promptTokens: promptTokens)
-        let perStep = denseStepSeconds(rows: r) * (fast ? fastFactor(steps: steps) : 1.0)
+        let perStep = denseStepSeconds(rows: r) * model.stepCostScale * (fast ? fastFactor(steps: steps) : 1.0)
         let vae = vaeAnchorSeconds * (Double(width) * Double(height) * Double(frames)) / vaeAnchorPixels
         let anchorSeconds = perStep * Double(steps) + fixedSeconds + vae
         let cores = hardware.gpuCores > 0 ? Double(hardware.gpuCores) : Double(H3Hardware.anchor.gpuCores)
@@ -330,7 +330,7 @@ enum H3TimeEstimate {
                             steps: Int, fast: Bool,
                             history: H3RunHistory = .load()) -> (perStep: Double, tail: Double) {
         let r = H3Plan.rows(width: width, height: height, frames: frames, promptTokens: 250)
-        let perStep = denseStepSeconds(rows: r) * (fast ? fastFactor(steps: steps) : 1.0)
+        let perStep = denseStepSeconds(rows: r) * model.stepCostScale * (fast ? fastFactor(steps: steps) : 1.0)
         let vae = vaeAnchorSeconds * (Double(width) * Double(height) * Double(frames)) / vaeAnchorPixels
         let tail = fixedSeconds + vae
         if history.speedFactor != nil {
@@ -342,20 +342,41 @@ enum H3TimeEstimate {
         return (perStep * scale, tail * scale)
     }
 
+    /// Seconds per anchor second on a machine, and whether it was measured: its
+    /// own history, else (this Mac) the hardware model, else (a peer that never
+    /// rendered) this Mac's figure.
+    static func speedFactor(peer: String?) -> (factor: Double, measured: Bool) {
+        if let f = H3RunHistory.load(peer: peer).speedFactor { return (f, true) }
+        if peer != nil { return (speedFactor(peer: nil).factor, false) }
+        let hw = H3Hardware.current
+        let cores = hw.gpuCores > 0 ? Double(hw.gpuCores) : Double(H3Hardware.anchor.gpuCores)
+        return (Double(H3Hardware.anchor.gpuCores) / cores, false)
+    }
+
     /// "about 50 min" / "about 3 h 20 min", with where the number came from.
     /// Prefers this Mac's own history when it has any.
     static func describeBest(model: VideoModelPreset, width: Int, height: Int, frames: Int,
                              steps: Int, fast: Bool,
                              history: H3RunHistory = .load()) -> String {
-        let anchorSeconds = seconds(model: model, width: width, height: height, frames: frames,
-                                    steps: steps, fast: fast, hardware: .anchor)
+        describeBest(model: model, width: width, height: height, shotFrames: [frames],
+                     steps: steps, fast: fast, history: history)
+    }
+
+    /// A storyboard is one run per shot, so its time is their sum.
+    static func describeBest(model: VideoModelPreset, width: Int, height: Int, shotFrames: [Int],
+                             steps: Int, fast: Bool,
+                             history: H3RunHistory = .load()) -> String {
+        func total(_ hardware: H3Hardware) -> Double {
+            shotFrames.reduce(0) {
+                $0 + seconds(model: model, width: width, height: height, frames: $1,
+                             steps: steps, fast: fast, hardware: hardware)
+            }
+        }
         if history.speedFactor != nil {
-            return describe(seconds: history.apply(toAnchorSeconds: anchorSeconds),
+            return describe(seconds: history.apply(toAnchorSeconds: total(.anchor)),
                             source: .ownHistory(runs: history.runs))
         }
-        return describe(seconds: seconds(model: model, width: width, height: height, frames: frames,
-                                         steps: steps, fast: fast),
-                        source: .hardwareModel(.current))
+        return describe(seconds: total(.current), source: .hardwareModel(.current))
     }
 
     static func describe(seconds: Double, source: H3EstimateSource) -> String {
@@ -454,25 +475,28 @@ struct H3RunHistory: Codable {
 
     // MARK: Persistence
 
-    static func load(defaults: UserDefaults = .standard) -> H3RunHistory {
-        guard let raw = defaults.array(forKey: defaultsKey) as? [Double] else { return H3RunHistory(records: []) }
+    /// `peer` = a LAN machine that rendered the run (its own record); nil = this Mac.
+    private static func key(_ peer: String?) -> String { peer.map { "\(defaultsKey)@\($0)" } ?? defaultsKey }
+
+    static func load(peer: String? = nil, defaults: UserDefaults = .standard) -> H3RunHistory {
+        guard let raw = defaults.array(forKey: key(peer)) as? [Double] else { return H3RunHistory(records: []) }
         return H3RunHistory(records: raw)
     }
 
-    func save(defaults: UserDefaults = .standard) {
-        defaults.set(records, forKey: Self.defaultsKey)
+    func save(peer: String? = nil, defaults: UserDefaults = .standard) {
+        defaults.set(records, forKey: Self.key(peer))
     }
 
     /// Record one finished run against what the anchor model predicted for it.
     static func remember(model: VideoModelPreset, width: Int, height: Int, frames: Int,
-                         steps: Int, fast: Bool, measuredSeconds: Double,
+                         steps: Int, fast: Bool, measuredSeconds: Double, peer: String? = nil,
                          defaults: UserDefaults = .standard) {
         guard model.backend == .minimaxH3 else { return }
         let predicted = H3TimeEstimate.seconds(model: model, width: width, height: height, frames: frames,
                                                steps: steps, fast: fast, hardware: .anchor)
-        var h = load(defaults: defaults)
+        var h = load(peer: peer, defaults: defaults)
         h.record(predictedOnAnchor: predicted, measured: measuredSeconds)
-        h.save(defaults: defaults)
+        h.save(peer: peer, defaults: defaults)
     }
 }
 

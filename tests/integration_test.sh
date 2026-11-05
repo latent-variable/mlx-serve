@@ -1,9 +1,9 @@
 #!/bin/bash
-# Integration tests for mlx-serve API endpoints.
-# Usage: ./tests/integration_test.sh [model_dir] [port]
+# integration_test.sh — 36 end-to-end API checks on one model (default gemma-4-e4b-it-8bit).
 #
-# Requires a model to be available. Defaults to gemma-4-e4b-it-8bit.
-# Builds ReleaseFast (SKIP_BUILD=1 skips), starts the server, runs tests, then kills it.
+#   ./tests/integration_test.sh [model_dir] [port]
+#
+# Builds ReleaseFast first (SKIP_BUILD=1 skips), starts the server, runs the checks, kills it.
 
 set -euo pipefail
 
@@ -109,12 +109,12 @@ echo -e "${YELLOW}Starting server on port $PORT...${NC}"
 "$BINARY" --model "$MODEL_DIR" --serve --port "$PORT" --log-level warn --ctx-size 4096 ${MLX_SERVE_TEST_EXTRA_ARGS:-} &
 SERVER_PID=$!
 
-# Wait for health
-for i in $(seq 1 30); do
+# Wait for health (a cold CUDA start on a small card takes ~45 s)
+for i in $(seq 1 120); do
     if curl -s "$BASE/health" 2>/dev/null | grep -q '"ok"'; then
         break
     fi
-    if [ $i -eq 30 ]; then
+    if [ $i -eq 120 ] || ! kill -0 "$SERVER_PID" 2>/dev/null; then
         echo -e "${RED}Server failed to start${NC}"
         exit 1
     fi

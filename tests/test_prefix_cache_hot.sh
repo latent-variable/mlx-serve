@@ -17,17 +17,19 @@
 # became the default.
 #
 # Usage: ./tests/test_prefix_cache_hot.sh [model_dir] [port]
+source "$(dirname "$0")/_lib_models.sh"
 
 set -uo pipefail
+source "$(dirname "$0")/lib/server.sh"
 
-MODEL_DIR="${1:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit}"
+MODEL_DIR="${1:-$(find_model mlx-community/gemma-4-e4b-it-4bit || echo "$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit")}"
 PORT="${2:-19040}"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
 
 [[ -x "$BINARY" ]] || { echo "Build first" >&2; exit 1; }
 [[ -d "$MODEL_DIR" ]] || { echo "SKIP: no model at $MODEL_DIR (pass a dir as \$1)"; exit 0; }
 
-trap 'pkill -9 -x mlx-serve 2>/dev/null; true' EXIT
+trap 'pkill -9 -f "mlx-serve.*--port $PORT" 2>/dev/null; true' EXIT
 
 # Long shared system prompt (250+ tokens) so prefill cost is significant.
 SYSTEM_PROMPT="You are an expert software engineer assistant. You provide concise, technically correct answers. You explain trade-offs when relevant. You always cite specific function names, file paths, or line numbers when discussing code. You prefer concrete examples over abstract advice. You do not pad your answers with hedges or apologies. You assume the user is also a software engineer. You write in Markdown when formatting helps. You keep code blocks small and self-contained. You ask clarifying questions only when truly necessary. You favor depth over breadth in your explanations. You show your reasoning when it would help the reader."
@@ -72,17 +74,13 @@ call_and_time() {
 
 run_with_capacity() {
     local cap="$1"
-    pkill -9 -x mlx-serve 2>/dev/null
+    pkill -9 -f "mlx-serve.*--port $PORT" 2>/dev/null
     sleep 1
 
     "$BINARY" --model "$MODEL_DIR" --serve --port "$PORT" --ctx-size 4096 \
         --prefix-cache-entries "$cap" --log-level info > /tmp/test_prefix_cache.log 2>&1 &
     local pid=$!
-    for _ in $(seq 1 240); do
-        curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
-        sleep 0.5
-        kill -0 "$pid" 2>/dev/null || { echo "ERR: server died" >&2; return 1; }
-    done
+    srv_wait_health "http://127.0.0.1:$PORT" 240 0.5 "$pid" || kill -0 "$pid" 2>/dev/null || { echo "ERR: server died" >&2; return 1; }
 
     # Step 1-2: prime conversations A and B (single-turn).
     # Step 3-4: A and B follow-up multi-turn (history = system+user1+ASSISTANT+user2).
@@ -99,7 +97,7 @@ run_with_capacity() {
     a2=$(call_and_time "$(build_body_multiturn "$SYSTEM_PROMPT" "$CONVO_A_USER1" "$fake_assistant_a" "$CONVO_A_USER2")")
     b2=$(call_and_time "$(build_body_multiturn "$SYSTEM_PROMPT" "$CONVO_B_USER1" "$fake_assistant_b" "$CONVO_B_USER2")")
 
-    pkill -9 -x mlx-serve 2>/dev/null
+    pkill -9 -f "mlx-serve.*--port $PORT" 2>/dev/null
     sleep 1
     echo "$a1 $b1 $a2 $b2"
 }

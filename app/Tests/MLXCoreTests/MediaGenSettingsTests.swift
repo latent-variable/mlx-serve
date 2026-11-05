@@ -140,6 +140,8 @@ final class MediaGenSettingsTests: XCTestCase {
         s.refImageSize = .max
         s.showMediaInputs = false
         s.showAdvanced = true
+        s.storyboardMode = true
+        s.storyboard = [StoryboardSegment(prompt: "a fox", seconds: 9, endFramePath: "/tmp/fox.png")]
         var decoded = try JSONDecoder().decode(VideoGenSettings.self, from: try JSONEncoder().encode(s))
         // A row's id is not persisted (by design), so the stack is compared by
         // what it carries and then set aside for the whole-blob comparison.
@@ -149,6 +151,40 @@ final class MediaGenSettingsTests: XCTestCase {
         XCTAssertEqual(decoded, s)
     }
 
+    /// Slider LoRAs run -1...1 and some -20...20: the slider starts at ±2 and
+    /// only widens when a value outside it is entered, never narrows.
+    func testLoraScaleSliderBoundWidensToFitTheValue() {
+        XCTAssertEqual(LoraScale.sliderBound(for: 0), 2)
+        XCTAssertEqual(LoraScale.sliderBound(for: 1.3), 2)
+        XCTAssertEqual(LoraScale.sliderBound(for: -2), 2)
+        XCTAssertEqual(LoraScale.sliderBound(for: -15), 20)
+        XCTAssertEqual(LoraScale.sliderBound(for: 20), 20)
+        XCTAssertEqual(LoraScale.sliderBound(for: 20.5), 30)
+        XCTAssertEqual(LoraScale.sliderBound(for: LoraScale.limit), LoraScale.limit)
+        XCTAssertEqual(LoraScale.sliderStep(bound: 2), 0.05)
+        XCTAssertEqual(LoraScale.sliderStep(bound: 20), 0.5)
+    }
+
+    func testLoraScaleFloorFollowsTheNegativeToggleAndTamesOverflow() {
+        XCTAssertEqual(LoraScale.clamped(-20, allowsNegative: true), -20)
+        XCTAssertEqual(LoraScale.clamped(-0.35, allowsNegative: true), -0.35)
+        XCTAssertEqual(LoraScale.clamped(-0.35, allowsNegative: false), 0)
+        XCTAssertEqual(LoraScale.clamped(20, allowsNegative: false), 20)
+        XCTAssertEqual(LoraScale.clamped(1e30, allowsNegative: false), LoraScale.limit)
+        XCTAssertEqual(LoraScale.clamped(-.infinity, allowsNegative: true), -LoraScale.limit)
+        XCTAssertEqual(LoraScale.clamped(.nan, allowsNegative: true), 0)
+    }
+
+    /// Blobs saved before the toggle existed: a negative scale keeps working, the rest stay unsigned.
+    func testLoraAdapterWithoutTheToggleKeyDecodesFromItsScale() throws {
+        let old = Data(#"[{"path":"/a.safetensors","scale":-0.75},{"path":"/b.safetensors","scale":0.8}]"#.utf8)
+        let decoded = try JSONDecoder().decode([LoraAdapter].self, from: old)
+        XCTAssertEqual(decoded.map(\.allowsNegative), [true, false])
+        XCTAssertEqual(decoded.map(\.scale), [-0.75, 0.8])
+        let again = try JSONDecoder().decode([LoraAdapter].self, from: JSONEncoder().encode(decoded))
+        XCTAssertEqual(again.map(\.allowsNegative), [true, false])
+    }
+
     /// A blob from before the draft was persisted decodes to the defaults for
     /// the new keys — an empty draft, the media block open, Advanced closed.
     func testVideoBlobWithoutTheDraftKeysStillDecodes() throws {
@@ -156,7 +192,7 @@ final class MediaGenSettingsTests: XCTestCase {
             with: try JSONEncoder().encode(VideoGenSettings())) as! [String: Any]
         for key in ["prompt", "firstFramePath", "lastFramePath", "audioSource", "audioPath",
                     "speechText", "refImagePaths", "refVideoPaths", "refAudioPaths",
-                    "refImageSize", "showMediaInputs", "showAdvanced"] {
+                    "refImageSize", "showMediaInputs", "showAdvanced", "storyboardMode", "storyboard"] {
             obj.removeValue(forKey: key)
         }
         let decoded = try JSONDecoder().decode(
@@ -311,12 +347,59 @@ final class MediaGenSettingsTests: XCTestCase {
         XCTAssertEqual(decoded.resolution, 384)
     }
 
+    func testModel3DTrellis2SettingsRoundTripAndOldBlobsKeepTheDefaults() throws {
+        var s = Model3DGenSettings()
+        s.trellisResolution = 1536
+        s.decimationTarget = 600_000
+        s.textureSize = 4096
+        s.finish = .glossy
+        let decoded = try JSONDecoder().decode(Model3DGenSettings.self, from: try JSONEncoder().encode(s))
+        XCTAssertEqual(decoded, s)
+
+        var obj = try JSONSerialization.jsonObject(with: try JSONEncoder().encode(Model3DGenSettings())) as! [String: Any]
+        for key in ["trellisResolution", "decimationTarget", "textureSize", "finish"] { obj.removeValue(forKey: key) }
+        let old = try JSONDecoder().decode(Model3DGenSettings.self, from: try JSONSerialization.data(withJSONObject: obj))
+        XCTAssertEqual(old.trellisResolution, 1024)
+        XCTAssertEqual(old.decimationTarget, 300_000)
+        XCTAssertEqual(old.textureSize, 2048)
+        XCTAssertEqual(old.finish, .model)
+    }
+
+    func testModel3DIdolSettingsRoundTripSnapTheCountAndOldBlobsKeepTheDefaults() throws {
+        var s = Model3DGenSettings()
+        s.splatSteps = 30
+        s.splatGuidance = 2.0
+        s.splatGaussians = 524_288
+        s.splatPhoto = .photo
+        let decoded = try JSONDecoder().decode(Model3DGenSettings.self, from: try JSONEncoder().encode(s))
+        XCTAssertEqual(decoded, s)
+
+        var obj = try JSONSerialization.jsonObject(with: try JSONEncoder().encode(s)) as! [String: Any]
+        obj["splatGaussians"] = 300_000
+        let snapped = try JSONDecoder().decode(Model3DGenSettings.self, from: try JSONSerialization.data(withJSONObject: obj))
+        XCTAssertEqual(snapped.splatGaussians, 262_144, "a stored count that is none of the pane's options snaps to the nearest")
+
+        for key in ["splatSteps", "splatGuidance", "splatGaussians", "splatPhoto"] { obj.removeValue(forKey: key) }
+        let old = try JSONDecoder().decode(Model3DGenSettings.self, from: try JSONSerialization.data(withJSONObject: obj))
+        XCTAssertEqual(old.splatSteps, 50)
+        XCTAssertEqual(old.splatGuidance, 3.0)
+        XCTAssertEqual(old.splatGaussians, 262_144)
+        XCTAssertEqual(old.splatPhoto, .render)
+    }
+
     func testModel3DResolvesModelByIdAndFallsBack() {
         var s = Model3DGenSettings()
         s.modelId = Model3DModelPreset.hunyuan3d21_8bit.id
         XCTAssertEqual(s.resolvedModel.id, Model3DModelPreset.hunyuan3d21_8bit.id)
         s.modelId = "nope/nope"
-        XCTAssertEqual(s.resolvedModel.id, Model3DModelPreset.hunyuan3d21_8bit.id)
+        XCTAssertEqual(s.resolvedModel.id, Model3DModelPreset.idol_8bit.id)
+    }
+
+    /// Idol is the recommended 3D model: a pane nobody has used starts on it and leads its picker. A pick already
+    /// saved (the test above) is the user's and is kept.
+    func testModel3DStartsOnIdol() {
+        XCTAssertEqual(Model3DGenSettings().resolvedModel, .idol_8bit)
+        XCTAssertEqual(Model3DModelPreset.all.first, .idol_8bit)
     }
 
     func testModel3DDefaultsMatchThePreset() {

@@ -74,7 +74,7 @@ struct ResolutionOption: Hashable, Identifiable {
 
 /// The resolution grid a backend actually samples on.
 ///
-/// This MIRRORS `clampFluxDim` / `clampKreaDim` in `src/gen.zig` — the server
+/// This MIRRORS `clampFluxDim` / `clampKreaDim` in `src/host/media_jobs/gen.zig` — the server
 /// stays the authority and rewrites anything off-grid regardless of what the
 /// app sends. The mirror exists so the pane can say what will happen BEFORE
 /// the request, instead of the user reading a size back off a finished image.
@@ -162,6 +162,8 @@ enum FluxVariant: String, Hashable, Codable {
     case mageFlowTurbo    // Microsoft Mage-Flow-Turbo double-stream flow DiT — served by the mage_flow backend
     case mageFlowEditTurbo // Microsoft Mage-Flow-Edit-Turbo — same arch, edit-trained; multi-reference in-context editor
     case qwenImage21      // Qwen-Image-2.1 block-causal DiT — served by the qwen_image backend; undistilled (40 steps, optional real CFG)
+    case qwenImage21Turbo // Qwen-Image-2.1-Turbo — same backend; its pack's 8-sigma grid sets the steps server-side
+    case mossImage        // OpenMOSS MOSS-Image 5B single-stream DiT — served by the moss_image backend; undistilled (50 steps, CFG 3)
 }
 
 struct ImageQualitySettings: Hashable {
@@ -462,9 +464,10 @@ struct ImageModelPreset: Identifiable, Hashable {
         description: "Microsoft's native-resolution image EDITOR, quantized to 8-bit — change or compose from one or more references in 4 steps, at half the download and memory. Open (MIT)."
     )
 
-    /// Qwen-Image-2.1 is undistilled and ~1 MP-trained: a step costs the same
-    /// at any shape, so the menu stays at the sizes a 40-step run finishes in
-    /// reasonable time on a laptop.
+    /// Qwen-Image-2.1's card recommends about 4 MP; the server caps a side at
+    /// 2048, so the 1 MP shapes come again at that cap, where small text gets
+    /// the pixels it needs. 1 MP stays the default: a 2048 run costs several
+    /// times as long.
     private static let qwenImageResolutions: [ResolutionOption] = [
         .init(width: 1024, height: 1024, label: "1024 × 1024 (square)"),
         .init(width: 768,  height: 768,  label: "768 × 768 (square, fast)"),
@@ -473,6 +476,11 @@ struct ImageModelPreset: Identifiable, Hashable {
         .init(width: 1248, height: 832,  label: "1248 × 832 (landscape 3:2)"),
         .init(width: 1344, height: 768,  label: "1344 × 768 (landscape 16:9)"),
         .init(width: 768,  height: 1344, label: "768 × 1344 (portrait 9:16)"),
+        .init(width: 2048, height: 2048, label: "2048 × 2048 (square, finest text)"),
+        .init(width: 1360, height: 2048, label: "1360 × 2048 (portrait 2:3, finest text)"),
+        .init(width: 2048, height: 1360, label: "2048 × 1360 (landscape 3:2, finest text)"),
+        .init(width: 2048, height: 1152, label: "2048 × 1152 (landscape 16:9, finest text)"),
+        .init(width: 1152, height: 2048, label: "1152 × 2048 (portrait 9:16, finest text)"),
     ]
 
     private static let qwenImageQuality: [QualityPreset: ImageQualitySettings] = [
@@ -516,6 +524,104 @@ struct ImageModelPreset: Identifiable, Hashable {
         description: "Qwen-Image 2.1 quantized to 4-bit for smaller Macs — the same 40-step model at about half the memory, with some loss of fine detail. Open (Apache-2.0)."
     )
 
+    /// The checkpoint's own 8-step sampling grid (`sample_sigmas`) decides
+    /// every tier: the server runs it whatever `steps` says.
+    private static let qwenImageTurboQuality: [QualityPreset: ImageQualitySettings] = [
+        .fast:         .init(steps: 8),
+        .good:         .init(steps: 8),
+        .quality:      .init(steps: 8),
+        .superQuality: .init(steps: 8),
+    ]
+
+    /// Qwen-Image-2.1-Turbo, same `--preset 32gb` recipe as the base pack.
+    static let qwenImage21Turbo_8bit = ImageModelPreset(
+        id: "ddalcu/qwen-image-2.1-turbo-8bit",
+        name: "Qwen-Image 2.1 Turbo 8-bit (~18 GB)",
+        variant: .qwenImage21Turbo,
+        configName: "qwen_image21",
+        repo: "ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit",
+        approxDownloadGB: 18,
+        approxRAMGB: 22,
+        resolutions: qwenImageResolutions,
+        defaultResolution: qwenImageResolutions[0],
+        qualityProfiles: qwenImageTurboQuality,
+        defaultQuality: .good,
+        description: "Qwen-Image 2.1 distilled to 8 steps — the same strong prompt understanding and in-image text, in English and Chinese, in 8 steps instead of 40. Qwen Research License (non-commercial)."
+    )
+
+    /// The 4-bit Turbo pack (`--preset 16gb`) for 16 GB Macs.
+    static let qwenImage21Turbo_4bit = ImageModelPreset(
+        id: "ddalcu/qwen-image-2.1-turbo-4bit",
+        name: "Qwen-Image 2.1 Turbo 4-bit (~11 GB)",
+        variant: .qwenImage21Turbo,
+        configName: "qwen_image21",
+        repo: "ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-4bit",
+        approxDownloadGB: 11,
+        approxRAMGB: 13,
+        resolutions: qwenImageResolutions,
+        defaultResolution: qwenImageResolutions[0],
+        qualityProfiles: qwenImageTurboQuality,
+        defaultQuality: .good,
+        description: "Qwen-Image 2.1 Turbo quantized to 4-bit for smaller Macs — 8 steps at about half the memory, with some loss of fine detail. Qwen Research License (non-commercial)."
+    )
+
+    /// MOSS-Image's card recommends 1, 1.5 or 2 MP at any aspect, multiples
+    /// of 16 (its Gradio grid: `gradio_presets.fit_size`).
+    private static let mossImageResolutions: [ResolutionOption] = [
+        .init(width: 1024, height: 1024, label: "1024 × 1024 (square)"),
+        .init(width: 1248, height: 1248, label: "1248 × 1248 (square, 1.5 MP)"),
+        .init(width: 1456, height: 1456, label: "1456 × 1456 (square, 2 MP)"),
+        .init(width: 832,  height: 1248, label: "832 × 1248 (portrait 2:3)"),
+        .init(width: 1248, height: 832,  label: "1248 × 832 (landscape 3:2)"),
+        .init(width: 1360, height: 768,  label: "1360 × 768 (landscape 16:9)"),
+        .init(width: 768,  height: 1360, label: "768 × 1360 (portrait 9:16)"),
+        .init(width: 1936, height: 1088, label: "1936 × 1088 (landscape 16:9, 2 MP)"),
+        .init(width: 1088, height: 1936, label: "1088 × 1936 (portrait 9:16, 2 MP)"),
+        .init(width: 512,  height: 512,  label: "512 × 512 (fastest)"),
+    ]
+
+    private static let mossImageQuality: [QualityPreset: ImageQualitySettings] = [
+        .fast:         .init(steps: 20),
+        .good:         .init(steps: 30),
+        .quality:      .init(steps: 40),
+        .superQuality: .init(steps: 50),
+    ]
+
+    /// MOSS-Image SFT, 8-bit (`tests/convert_moss_image_weights.py`): the DiT
+    /// blocks and the text encoder quantized, renders matching bf16 at the same seed.
+    static let mossImageSFT_8bit = ImageModelPreset(
+        id: "ddalcu/moss-image-sft-8bit",
+        name: "MOSS-Image SFT 8-bit (~15 GB)",
+        variant: .mossImage,
+        configName: "moss_image",
+        repo: "ddalcu/MOSS-Image-SFT-MLX-Serve-8bit",
+        approxDownloadGB: 15,
+        approxRAMGB: 21,
+        resolutions: mossImageResolutions,
+        defaultResolution: mossImageResolutions[0],
+        qualityProfiles: mossImageQuality,
+        defaultQuality: .superQuality,
+        description: "MOSS-Image quantized to 8-bit for smaller Macs: the same 50-step model at about half the memory, with renders matching bf16. Open (Apache-2.0)."
+    )
+
+    /// OpenMOSS MOSS-Image SFT, bf16 (the mlx-community mirror of the release's
+    /// diffusers tree). The Qwen3.5-9B text encoder stays resident beside the
+    /// 5B DiT.
+    static let mossImageSFT_bf16 = ImageModelPreset(
+        id: "mlx-community/moss-image-sft-bf16",
+        name: "MOSS-Image SFT bf16 (~27 GB)",
+        variant: .mossImage,
+        configName: "moss_image",
+        repo: "mlx-community/MOSS-Image-SFT-bf16",
+        approxDownloadGB: 27,
+        approxRAMGB: 33,
+        resolutions: mossImageResolutions,
+        defaultResolution: mossImageResolutions[0],
+        qualityProfiles: mossImageQuality,
+        defaultQuality: .superQuality,
+        description: "OpenMOSS's 5B image model — long prompts, tag lists or a JSON layout that places each object and line of text, with in-image text in English and Chinese. Undistilled: 50 steps with guidance, so it is slow. Open (Apache-2.0)."
+    )
+
     /// Catalog ordered cheapest → heaviest. Default (`first`) is FLUX.2-klein
     /// 4B Q4 — smallest download.
     static let all: [ImageModelPreset] = [
@@ -524,8 +630,12 @@ struct ImageModelPreset: Identifiable, Hashable {
         .flux2Klein9B_Q4,                              // 10
         .flux2Klein9BBase_Q4,                          // 10
         .qwenImage21_4bit,                             // 10
+        .qwenImage21Turbo_4bit,                        // 11
         .krea2Turbo,                                   // 15
+        .mossImageSFT_8bit,                            // 15
         .qwenImage21_8bit,                             // 18
+        .qwenImage21Turbo_8bit,                        // 18
+        .mossImageSFT_bf16,                            // 27
     ]
 }
 
@@ -627,10 +737,19 @@ struct VideoModelPreset: Identifiable, Hashable {
     /// reference has no keyframe row to anchor, so on H3 this rides the same
     /// partition complement as Turbo and chaining.
     var supportsLastFrame: Bool = false
+    /// A distilled student's trained step count, the only one the server accepts: the pane shows
+    /// it as a fact instead of a slider. nil = a range to choose from.
+    var fixedSteps: Int? { stepsRange.count == 1 ? stepsRange.lowerBound : nil }
     /// Denoising-step range the Steps slider offers. LTX's is the default; a
     /// backend whose floor is higher declares it, because a slider that goes
     /// somewhere the model does not work is a dead range, not a fast option.
     var stepsRange: ClosedRange<Int> = 4...50
+    /// The Steps slider's range for a render. Turbo turns the server's fast recipe off, so a
+    /// Turbo step costs a full step: past the distillations' trained range a Turbo render costs
+    /// more than the full model's fast 30.
+    func stepsRange(turbo: Bool) -> ClosedRange<Int> {
+        turbo && supportsTurbo ? 4...8 : stepsRange
+    }
     /// One sentence under the Steps slider. Per-backend for the same reason —
     /// LTX's "runs well from ~8" is wrong advice on any other engine.
     var stepsHelp: String = "More steps refine the video further at the cost of speed. ~8 is fast, ~30 is the reference default."
@@ -680,6 +799,9 @@ struct VideoModelPreset: Identifiable, Hashable {
     /// The frame model is not that: rounding 22.8 up to 26 costs a 32 GB Mac
     /// the 4-bit pack it exists for. 0 falls back to `approxRAMGB`.
     var stagedPeakGB: Double = 0
+    /// One denoising step's cost against the dense H3 step the time model is fitted on (FastH3
+    /// Omni's trained sparse attention). Read only by `H3TimeEstimate`.
+    var stepCostScale: Double = 1.0
     /// The pack carries its OWN text encoder. LTX 2.3 borrows the shared
     /// `mlx-community/gemma-3-12b-it-4bit` download (also a chat model, so it
     /// is a separate bundle component); 2.5 ships a Lightricks fine-tune of
@@ -1069,7 +1191,9 @@ struct VideoModelPreset: Identifiable, Hashable {
     private static func minimaxH3Preset(repo: String, name: String,
                                         downloadGB: Int, ramGB: Int, ditGB: Double, stagedGB: Double,
                                         description: String,
-                                        supportsReferences: Bool = false) -> VideoModelPreset {
+                                        supportsReferences: Bool = false,
+                                        trainedSteps: Int? = nil,
+                                        stepCostScale: Double = 1.0) -> VideoModelPreset {
         // The model's own range: MiniMax states 4-15 s at 24 fps, and the
         // reference node's trained range is ~124-362 on the 17k+5 ladder. The
         // SLIDER goes down to the engine's floor anyway and warns below the
@@ -1095,6 +1219,10 @@ struct VideoModelPreset: Identifiable, Hashable {
         // must not silently start one — the user gets there by moving the
         // slider, with the estimate under it saying what it costs.
         let tierMax = 209
+        // A distilled student runs its trained count on every tier; its tiers pick the trained
+        // clip lengths (5, 10, 15 s) instead.
+        let tierSteps = { (full: Int) in trainedSteps ?? full }
+        let tierFrames = { (full: Int, distilled: Int) in trainedSteps == nil ? full : distilled }
         return VideoModelPreset(
             id: repo,
             name: name,
@@ -1113,10 +1241,10 @@ struct VideoModelPreset: Identifiable, Hashable {
             // .good = the eyeballed capstone A/B; .quality = the rap demo's
             // longer 209-frame run.
             qualityProfiles: [
-                .fast:         .init(mode: .oneStage, steps: 16, cfgScale: 1.0, stgScale: 0.0, numFrames: tierMin),
-                .good:         .init(mode: .oneStage, steps: 30, cfgScale: 1.0, stgScale: 0.0, numFrames: tierMin),
-                .quality:      .init(mode: .oneStage, steps: 30, cfgScale: 1.0, stgScale: 0.0, numFrames: tierMax),
-                .superQuality: .init(mode: .oneStage, steps: 50, cfgScale: 1.0, stgScale: 0.0, numFrames: tierMax),
+                .fast:         .init(mode: .oneStage, steps: tierSteps(16), cfgScale: 1.0, stgScale: 0.0, numFrames: tierMin),
+                .good:         .init(mode: .oneStage, steps: tierSteps(30), cfgScale: 1.0, stgScale: 0.0, numFrames: tierMin),
+                .quality:      .init(mode: .oneStage, steps: tierSteps(30), cfgScale: 1.0, stgScale: 0.0, numFrames: tierFrames(tierMax, 243)),
+                .superQuality: .init(mode: .oneStage, steps: tierSteps(50), cfgScale: 1.0, stgScale: 0.0, numFrames: tierFrames(tierMax, cap)),
             ],
             defaultQuality: .good,
             maxFrames: cap,
@@ -1132,7 +1260,8 @@ struct VideoModelPreset: Identifiable, Hashable {
             supportsPipelineModes: false,
             supportsAudioInput: false,
             generatesAudio: true,
-            supportsFastRecipe: true,
+            // The server keeps the recipe off on a distilled student: it skips trained steps.
+            supportsFastRecipe: trainedSteps == nil,
             supportsReferences: supportsReferences,
             // Turbo and chaining both ride fl2va machinery (the LoRA is
             // untested on the REF2VA DiT; a reference has no keyframe row to
@@ -1151,14 +1280,16 @@ struct VideoModelPreset: Identifiable, Hashable {
             // fast recipe's warmup and tail windows still cover the whole
             // schedule, so an undistilled run there pays full price per step
             // while looking like the cheap option — which is what the note says.
-            stepsRange: 4...50,
-            stepsHelp: "More steps mean more detail and steadier motion, and cost time in direct proportion. 16 is the fast tier, 30 is the default, 50 is for a final render. Fewer than 16 only works with a distilled few-step adapter.",
-            testedStepsFloor: 16,
+            stepsRange: trainedSteps.map { $0...$0 } ?? 4...50,
+            stepsHelp: trainedSteps.map { "This model is distilled to run exactly \($0) steps; it takes no other count." }
+                ?? "More steps mean more detail and steadier motion, and cost time in direct proportion. 16 is the fast tier, 30 is the default, 50 is for a final render. Fewer than 16 only works with a distilled few-step adapter.",
+            testedStepsFloor: trainedSteps == nil ? 16 : 0,
             testedStepsFloorNote: "Under 16 steps this model needs a distilled few-step adapter — the engine-owned Turbo LoRA, or a community one attached under Style LoRAs. Without one the picture is rough and the soundtrack usually comes out garbled, and the fast recipe means those steps are not much cheaper each.",
             testedFrameFloor: statedMin,
             testedFrameFloorNote: "below MiniMax's stated 4-second minimum. Good for trying a prompt or a step count cheaply; motion and the soundtrack degrade outside the trained range.",
             ditResidentGB: ditGB,
-            stagedPeakGB: stagedGB
+            stagedPeakGB: stagedGB,
+            stepCostScale: stepCostScale
         )
     }
 
@@ -1199,15 +1330,31 @@ struct VideoModelPreset: Identifiable, Hashable {
         supportsReferences: true
     )
 
+    /// FastVideo's 8-step PDD student of REF2VA: the same references and soundtrack in 8 steps
+    /// instead of 30, each a little cheaper for its trained sparse attention. It needs at least one
+    /// image or video reference (no text-only video) and has no Turbo, chaining or fast recipe.
+    static let fastH3Omni: VideoModelPreset = minimaxH3Preset(
+        repo: "ddalcu/FastH3-Omni-MLX-Serve-8bit",
+        name: "FastH3 Omni 8-bit — references + native audio in 8 steps",
+        downloadGB: 71,
+        ramGB: 46,
+        ditGB: 22.07,
+        stagedGB: 40.15,
+        description: "FastVideo's 8-step distillation of MiniMax-H3 REF2VA: video with a matching stereo soundtrack that follows your reference images, clips and audio, several times faster than the full model. Attach at least one image or video and refer to it in the prompt as <Picture 1> or <Video 1>; it cannot generate from text alone. It was trained on 5, 10 and 15 second clips.",
+        supportsReferences: true,
+        trainedSteps: 8,
+        stepCostScale: 0.85
+    )
+
     // 8-bit first: it is the one to reach for on a Mac that can hold it, and
     // the picker features the first entry of each capability group.
-    static let all: [VideoModelPreset] = [.ltx25Q8, .ltx25Q4, .ltx23Q4, .minimaxH3, .minimaxH3Q4, .minimaxH3Ref2VA]
+    static let all: [VideoModelPreset] = [.ltx25Q8, .ltx25Q4, .ltx23Q4, .minimaxH3, .minimaxH3Q4, .minimaxH3Ref2VA, .fastH3Omni]
 }
 
 // MARK: - Audio presets (TTS / voice cloning)
 
 /// A neural text-to-speech model served by mlx-serve's NATIVE Qwen3-TTS engine
-/// (`src/tts.zig`). Only the `qwen3_tts` architecture is supported — the engine
+/// (`src/plugins/qwen3_tts/tts.zig`). Only the `qwen3_tts` architecture is supported — the engine
 /// dispatches on `config.json`'s `model_type`, so non-Qwen3-TTS checkpoints
 /// (e.g. the old gpt2-based MOSS-TTS) can't load and aren't offered here.
 ///
@@ -1363,9 +1510,20 @@ struct Model3DModelPreset: Identifiable, Hashable {
     let approxRAMGB: Int
     /// Full bundle download size, GB (shape + paint).
     let approxDownloadGB: Double
+    /// Which backend answers `/v1/3d/generations` for this checkpoint; it decides the request fields,
+    /// the pane's controls and how the photo is cut out.
+    var family: Model3DFamily = .hunyuan3d
+    /// What the Models browser says under the model: set for the presets it lists (`modelBrowserCatalog`), empty for the rest.
+    var description: String = ""
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
+
+    /// The 1536 cascade peaks well above the 1024 one. Pixal3D shares the cascade; its peak is TRELLIS.2's, not
+    /// separately measured.
+    func approxRAMGB(trellisResolution: Int) -> Int {
+        family.hasCascadeControls && trellisResolution >= 1536 ? 35 : approxRAMGB
+    }
 
     /// True when the model has no published HF repo yet and must be converted
     /// locally — the pane shows a "convert locally" hint instead of a download
@@ -1381,18 +1539,134 @@ struct Model3DModelPreset: Identifiable, Hashable {
         approxDownloadGB: 8.5
     )
 
-    /// Catalog. One entry today; grows as more 3D checkpoints convert.
-    static let all: [Model3DModelPreset] = [.hunyuan3d21_8bit]
+    /// TRELLIS.2-4B, 8-bit. The pane downloads the single-view set: 8.2 GB of the repo's 9.6.
+    static let trellis2_8bit = Model3DModelPreset(
+        id: "trellis2-8bit", name: "TRELLIS.2 (8-bit)", repo: "ddalcu/TRELLIS.2-4B-MLX-Serve-8bit",
+        approxRAMGB: 22, approxDownloadGB: 8.2, family: .trellis2)
+
+    /// Pixal3D, 8-bit. The pane downloads the single-view set: 8.7 GB of the repo's 14.8 (the rest is multi-view).
+    static let pixal3d_8bit = Model3DModelPreset(
+        id: "pixal3d-8bit", name: "Pixal3D (8-bit)", repo: "ddalcu/Pixal3D-MLX-Serve-8bit",
+        approxRAMGB: 22, approxDownloadGB: 8.7, family: .pixal3d)
+
+    /// Idol, 8-bit: one photo to a 3D Gaussian splat, background cutout and both image encoders included. 3.0 GB,
+    /// ~3.6 GB resident at peak (a float16 pack, `ddalcu/Idol-MLX-Serve-fp16`, is the quality reference).
+    static let idol_8bit = Model3DModelPreset(
+        id: "idol-8bit", name: "Idol (8-bit)", repo: "ddalcu/Idol-MLX-Serve-8bit",
+        approxRAMGB: 6, approxDownloadGB: 3.0, family: .idol,
+        description: "Recommended. Turns one photo or render into a 3D Gaussian splat: a cloud of coloured points you can orbit in the app, save as .ply or open in any viewer. It cuts the subject out of the picture itself and is light on memory.")
+
+    /// Family templates for a pack on disk: it joins the picker through `CustomMediaModels`, synthesized from these.
+    static let trellis2Family = Model3DModelPreset(
+        id: "trellis2", name: "TRELLIS.2", repo: "", approxRAMGB: 22, approxDownloadGB: 0, family: .trellis2)
+    static let pixal3dFamily = Model3DModelPreset(
+        id: "pixal3d", name: "Pixal3D", repo: "", approxRAMGB: 22, approxDownloadGB: 0, family: .pixal3d)
+    static let idolFamily = Model3DModelPreset(
+        id: "idol", name: "Idol", repo: "", approxRAMGB: 6, approxDownloadGB: 0, family: .idol)
+
+    /// The recommended model: first in the picker, and what a pane nobody has used (or whose saved model is gone) starts on.
+    static let recommended = idol_8bit
+
+    /// Catalog. Order matters: the picker leads with the first of the largest that fits (`MediaModelPicks.featured`).
+    static let all: [Model3DModelPreset] = [.recommended, .hunyuan3d21_8bit, .trellis2_8bit, .pixal3d_8bit]
+
+    /// What the Models browser's Media tab lists for 3D: the recommended model alone.
+    static let modelBrowserCatalog: [Model3DModelPreset] = [.recommended]
 }
 
-/// Which music ENGINE a checkpoint drives. The two families share the
+/// The 3D backends behind one endpoint. They share `image` and `seed` and nothing else.
+enum Model3DFamily: Hashable {
+    case hunyuan3d, trellis2, pixal3d, idol
+
+    /// Hunyuan3D textures in a separate paint pass; TRELLIS.2 and Pixal3D always texture (Idol makes splats).
+    var hasPaintStage: Bool { self == .hunyuan3d }
+
+    /// TRELLIS.2 and Pixal3D read the cutout's alpha as the subject (a white background would become part of
+    /// the object); Hunyuan3D composites on white itself.
+    var cutoutKeepsAlpha: Bool { self == .trellis2 || self == .pixal3d }
+
+    /// Idol cuts the subject out itself (BiRefNet), so it gets the photo as it is.
+    var sendsRawPhoto: Bool { self == .idol }
+
+    /// TRELLIS.2 and Pixal3D share one cascade and its request fields: resolution, faces, texture size, finish.
+    var hasCascadeControls: Bool { self == .trellis2 || self == .pixal3d }
+}
+
+/// What kind of picture Idol is given: the crop it leaves around the subject (the server's `mode`).
+enum Model3DPhotoKind: String, CaseIterable, Codable {
+    case render, photo
+
+    var title: String { self == .render ? "Render" : "Photo" }
+
+    /// The server's `mode`: `synthetic` fills the frame, `real` leaves room around a photographed object.
+    var serverMode: String { self == .render ? "synthetic" : "real" }
+}
+
+/// How shiny a TRELLIS.2 or Pixal3D model looks. The model predicts one roughness per texel and its map is
+/// nearly flat (paint, trim and wheels all about 0.58), so a finish scales the whole map and adds a clearcoat
+/// rather than guessing which part is paint. Raw values are what the pane persists.
+enum Model3DFinish: String, CaseIterable, Codable {
+    case model, satin, glossy, carPaint
+
+    /// The server's `roughness_scale`: 1 keeps the model's roughness, below 1 is glossier.
+    var roughnessScale: Double {
+        switch self {
+        case .model: 1.0
+        case .satin: 0.7
+        case .glossy: 0.5
+        case .carPaint: 0.4
+        }
+    }
+
+    /// The server's `clearcoat` strength, 0 for none.
+    var clearcoat: Double {
+        switch self {
+        case .model, .satin: 0
+        case .glossy: 0.5
+        case .carPaint: 1.0
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .model: "As generated"
+        case .satin: "Satin"
+        case .glossy: "Glossy"
+        case .carPaint: "Car paint"
+        }
+    }
+}
+
+/// Which music ENGINE a checkpoint drives. The families share the
 /// endpoint and nothing else: ACE-Step reads the whole musical-metadata knob
-/// set, MiniMax Music 3 rejects every one of those fields BY NAME and
-/// requires lyrics — so the family gates the FIELDS (request body + sidecar),
+/// set, MiniMax Music 3 and YuE2 reject every one of those fields BY NAME and
+/// require lyrics — so the family gates the FIELDS (request body + sidecar),
 /// not just the pane's controls.
 enum MusicEngineFamily {
     case acestep
     case minimaxMusic3
+    case yue2
+}
+
+/// Whether YuE2 plans an ABC score before it sings (server `cot`). Raw values
+/// are the wire spelling.
+enum MusicPlan: String, CaseIterable, Codable {
+    case full, melody, off
+
+    var label: String {
+        switch self {
+        case .full: return "Melody + chords"
+        case .melody: return "Melody only"
+        case .off: return "No score"
+        }
+    }
+    var hint: String {
+        switch self {
+        case .full: return "The model writes a chord-annotated score first, then plays it. Best songs, and you can edit the score."
+        case .melody: return "A melody-only score, without chords. The right choice for a cover: paste the original melody below."
+        case .off: return "Straight to audio with no score. Fastest, and the least coherent."
+        }
+    }
 }
 
 /// Music-generation checkpoints (ACE-Step + MiniMax Music 3, the music arms
@@ -1436,10 +1710,15 @@ struct MusicModelPreset: Identifiable, Hashable {
     /// MiniMax's card; its example caption reads "BPM: 96. Key: C major."").
     /// The pane used to hide them on Music 3 along with the two genuinely
     /// unsupported knobs, which read as "this model can't do tempo".
-    var supportsTempoAndKey: Bool { true }
-    /// Music 3 is lyric-conditioned; the server 400s empty lyrics. ACE-Step
-    /// defaults empty lyrics to "[Instrumental]".
-    var requiresLyrics: Bool { family == .minimaxMusic3 }
+    /// YuE2 has no tempo or key field and no caption text for them: the score
+    /// carries both, and the server names the fields a 400.
+    var supportsTempoAndKey: Bool { family != .yue2 }
+    /// Music 3 and YuE2 are lyric-conditioned; the server 400s empty lyrics.
+    /// ACE-Step defaults empty lyrics to "[Instrumental]".
+    var requiresLyrics: Bool { family != .acestep }
+    /// A wordless track: ACE-Step marks it, Music 3 asks in text. YuE2 has no
+    /// such mode, and the server names `instrumental` a 400.
+    var supportsInstrumental: Bool { family != .yue2 }
     /// Server-valid duration bounds (ACE [10,600]; Music 3 [1,360], floored
     /// at 5 for a usable slider).
     var durationRange: ClosedRange<Double> {
@@ -1450,8 +1729,14 @@ struct MusicModelPreset: Identifiable, Hashable {
     /// ACE-Step Turbo is distillation-fixed at 8 and the server IGNORES the
     /// field there, so exposing it would be a control that visibly does
     /// nothing. `fixedSteps` stays the per-checkpoint default either way.
-    var supportsSteps: Bool { family == .minimaxMusic3 }
-    var stepsRange: ClosedRange<Int> { 4...100 }
+    var supportsSteps: Bool { family != .acestep }
+    /// YuE2 ends its own song (an end token after the last lyric); its duration is only a cap, so
+    /// the pane can leave the cap off. ACE-Step and Music 3 make exactly the length asked.
+    var supportsAutoLength: Bool { family == .yue2 }
+    var stepsRange: ClosedRange<Int> { family == .yue2 ? 1...100 : 4...100 }
+    /// YuE2's score: the plan mode and the ABC text that replaces the model's
+    /// own. Gates the controls AND the `cot`/`abc` fields.
+    var supportsScore: Bool { family == .yue2 }
     /// Reference audio (server `ref_audio`, #259): ACE-Step feeds a 30 s
     /// window of the clip's VAE latent into its timbre slot — ONE pooled
     /// token among hundreds of lyric/text tokens, so it is style/timbre
@@ -1508,8 +1793,66 @@ struct MusicModelPreset: Identifiable, Hashable {
         description: "MiniMax's full-song model: an 8B language model writes the music frame by frame from your style prompt and lyrics, then a diffusion decoder renders it. Slower than ACE-Step, strongest vocals."
     )
 
+    /// YuE2 3B, 8-bit — plans a score, writes semantic codec tokens, then
+    /// flow-matches 48 kHz stereo acoustics. Weights are CC BY-NC 4.0.
+    static let yue2_3B_8bit = MusicModelPreset(
+        id: "yue2-3b-8bit",
+        name: "YuE2 3B (8-bit)",
+        repo: "ddalcu/YuE2-3B-MLX-Serve-8bit",
+        family: .yue2,
+        approxRAMGB: 10,
+        approxDownloadGB: 4.5,
+        fixedSteps: 32,
+        supportsLyrics: true,
+        description: "Full songs with vocals in English and Chinese, planned from an editable score: it writes the melody and chords first, then sings them in 48 kHz stereo. Non-commercial license (CC BY-NC 4.0)."
+    )
+
     /// Catalog, best-first per family.
-    static let all: [MusicModelPreset] = [.acestepXLTurbo8bit, .acestepXLTurbo4bit, .miniMaxMusic3_8bit]
+    static let all: [MusicModelPreset] = [.acestepXLTurbo8bit, .acestepXLTurbo4bit, .miniMaxMusic3_8bit, .yue2_3B_8bit]
+}
+
+/// Text-to-audio checkpoints (Stable Audio 3), served on
+/// `/v1/audio/sound-generations`. The official repo loads as published: no
+/// converter, no `config.json` (the server classifies `model_config.json`).
+struct SoundModelPreset: Identifiable, Hashable {
+    var id: String
+    var name: String
+    var repo: String
+    let approxRAMGB: Int
+    let approxDownloadGB: Double
+    let description: String
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+
+    /// The server's bounds: (0, 120] seconds (the small models' longest
+    /// generation), 1–50 sampler steps, 8 by default (the distilled schedule).
+    var durationRange: ClosedRange<Double> { 0.5...120 }
+    var stepsRange: ClosedRange<Int> { 1...50 }
+    var defaultSteps: Int { 8 }
+
+    static let stableAudio3SmallSFX = SoundModelPreset(
+        id: "stable-audio-3-small-sfx",
+        name: "Stable Audio 3 Small SFX",
+        repo: "ddalcu/Stable-Audio-3-Small-SFX-MLX-Serve",
+        approxRAMGB: 5,
+        approxDownloadGB: 3.5,
+        description: "Sound effects and ambiences from a description — footsteps, rain, engines, impacts — up to two minutes, in about a second. Mirror of Stability AI's Stable Audio 3 Small SFX (Stability AI Community License), no Hugging Face login needed."
+    )
+
+    static let all: [SoundModelPreset] = [.stableAudio3SmallSFX]
+}
+
+struct SoundGenRequest {
+    var model: SoundModelPreset
+    var prompt: String
+    var durationSeconds: Double = 10
+    /// nil = the server's default schedule.
+    var steps: Int? = nil
+    /// -1 = a fresh random seed, resolved when the body is built.
+    var seed: Int = -1
+    var keepResident: Bool = false
+    var lanModelId: String? = nil
 }
 
 extension MusicGenRequest {
@@ -1520,7 +1863,7 @@ extension MusicGenRequest {
     /// answer so they cannot disagree about what is sendable.
     static func lyricsSatisfied(model: MusicModelPreset, lyrics: String,
                                 instrumental: Bool) -> Bool {
-        if !model.requiresLyrics || instrumental { return true }
+        if !model.requiresLyrics || (instrumental && model.supportsInstrumental) { return true }
         return !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
@@ -1552,6 +1895,15 @@ enum MusicOptions {
         "[bridge]", "[instrumental]", "[solo]", "[outro]",
     ]
     static let sectionTagHint: String = sectionTags.joined(separator: " ")
+
+    /// The tags YuE2's model card writes its lyrics with, capitalized.
+    static let yue2SectionTags: [String] = [
+        "[Intro]", "[Verse]", "[Pre-Chorus]", "[Chorus]", "[Interlude]", "[Bridge]", "[Outro]",
+    ]
+
+    static func sectionTagHint(for family: MusicEngineFamily) -> String {
+        (family == .yue2 ? yue2SectionTags : sectionTags).joined(separator: " ")
+    }
 
     /// What the server accepts for `bpm`. The pane used to offer only the ten
     /// anchors below, so 92 was unaskable while the chat tool could send it.
@@ -1636,8 +1988,98 @@ struct MusicPrompt: Codable, Equatable, Identifiable {
     /// so the caption is the ONLY place its tempo, key and arrangement can be
     /// stated, and a one-liner leaves every one of those to the model.
     static func builtinStyles(for family: MusicEngineFamily) -> [MusicPrompt] {
-        family == .minimaxMusic3 ? music3Styles : builtinStyles
+        switch family {
+        case .acestep: return builtinStyles
+        case .minimaxMusic3: return music3Styles
+        case .yue2: return yue2Styles
+        }
     }
+
+    /// Lyrics starters per family: YuE2 was trained on capitalized section
+    /// tags ([Verse], [Pre-Chorus]) where the others take lowercase.
+    static func builtinLyrics(for family: MusicEngineFamily) -> [MusicPrompt] {
+        family == .yue2 ? yue2Lyrics : builtinLyrics
+    }
+
+    /// YuE2 takes a comma-separated tag line: language or genre first, then
+    /// instruments, mood and the lead vocal. Three are the model card's own.
+    static let yue2Styles: [MusicPrompt] = [
+        MusicPrompt(title: "City pop",
+            body: "City Pop, upbeat, danceable, groovy bass, electric guitar, synth, energetic, joyful, neon city night"),
+        MusicPrompt(title: "Jazz-funk",
+            body: "Jazz-funk, warm lead vocal, Rhodes piano, electric bass, tight drums"),
+        MusicPrompt(title: "Jazz ballad",
+            body: "Jazz, expressive lead vocal, piano, tenor saxophone, upright bass, brushed drums, no guitar, spacious modern harmony"),
+        MusicPrompt(title: "Indie pop",
+            body: "English, indie pop, bright acoustic guitar, soft drums, warm lead vocal"),
+    ]
+
+    /// The model card's own demo lyrics (今晚不眠), and a short English song
+    /// in the same shape.
+    static let yue2Lyrics: [MusicPrompt] = [
+        MusicPrompt(title: "Short song (English)", body: """
+            [Verse]
+            Soft morning light is touching the window
+            Coffee on the table and the radio low
+            I hear your footsteps coming down the hall
+            Every little moment feels like it is all
+
+            [Chorus]
+            Stay with the rhythm, let it carry us home
+            We are not alone, we are not alone
+            Sing it to the sky and it will sing right back
+            Stay with the rhythm, never look back
+
+            [Outro]
+            Stay with the rhythm, let it carry us home
+            """),
+        MusicPrompt(title: "今晚不眠 (Mandarin)", body: """
+            [Intro]
+
+            [Verse]
+            路灯眨着眼睛 偷看谁的身影
+            街道哼着小调 节奏多轻盈
+            晚风染成霓虹 吹乱发际线
+            脚步踩着鼓点 不需要终点
+
+            [Pre-Chorus]
+            旋转的唱片 划破了寂静
+            气泡在上升 快乐在飞行
+            把烦恼抛去 别再去在意
+            这里的空气 充满了魔力
+
+            [Chorus]
+            今晚不眠 快乐无限
+            城市在狂欢 我们在中间
+            自由摇摆 光芒盛开
+            跟着这节拍 把心打开
+
+            今晚不眠 快乐无限
+            城市在狂欢 我们在中间
+            自由摇摆 光芒盛开
+            跟着这节拍 把心打开
+
+            [Interlude]
+
+            [Bridge]
+            像橘子汽水 充满了微醺的甜
+            像流星划过 点亮了夜的天
+            不需要理由 只要你感觉
+            这一刻就是 永恒的瞬间
+
+            [Chorus]
+            今晚不眠 快乐无限
+            城市在狂欢 我们在中间
+            自由摇摆 光芒盛开
+            跟着这节拍 把心打开
+
+            [Outro]
+            霓虹色的风 吹向那梦
+            摇摆
+            闪耀
+            Yeah
+            """),
+    ]
 
     /// Built-in style-prompt starters (genre / mood / instrumentation).
     static let builtinStyles: [MusicPrompt] = [
@@ -1933,7 +2375,7 @@ struct ImageGenRequest {
     /// Extra in-context reference images for edit mode (FLUX.2
     /// multi-reference): "replace the face in image 1 with the face from
     /// image 2". Sent as `ref_images` beside the primary source; the server
-    /// takes at most 3.
+    /// takes at most `ImageModelPreset.maxReferenceImages`.
     var refImagePaths: [String] = []
     /// Conditioning rebalance (Advanced): global multiplier on the prompt
     /// embeddings. 1.0 = off.
@@ -1946,9 +2388,9 @@ struct ImageGenRequest {
     /// DiT at runtime (sent as `lora_paths`/`lora_scales` — mirrors mflux).
     /// Empty = none. Rows with an empty `path` are dropped before sending.
     var loras: [LoraAdapter] = []
-    /// Classifier-free guidance (Advanced, `model.supportsGuidance` only):
-    /// 1.0 = off, matching the server default.
-    var guidanceScale: Double = 1.0
+    /// Classifier-free guidance (Advanced, `model.supportsGuidance` only);
+    /// nil = the backend's own default (`defaultGuidance`).
+    var guidanceScale: Double? = nil
     /// What to steer AWAY from — only meaningful alongside `guidanceScale`
     /// != 1.0. Empty = the server's own unconditioning (empty-string prompt).
     var negativePrompt: String = ""
@@ -1962,7 +2404,7 @@ extension ImageModelPreset {
     var condWeightCount: Int {
         switch variant {
         case .krea2Turbo: return 12
-        case .mageFlowTurbo, .mageFlowEditTurbo, .qwenImage21: return 0
+        case .mageFlowTurbo, .mageFlowEditTurbo, .qwenImage21, .qwenImage21Turbo, .mossImage: return 0
         default: return 3
         }
     }
@@ -1974,7 +2416,7 @@ extension ImageModelPreset {
         switch variant {
         // `clampKreaDim` — VAE ×8 + DiT patch ×2. Mage-Flow is native-resolution
         // with a ×16 VAE downsample and shares the same clamp server-side.
-        case .krea2Turbo, .mageFlowTurbo, .mageFlowEditTurbo, .qwenImage21:
+        case .krea2Turbo, .mageFlowTurbo, .mageFlowEditTurbo, .qwenImage21, .qwenImage21Turbo, .mossImage:
             return ResolutionGrid(alignment: 16, minDim: 256, maxDim: 2048)
         // `clampFluxDim` — klein's /32 crop granularity, 1536 covering the
         // widest preset edge.
@@ -1984,10 +2426,26 @@ extension ImageModelPreset {
     }
 
     /// Instruction editing (in-context reference conditioning) is a trained
-    /// capability: FLUX.2-klein, and the Mage-Flow-Edit checkpoint. Krea and
-    /// Mage-Flow Turbo (txt2img) can only do renoise variations.
+    /// capability: FLUX.2-klein, the Mage-Flow-Edit checkpoint, and
+    /// Qwen-Image-2.1 (a unified t2i + edit checkpoint). Krea and Mage-Flow
+    /// Turbo (txt2img) can only do renoise variations.
     var supportsReferenceEdit: Bool {
-        variant == .flux2Klein4B || variant == .flux2Klein9B || variant == .flux2Klein9BBase || variant == .mageFlowEditTurbo
+        switch variant {
+        case .flux2Klein4B, .flux2Klein9B, .flux2Klein9BBase, .mageFlowEditTurbo, .qwenImage21, .qwenImage21Turbo:
+            return true
+        case .krea2Turbo, .mageFlowTurbo, .mossImage:
+            return false
+        }
+    }
+
+    /// Reference images an edit takes beside the source — the server's
+    /// `gen.editRefCap` minus the source itself (10 total for Qwen-Image, 4
+    /// for the other editors).
+    var maxReferenceImages: Int {
+        switch variant {
+        case .qwenImage21, .qwenImage21Turbo: return 9
+        default: return 3
+        }
     }
 
     /// Real classifier-free guidance (`guidance_scale` + negative prompt) —
@@ -1998,7 +2456,17 @@ extension ImageModelPreset {
     /// Qwen-Image-2.1 is undistilled too: 1.0 (its recommended default) runs
     /// one forward per step, anything else two.
     var supportsGuidance: Bool {
-        variant == .flux2Klein9BBase || variant == .qwenImage21
+        variant == .flux2Klein9BBase || variant == .qwenImage21 || variant == .mossImage
+    }
+
+    /// The server's `guidance_scale` when the request omits it
+    /// (`gen.ImageEngine.defaultGuidance`): MOSS-Image's authors run CFG 3.
+    var defaultGuidance: Double { variant == .mossImage ? 3.0 : 1.0 }
+
+    /// The negative tags MOSS-Image's guide recommends; the pane pre-fills them
+    /// and chat generations send them.
+    var defaultNegativePrompt: String {
+        variant == .mossImage ? "nsfw, worst quality, bad anatomy, watermark, jpeg artifact" : ""
     }
 
     // ── Capability flags: what the Advanced panel is allowed to offer ──
@@ -2011,16 +2479,16 @@ extension ImageModelPreset {
     /// all: sending a source without `mode:"edit"` is a 400.
     var supportsImg2Img: Bool {
         switch variant {
-        case .mageFlowTurbo, .mageFlowEditTurbo: return false
+        case .mageFlowTurbo, .mageFlowEditTurbo, .mossImage: return false
         default: return true
         }
     }
 
-    /// Runtime LoRA adapters attach to the DiT (`gen.ImageEngine.setLora`).
+    /// Runtime LoRA adapters attach to the DiT (`gen.ImageEngine.setLoras`).
     /// Mage-Flow has no LoRA path, so a picked adapter matches 0 modules → 400.
     var supportsLoRA: Bool {
         switch variant {
-        case .mageFlowTurbo, .mageFlowEditTurbo, .qwenImage21: return false
+        case .mageFlowTurbo, .mageFlowEditTurbo: return false
         default: return true
         }
     }
@@ -2030,20 +2498,32 @@ extension ImageModelPreset {
     /// 8 steps costs 2× and 12 costs 4× for a DIFFERENT image, not a better one.
     var stepsAreFixed: Bool {
         switch variant {
-        case .mageFlowTurbo, .mageFlowEditTurbo: return true
+        case .mageFlowTurbo, .mageFlowEditTurbo, .qwenImage21Turbo: return true
         default: return false
         }
     }
 
+    /// The pack's own sampling grid sets the step count server-side, so a
+    /// `steps` field would be a control that does nothing.
+    var stepsSetByCheckpoint: Bool { variant == .qwenImage21Turbo }
+
     /// The fixed step count for a distilled preset (its `.good` profile).
     var fixedSteps: Int { settings(.good).steps }
+
+    /// Lays out whole pages of text (infographics, slides, posters), verified
+    /// live: the Infographics templates and Enhance's layout rules follow it.
+    var rendersDenseText: Bool { variant == .qwenImage21 || variant == .qwenImage21Turbo }
 
     /// Starter prompts for the Examples menu, for the mode the pane is in.
     /// An instruction-tuned editor's repertoire IS its prompt vocabulary — the
     /// only way to discover that it can produce a depth map or de-rain a photo
     /// is to be shown the sentence that does it.
     func promptExamples(editing: Bool) -> [ImagePromptExampleGroup] {
-        guard editing && supportsReferenceEdit else { return ImagePromptExamples.textToImage }
+        guard editing && supportsReferenceEdit else {
+            if variant == .mossImage { return ImagePromptExamples.textToImage + [ImagePromptExamples.mossImage] }
+            return rendersDenseText ? ImagePromptExamples.textToImage + [ImagePromptExamples.infographics]
+                                    : ImagePromptExamples.textToImage
+        }
         switch variant {
         case .mageFlowEditTurbo: return ImagePromptExamples.mageFlowEdit
         default: return ImagePromptExamples.genericEdit
@@ -2244,6 +2724,9 @@ struct MusicGenRequest {
     var timesignature: String = ""
     /// Track length in seconds (server-valid 10–600).
     var durationSeconds: Int = 60
+    /// YuE2: send no cap, so the model ends the song after the last lyric instead of being cut at
+    /// `durationSeconds`. Ignored by models that make exactly the length asked.
+    var autoLength: Bool = false
     /// -1 = fresh random seed per generation.
     var seed: Int = -1
     /// Flow-match refinement passes; nil = the server's own default. Only sent
@@ -2251,6 +2734,11 @@ struct MusicGenRequest {
     var steps: Int? = nil
     /// Keep the model resident after this generation (default off → unload).
     var keepResident: Bool = false
+    /// YuE2: whether the model plans a score first, and the ABC text that
+    /// replaces its own plan (empty = let it write one). Only sent where
+    /// `supportsScore`.
+    var plan: MusicPlan = .full
+    var score: String = ""
     /// Max-quality opt-out of the server's fast recipe ("fast": false — every
     /// forward dense, ~2.8x slower at 768p, "just a smidge better").
     var bestQuality: Bool = false
@@ -2321,6 +2809,19 @@ struct Model3DGenRequest {
     /// Run the P2 paint stage (full PBR texture) after shape generation.
     /// Off by default until the paint port is validated end to end.
     var texture: Bool = false
+    /// TRELLIS.2 only: the cascade resolution (1024, or 1536 for a finer mesh).
+    var trellisResolution: Int = 1024
+    /// TRELLIS.2 only: faces kept after decimation.
+    var decimationTarget: Int = 300_000
+    /// TRELLIS.2 only: side of the baked texture, pixels.
+    var textureSize: Int = 2048
+    /// TRELLIS.2 and Pixal3D: how shiny the model looks (`.model` sends nothing).
+    var finish: Model3DFinish = .model
+    /// Idol only: sampler steps, guidance, Gaussians generated and the kind of picture.
+    var splatSteps: Int = 50
+    var splatGuidance: Double = 3.0
+    var splatGaussians: Int = 262_144
+    var splatPhoto: Model3DPhotoKind = .render
 }
 
 // MARK: - RAM checks

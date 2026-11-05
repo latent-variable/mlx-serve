@@ -1,7 +1,7 @@
 import XCTest
 @testable import MLXCore
 
-/// `~/.mlx-serve/model-settings.json` is the SERVER's file (`src/model_settings.zig`);
+/// `~/.mlx-serve/model-settings.json` is the SERVER's file (`src/host/registry/model_settings.zig`);
 /// the app only edits it, so it must write exactly the server's keys and never
 /// drop a key it does not know.
 final class ModelSettingsFileTests: XCTestCase {
@@ -40,6 +40,17 @@ final class ModelSettingsFileTests: XCTestCase {
         XCTAssertEqual(ModelOverride(json: ["mtp_acceptance": "fast"]).mtpAcceptance, nil)
     }
 
+    func testMtpGreedyTailRoundTripsAsABoolean() throws {
+        let path = tempPath()
+        var file = ModelSettingsFile()
+        file.set(ModelOverride(mtpGreedyTail: true), for: "/m/a")
+        try file.save(path: path)
+        let text = try String(contentsOfFile: path, encoding: .utf8)
+        XCTAssertTrue(text.contains("\"mtp_greedy_tail\" : true"), text)
+        XCTAssertEqual(ModelSettingsFile.load(path: path).override(for: "/m/a")?.mtpGreedyTail, true)
+        XCTAssertNil(ModelOverride(json: ["mtp_greedy_tail": "yes"]).mtpGreedyTail)
+    }
+
     func testInt8PrefillRoundTripsAsABoolean() throws {
         let path = tempPath()
         var file = ModelSettingsFile()
@@ -49,6 +60,33 @@ final class ModelSettingsFileTests: XCTestCase {
         XCTAssertTrue(text.contains("\"int8_prefill\" : true"), text)
         XCTAssertEqual(ModelSettingsFile.load(path: path).override(for: "/m/a")?.int8Prefill, true)
         XCTAssertNil(ModelOverride(json: ["int8_prefill": "yes"]).int8Prefill)
+    }
+
+    func testAneRoundTripsAsABoolean() throws {
+        let path = tempPath()
+        var file = ModelSettingsFile()
+        var o = ModelOverride()
+        o.ane = true
+        file.set(o, for: "/m/a")
+        try file.save(path: path)
+        let text = try String(contentsOfFile: path, encoding: .utf8)
+        XCTAssertTrue(text.contains("\"ane\" : true"), text)
+        XCTAssertEqual(ModelSettingsFile.load(path: path).override(for: "/m/a")?.ane, true)
+        XCTAssertNil(ModelOverride(json: ["ane": "yes"]).ane)
+        XCTAssertTrue(o.changesLoad(from: ModelOverride()), "the engine is chosen at load")
+    }
+
+    func testTheEnginePickerWritesEngineAndRetiresTheAneSwitch() throws {
+        var o = ModelOverride(json: ["ane": true])
+        XCTAssertEqual(o.engineChoice, "ane", "an older file's switch reads as the engine")
+        XCTAssertEqual(ModelOverride(json: ["ane": false]).engineChoice, "mlx")
+        o.engineChoice = "mlx"
+        XCTAssertEqual(o.json["engine"] as? String, "mlx")
+        XCTAssertNil(o.json["ane"], "one key decides")
+        o.engineChoice = nil
+        XCTAssertTrue(o.isEmpty)
+        XCTAssertEqual(ModelOverride(json: ["engine": "llama"]).engineChoice, "llama")
+        XCTAssertTrue(ModelOverride(json: ["engine": "ds4"]).changesLoad(from: ModelOverride()))
     }
 
     /// `chat_template_kwargs` round-trips as one object: the rows the sheet

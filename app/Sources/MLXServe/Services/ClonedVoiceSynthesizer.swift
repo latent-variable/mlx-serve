@@ -27,6 +27,15 @@ import AVFoundation
 enum NeuralVoice: Equatable, Sendable {
     case clone(clipPath: String)
     case kokoro(voice: String)
+    case lfm3(voice: String)
+
+    /// The voice id, blend or clip path, as a picker names it.
+    var id: String {
+        switch self {
+        case .clone(let path): return path
+        case .kokoro(let v), .lfm3(let v): return v
+        }
+    }
 }
 
 final class ClonedVoiceSynthesizer: SpeechSynthesizing {
@@ -38,6 +47,8 @@ final class ClonedVoiceSynthesizer: SpeechSynthesizing {
 
     private let system: any SpeechSynthesizing
     private let voice: () -> NeuralVoice?
+    /// The active agent's own Apple voice, re-read per utterance; nil keeps `voiceIdentifier`.
+    private let systemVoice: () -> String?
     private let synthesizeClone: CloneSynth
     private let playClone: ClonePlay
     /// Silence the in-flight clone clip immediately (barge-in).
@@ -66,8 +77,7 @@ final class ClonedVoiceSynthesizer: SpeechSynthesizing {
     /// The system voice picker still applies to fallback utterances; the clone
     /// path has exactly one voice (the clip) and ignores it.
     var voiceIdentifier: String? {
-        get { system.voiceIdentifier }
-        set { system.voiceIdentifier = newValue }
+        didSet { system.voiceIdentifier = voiceIdentifier }
     }
     var isSpeaking: Bool {
         !texts.isEmpty || !playQueue.isEmpty || synthPumping || playPumping || system.isSpeaking
@@ -75,6 +85,7 @@ final class ClonedVoiceSynthesizer: SpeechSynthesizing {
 
     init(system: any SpeechSynthesizing,
          voice: @escaping () -> NeuralVoice?,
+         systemVoice: @escaping () -> String? = { nil },
          synthesizeClone: @escaping CloneSynth,
          playClone: @escaping ClonePlay,
          stopClonePlayback: @escaping () -> Void = {},
@@ -82,6 +93,8 @@ final class ClonedVoiceSynthesizer: SpeechSynthesizing {
          prewarmClone: ((NeuralVoice) async -> Void)? = nil) {
         self.system = system
         self.voice = voice
+        self.systemVoice = systemVoice
+        self.voiceIdentifier = system.voiceIdentifier
         self.synthesizeClone = synthesizeClone
         self.playClone = playClone
         self.stopClonePlayback = stopClonePlayback
@@ -105,6 +118,7 @@ final class ClonedVoiceSynthesizer: SpeechSynthesizing {
                 // very next sentence, with no restart.
                 ActiveAgentVoice.currentNeuralVoice(options: ServerOptions.load())
             },
+            systemVoice: { ActiveAgentVoice.systemVoiceIdentifier(agent: ActiveAgentVoice.current) },
             synthesizeClone: { text, sel in await tts.synthesize(text: text, voice: sel) },
             playClone: { data in await player.play(data) },
             stopClonePlayback: { player.stop() },
@@ -130,7 +144,9 @@ final class ClonedVoiceSynthesizer: SpeechSynthesizing {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         guard let sel = voice() else {
-            system.enqueue(trimmed)     // no neural voice configured → system
+            // No neural voice → system, in the active agent's own voice when it picked one.
+            system.voiceIdentifier = systemVoice() ?? voiceIdentifier
+            system.enqueue(trimmed)
             return
         }
         texts.append(trimmed)
@@ -206,6 +222,7 @@ final class ClonedVoiceSynthesizer: SpeechSynthesizing {
     private func speakViaSystem(_ text: String) async {
         await withCheckedContinuation { cont in
             systemDrainContinuation = cont
+            system.voiceIdentifier = voiceIdentifier
             system.enqueue(text)
         }
     }
@@ -282,11 +299,12 @@ final class VoiceCloneTTS {
         // Audio pane: the configured default is the 0.6B repo, so a machine with
         // only the 1.7B variants used to resolve nothing and fall back silently to
         // the system voice.
-        let preset: AudioModelPreset? = switch sel {
-        case .kokoro: .kokoro82M
-        case .clone: VoiceCloneMenuModel.resolvedCloneModel()
+        let dir: String? = switch sel {
+        case .kokoro: ServerManager.resolveModelDir(repo: AudioModelPreset.kokoro82M.repo)
+        case .clone: VoiceCloneMenuModel.resolvedCloneModel().flatMap { ServerManager.resolveModelDir(repo: $0.repo) }
+        case .lfm3: LFM3Voice.modelPath(app: VoiceASR.app)
         }
-        guard let preset, let dir = ServerManager.resolveModelDir(repo: preset.repo) else { return nil }
+        guard let dir else { return nil }
         do {
             let port = try await server.ensureRunning(forGenModelDir: dir)
             if loadedModelId == nil || loadedDir != dir {
@@ -317,7 +335,7 @@ final class VoiceCloneTTS {
     static func requestBody(model: String, text: String, voice sel: NeuralVoice) -> [String: Any] {
         var json: [String: Any] = ["model": model, "input": text]
         switch sel {
-        case .kokoro(let v):
+        case .kokoro(let v), .lfm3(let v):
             json["voice"] = v
         case .clone(let clip):
             if let data = try? Data(contentsOf: URL(fileURLWithPath: clip)) {
@@ -328,7 +346,10 @@ final class VoiceCloneTTS {
     }
 
     func unload() async {
-        if let id = loadedModelId { try? await server.unloadModel(id: id) }
+        // The chat model speaking its own answers stays: it is the conversation's model, not a voice's.
+        if let id = loadedModelId, loadedDir != VoiceASR.app?.selectedModelPath {
+            try? await server.unloadModel(id: id)
+        }
         loadedModelId = nil
         loadedDir = nil
     }

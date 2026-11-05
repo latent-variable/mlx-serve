@@ -1,13 +1,13 @@
 ---
 name: mlx-serve
-description: Hook an app, game or script up to the local mlx-serve server for LLM chat, embeddings, image, speech, music, video and 3D generation, and Laya/Kev typed decisions. Use when code should call mlx-serve.
+description: Hook an app, game or script up to the local mlx-serve server for LLM chat, embeddings, image, speech, music, sound effect, video and 3D generation, and Laya/Kev/Clef typed decisions, or make a whole film or music video on this Mac. Use when code should call mlx-serve or the user wants a video, song, pictures or game assets made locally.
 ---
 
 # mlx-serve
 
 mlx-serve runs MLX models on this Mac behind one HTTP port: OpenAI, Anthropic and
-Ollama compatible chat, plus native endpoints for images, speech, music, video, 3D
-and decisions. Everything below is plain HTTP + JSON, so any language works.
+Ollama compatible chat, plus native endpoints for images, speech, music, sound effects, video,
+3D and decisions. Everything below is plain HTTP + JSON, so any language works.
 
 ## Connect
 
@@ -34,34 +34,59 @@ Each row has `id` (like `org/name`), `capabilities`, `state` (`ready`,
 | `chat` | `POST /v1/chat/completions` (also `/v1/messages`, `/v1/responses`) | chat.md |
 | `embeddings` | `POST /v1/embeddings` | chat.md |
 | `image` | `POST /v1/images/generations`, `POST /v1/images/edits` | media.md |
-| `audio` without `music` | `POST /v1/audio/speech` (TTS) | media.md |
+| `audio` without `music` or `sound` | `POST /v1/audio/speech` (TTS) | media.md |
 | `music` | `POST /v1/audio/music-generations` | media.md |
+| `sound` | `POST /v1/audio/sound-generations` (sound effects) | media.md |
+| `transcription` | `POST /v1/audio/transcriptions` (speech to text, word times, subtitles) | media.md |
 | `video` | `POST /v1/video/generations` | media.md |
 | `3d` | `POST /v1/3d/generations` | media.md |
-| `decisions` | `POST /v1/decisions` | decisions.md |
+| `decisions` | `POST /v1/decisions`, `POST /v1/systemone` | decisions.md |
 
 Read the linked file (next to this one) before writing client code for that
 endpoint. If no model has the capability the user needs, say so and tell them to
 download one in the MLX Core app (Models). Do not invent an id.
+
+3D has a default: Idol, the `3d` row whose id contains `Idol` (about 3 GB). Use it unless the user
+names another 3D model. If no listed `3d` model is Idol, stop and tell the user to download it (MLX Core:
+Models > Media > 3D, or `mlx-serve pull ddalcu/Idol-MLX-Serve-8bit` and then `POST /v1/models/rescan`);
+do not substitute another 3D model.
 
 ## Loading and memory
 
 - Any request names its model with `"model": "<id>"`. An unloaded model loads on
   the first request, which can take seconds to minutes.
   `POST /v1/load-model {"model": "<id>"}` pre-warms one;
-  `POST /v1/unload-model {"model": "<id>"}` frees it.
-- All models share one GPU memory budget. A 503 `out_of_memory` means unload
-  something first (typically the media model when you are done with it).
-- Generation runs on one inference thread: a 3-minute video render stalls chat
-  replies for 3 minutes. Decisions and embeddings are milliseconds.
+  `POST /v1/unload-model {"model": "<id>"}` frees it. While a load runs,
+  `GET /v1/load-progress` lists each loading model's `phase`, `done`/`total`
+  and `eta_s`.
+- Everything runs on ONE machine and ONE GPU: the chat model you are running on,
+  the image, 3D and sound models all share its memory. A 503 `out_of_memory`
+  means unload something first. Not every overfill is refused: three models
+  packed to the edge make Metal fail mid-job instead, so keep ONE media model
+  loaded at a time and unload it before loading another kind (gen.mjs does).
+- Generation runs on one inference thread and chat shares the GPU with it: a
+  3-minute video render stalls chat replies for 3 minutes, and chatting while
+  media renders squeezes both. Run asset generation as its own step and wait
+  for it, never alongside your own coding turns. Decisions and embeddings are
+  milliseconds.
+
+## Films and music videos
+
+Making a video (music video, trailer, release or story film)? Read film.md first: a YuE2 song is the
+spine, `gen.mjs` makes the pictures, clips and sound effects, and `film.mjs` (Node 18+) times every cut
+to the sung words and renders it.
 
 ## Rules for apps and games
 
-- Generate media AHEAD of time or in the background, never on the frame or
-  input path. Cache results on disk keyed by model + prompt + seed + size, and
+- Building a 3D game or scene? Read games.md first: movement, foliage and lighting rules,
+  and `gen.mjs` (next to this file, Node 18+), which generates and post-processes every
+  asset from one `assets.json` (`node gen.mjs help`).
+- Generate media AHEAD of time, as a step you wait for (one GPU, shared with
+  the chat model you run on; never in parallel with your own work), never on
+  the frame or input path. Cache results on disk keyed by model + prompt + seed + size, and
   ship the cache (or regenerate lazily) instead of calling on every run.
 - Rough cost on Apple Silicon: image 5-60 s, speech about real time or faster,
-  music 30 s to minutes, 3D 1-5 min, video minutes. Set client timeouts to
+  sound effects about a second, music 30 s to minutes, 3D 1-5 min, video minutes. Set client timeouts to
   match (10+ minutes for video), and keep the game playable while waiting.
 - Send `"seed"` for reproducible assets.
 - Long jobs: send `"stream": true` and read the SSE `progress` events to drive a

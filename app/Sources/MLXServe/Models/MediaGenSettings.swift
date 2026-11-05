@@ -11,10 +11,42 @@ struct LoraAdapter: Codable, Equatable, Identifiable {
     /// Absolute path to a `.safetensors` adapter. Empty rows (mid-edit, e.g.
     /// right after tapping "+") are dropped before the request is sent.
     var path: String = ""
-    /// Strength multiplier on top of the file's own alpha/rank scale.
+    /// Strength multiplier on top of the file's own alpha/rank scale. Negative
+    /// values reverse the effect and only slider-style LoRAs want them, so the
+    /// row keeps a 0 floor until `allowsNegative` is switched on.
     var scale: Double = 1.0
+    var allowsNegative: Bool = false
 
-    private enum CodingKeys: String, CodingKey { case path, scale }
+    private enum CodingKeys: String, CodingKey { case path, scale, allowsNegative }
+}
+
+extension LoraAdapter {
+    /// `allowsNegative` is absent from older blobs; a saved negative scale implies it.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decodeIfPresent(String.self, forKey: .path) ?? ""
+        scale = try c.decodeIfPresent(Double.self, forKey: .scale) ?? 1.0
+        allowsNegative = try c.decodeIfPresent(Bool.self, forKey: .allowsNegative) ?? (scale < 0)
+    }
+}
+
+/// What the LoRA picker offers for a strength. The server takes any finite
+/// number; the slider only has to be usable, so it widens to fit the value.
+enum LoraScale {
+    /// Far past any published slider adapter (±20); only keeps a typo from overflowing bf16.
+    static let limit = 100.0
+
+    static func clamped(_ value: Double, allowsNegative: Bool) -> Double {
+        value.isNaN ? 0 : min(limit, max(allowsNegative ? -limit : 0, value))
+    }
+
+    /// Slider half-range: ±2 until a value outside it is entered, then the next multiple of 10.
+    static func sliderBound(for value: Double) -> Double {
+        let m = abs(value)
+        return m <= 2 ? 2 : min(limit, (m / 10).rounded(.up) * 10)
+    }
+
+    static func sliderStep(bound: Double) -> Double { bound <= 2 ? 0.05 : 0.5 }
 }
 
 /// Keys for the pre-multi-LoRA single `loraPath`/`loraScale` fields, kept
@@ -246,6 +278,8 @@ extension AudioGenSettings {
 struct MusicGenSettings: Codable, Equatable {
     var modelId: String = MusicModelPreset.acestepXLTurbo8bit.id
     var durationSeconds: Int = 60
+    /// YuE2: let the model end the song (no cap). On by default: the cap cut songs mid-lyric.
+    var autoLength: Bool = true
     var vocalLanguage: String = "en"
     var keepResident: Bool = false
     // Everything below used to live in plain `@State`. The pane is UNMOUNTED
@@ -258,6 +292,9 @@ struct MusicGenSettings: Codable, Equatable {
     var seed: Int = -1
     var steps: Int? = nil
     var instrumental: Bool = false
+    /// YuE2's score plan and the hand-edited ABC (part of the draft).
+    var plan: MusicPlan = .full
+    var score: String = ""
     /// Advanced starts OPEN. Collapsed-by-default is why tempo, key, seed and
     /// steps read as missing features — they were one unlabeled chevron away.
     var showAdvanced: Bool = true
@@ -310,6 +347,7 @@ extension MusicGenSettings {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         if let v = try c.decodeIfPresent(String.self, forKey: .modelId) { modelId = v }
         if let v = try c.decodeIfPresent(Int.self, forKey: .durationSeconds) { durationSeconds = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .autoLength) { autoLength = v }
         if let v = try c.decodeIfPresent(String.self, forKey: .vocalLanguage) { vocalLanguage = v }
         if let v = try c.decodeIfPresent(Bool.self, forKey: .keepResident) { keepResident = v }
         bpm = try c.decodeIfPresent(Int.self, forKey: .bpm)
@@ -318,6 +356,8 @@ extension MusicGenSettings {
         if let v = try c.decodeIfPresent(Int.self, forKey: .seed) { seed = v }
         steps = try c.decodeIfPresent(Int.self, forKey: .steps)
         if let v = try c.decodeIfPresent(Bool.self, forKey: .instrumental) { instrumental = v }
+        if let v = try c.decodeIfPresent(MusicPlan.self, forKey: .plan) { plan = v }
+        if let v = try c.decodeIfPresent(String.self, forKey: .score) { score = v }
         if let v = try c.decodeIfPresent(Bool.self, forKey: .showAdvanced) { showAdvanced = v }
         if let v = try c.decodeIfPresent(String.self, forKey: .prompt) { prompt = v }
         if let v = try c.decodeIfPresent(String.self, forKey: .lyrics) { lyrics = v }
@@ -331,6 +371,54 @@ extension MusicGenSettings {
         if let v = try c.decodeIfPresent(Double.self, forKey: .coverNoiseStrength) { coverNoiseStrength = v }
         if let v = try c.decodeIfPresent([String].self, forKey: .trackClasses) { trackClasses = v }
     }
+}
+
+// MARK: - Sound effects
+
+struct SoundGenSettings: Codable, Equatable {
+    var modelId: String = SoundModelPreset.stableAudio3SmallSFX.id
+    var prompt: String = ""
+    var durationSeconds: Double = 10
+    var steps: Int? = nil
+    var seed: Int = -1
+    var keepResident: Bool = false
+    var showAdvanced: Bool = true
+
+    private static let storageKey = "soundGenSettings"
+
+    static func load() -> SoundGenSettings {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let v = try? JSONDecoder().decode(SoundGenSettings.self, from: data) else {
+            return SoundGenSettings()
+        }
+        return v
+    }
+
+    func save() {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        UserDefaults.standard.set(data, forKey: Self.storageKey)
+    }
+
+    func resolvedModel(models: [ModelInfo]) -> SoundModelPreset {
+        SoundModelPreset.all.first { $0.id == modelId }
+            ?? CustomMediaModels.soundPreset(for: modelId, from: models)
+            ?? .stableAudio3SmallSFX
+    }
+
+    /// Every key optional (see `MusicGenSettings`).
+    init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let v = try c.decodeIfPresent(String.self, forKey: .modelId) { modelId = v }
+        if let v = try c.decodeIfPresent(String.self, forKey: .prompt) { prompt = v }
+        if let v = try c.decodeIfPresent(Double.self, forKey: .durationSeconds) { durationSeconds = v }
+        steps = try c.decodeIfPresent(Int.self, forKey: .steps)
+        if let v = try c.decodeIfPresent(Int.self, forKey: .seed) { seed = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .keepResident) { keepResident = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .showAdvanced) { showAdvanced = v }
+    }
+
+    init() {}
 }
 
 // MARK: - Video
@@ -386,6 +474,9 @@ struct VideoGenSettings: Codable, Equatable {
     var refImageSize: RefImageSizing = .match
     var showMediaInputs: Bool = true
     var showAdvanced: Bool = false
+    /// Storyboard mode: `prompt` is the story, the shots are what generates.
+    var storyboardMode: Bool = false
+    var storyboard: [StoryboardSegment] = []
 
     private static let storageKey = "videoGenSettings"
 
@@ -503,6 +594,8 @@ extension VideoGenSettings {
         if let v = try c.decodeIfPresent(RefImageSizing.self, forKey: .refImageSize) { refImageSize = v }
         if let v = try c.decodeIfPresent(Bool.self, forKey: .showMediaInputs) { showMediaInputs = v }
         if let v = try c.decodeIfPresent(Bool.self, forKey: .showAdvanced) { showAdvanced = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .storyboardMode) { storyboardMode = v }
+        if let v = try c.decodeIfPresent([StoryboardSegment].self, forKey: .storyboard) { storyboard = v }
     }
 }
 
@@ -516,7 +609,7 @@ enum VideoAudioSource: String, Codable {
 // MARK: - 3D
 
 struct Model3DGenSettings: Codable, Equatable {
-    var modelId: String = Model3DModelPreset.hunyuan3d21_8bit.id
+    var modelId: String = Model3DModelPreset.recommended.id
     var steps: Int = 30
     var guidance: Double = 5.0
     /// Marching-cubes octree resolution (128 / 256 / 384 — the reference
@@ -527,6 +620,20 @@ struct Model3DGenSettings: Codable, Equatable {
     var turntable: Bool = true
     /// P2 paint stage (full PBR texture). Off until validated end to end.
     var texture: Bool = false
+    /// TRELLIS.2: cascade resolution, faces kept, texture side.
+    var trellisResolution: Int = 1024
+    var decimationTarget: Int = 300_000
+    var textureSize: Int = 2048
+    var finish: Model3DFinish = .model
+    /// Idol: sampler steps, guidance, Gaussians generated, the kind of picture.
+    var splatSteps: Int = 50
+    var splatGuidance: Double = 3.0
+    var splatGaussians: Int = 262_144
+    var splatPhoto: Model3DPhotoKind = .render
+    /// The Gaussian counts the pane offers; a stored value that is none of them snaps to the nearest.
+    static let gaussianOptions = [65_536, 131_072, 262_144, 524_288, 1_048_576]
+    /// The face counts the pane offers; a stored value that is none of them snaps to the nearest.
+    static let faceOptions = [100_000, 300_000, 600_000, 1_000_000, 2_000_000]
     /// The draft: the pane unmounts on navigation, so the photo and the
     /// disclosure state live here or are lost on the way to Chat and back.
     var photoPath: String? = nil
@@ -554,7 +661,7 @@ extension Model3DGenSettings {
     func resolvedModel(models: [ModelInfo]) -> Model3DModelPreset {
         Model3DModelPreset.all.first { $0.id == modelId }
             ?? CustomMediaModels.meshPreset(for: modelId, from: models)
-            ?? .hunyuan3d21_8bit
+            ?? .recommended
     }
 
     init(from decoder: Decoder) throws {
@@ -568,6 +675,18 @@ extension Model3DGenSettings {
         if let v = try c.decodeIfPresent(Bool.self, forKey: .keepResident) { keepResident = v }
         if let v = try c.decodeIfPresent(Bool.self, forKey: .turntable) { turntable = v }
         if let v = try c.decodeIfPresent(Bool.self, forKey: .texture) { texture = v }
+        if let v = try c.decodeIfPresent(Int.self, forKey: .trellisResolution) { trellisResolution = v }
+        if let v = try c.decodeIfPresent(Int.self, forKey: .decimationTarget) {
+            decimationTarget = Self.faceOptions.min { abs($0 - v) < abs($1 - v) } ?? v
+        }
+        if let v = try c.decodeIfPresent(Int.self, forKey: .textureSize) { textureSize = v }
+        if let v = try c.decodeIfPresent(Model3DFinish.self, forKey: .finish) { finish = v }
+        if let v = try c.decodeIfPresent(Int.self, forKey: .splatSteps) { splatSteps = v }
+        if let v = try c.decodeIfPresent(Double.self, forKey: .splatGuidance) { splatGuidance = v }
+        if let v = try c.decodeIfPresent(Int.self, forKey: .splatGaussians) {
+            splatGaussians = Self.gaussianOptions.min { abs($0 - v) < abs($1 - v) } ?? v
+        }
+        if let v = try c.decodeIfPresent(Model3DPhotoKind.self, forKey: .splatPhoto) { splatPhoto = v }
         if let v = try c.decodeIfPresent(String.self, forKey: .photoPath) { photoPath = v }
         if let v = try c.decodeIfPresent(Bool.self, forKey: .showAdvanced) { showAdvanced = v }
     }

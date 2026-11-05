@@ -7,7 +7,7 @@ import Foundation
 /// reads. This lets each download pull EXACTLY what's needed — no more.
 struct FileSelection: Equatable {
     /// Descend into subdirectories (FLUX/TTS). When false, only top-level files
-    /// + the `mtp/` sidecar are kept (the chat-model default).
+    /// + the `mtp/` and `drafter/` sidecars are kept (the chat-model default).
     var recursive: Bool = false
     /// Skip any file whose path contains one of these (belt-and-suspenders for
     /// junk a recursive scan would otherwise grab).
@@ -26,8 +26,11 @@ struct FileSelection: Equatable {
     /// `drafter/` lands at `<model_dir>/drafter/`, where the server finds it.
     var packFolder: String? = nil
 
-    /// Chat-model default: top-level files + `mtp/`, all needed extensions.
+    /// Chat-model default: the whole pack, as `mlx-serve pull` fetches it —
+    /// top-level files + `mtp/` + `drafter/`, all needed extensions.
     static let chatDefault = FileSelection()
+    /// The pack without its `drafter/` (a drafter socket switched off).
+    static let chatWithoutDrafter = FileSelection(excludeSubstrings: [DrafterGems.packFolder + "/"])
 
     static func packFolder(_ folder: String) -> FileSelection {
         FileSelection(packFolder: folder)
@@ -211,6 +214,20 @@ extension MediaBundle {
                                    "model.safetensors.index.json", "tokenizer.json"]
                 ),
             ],
+            sizeEstimateGB: sizeGB
+        )
+    }
+
+    static func clef(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
+        MediaBundle(
+            id: "clef:\(repo)",
+            displayName: displayName,
+            components: [MediaComponent(
+                repo: repo,
+                selection: FileSelection(recursive: true),
+                readyMarkers: ["joint_head_config.json", "joint_head.safetensors", "config.json",
+                               "model.safetensors.index.json", "tokenizer.json"]
+            )],
             sizeEstimateGB: sizeGB
         )
     }
@@ -404,6 +421,66 @@ extension MediaBundle {
         )
     }
 
+    /// The 1024 cascade's flows and both decoders, the same files in TRELLIS.2 and Pixal3D packs. The 512 texture
+    /// flow (TRELLIS.2) and the `_mv` flows (Pixal3D's multi-view) are not fetched: a pack without them serves
+    /// 1024 and 1536 from one photo.
+    private static let trellisCascade = [
+        "ss_flow_img_dit_1_3B_64_bf16", "slat_flow_img2shape_dit_1_3B_512_bf16",
+        "slat_flow_img2shape_dit_1_3B_1024_bf16", "slat_flow_imgshape2tex_dit_1_3B_1024_bf16",
+        "shape_dec_next_dc_f16c32_fp16", "tex_dec_next_dc_f16c32_fp16",
+    ].map { "ckpts/\($0).safetensors" }
+
+    /// TRELLIS.2-4B: `pipeline.json` plus the cascade, the sparse-structure decoder from the older TRELLIS repo and
+    /// the DINOv3 encoder, all under the paths the server reads them from.
+    static func trellis2(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
+        cascade3D(kind: "trellis2", repo: repo, displayName: displayName, sizeGB: sizeGB, files: trellisCascade + [
+            "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16.safetensors", "dinov3/model.safetensors",
+        ])
+    }
+
+    /// Pixal3D: the same cascade with its sparse-structure decoder in `ckpts/` and NAF's upsampler beside DINOv3.
+    static func pixal3d(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
+        cascade3D(kind: "pixal3d", repo: repo, displayName: displayName, sizeGB: sizeGB, files: trellisCascade + [
+            "ckpts/ss_dec_conv3d_16l8_fp16.safetensors", "dinov3/model.safetensors", "naf/model.safetensors",
+        ])
+    }
+
+    /// Idol: the three transformers, BiRefNet, and the two image encoders (DINOv3 and the FLUX.2 VAE) it reads, all
+    /// under the paths the server loads them from (`tests/convert_idol_weights.py` writes this layout).
+    static func idol(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
+        let files = [
+            "denoiser.safetensors", "decoder.safetensors", "decoder_gs.safetensors", "birefnet.safetensors",
+            "dinov3/model.safetensors", "vae/model.safetensors",
+        ]
+        return MediaBundle(
+            id: "idol:\(repo)",
+            displayName: displayName,
+            components: [
+                MediaComponent(
+                    repo: repo,
+                    selection: FileSelection(recursive: true, keepSafetensors: Set(files.map { ($0 as NSString).lastPathComponent })),
+                    readyMarkers: ["config.json", "dinov3/config.json"] + files
+                ),
+            ],
+            sizeEstimateGB: sizeGB
+        )
+    }
+
+    private static func cascade3D(kind: String, repo: String, displayName: String, sizeGB: Double, files: [String]) -> MediaBundle {
+        MediaBundle(
+            id: "\(kind):\(repo)",
+            displayName: displayName,
+            components: [
+                MediaComponent(
+                    repo: repo,
+                    selection: FileSelection(recursive: true, keepSafetensors: Set(files.map { ($0 as NSString).lastPathComponent })),
+                    readyMarkers: ["pipeline.json"] + files
+                ),
+            ],
+            sizeEstimateGB: sizeGB
+        )
+    }
+
     /// ACE-Step music: a flat converted dir — `config.json` +
     /// `model.safetensors` (DiT + condition encoder) + `vae.safetensors`
     /// (Oobleck) + `fsq.safetensors` (cover-mode tokenizer; fetched on demand
@@ -462,6 +539,51 @@ extension MediaBundle {
         )
     }
 
+    /// YuE2: a flat converted dir — the 3B trunk and the Oobleck VAE decoder
+    /// folded in beside it (`model.safetensors` + `vae.safetensors`), their
+    /// configs and the tiktoken ranks. `vae.safetensors` is the completeness
+    /// marker the server checks too: the upstream repo ships no decoder.
+    static func yue2(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
+        MediaBundle(
+            id: "yue2:\(repo)",
+            displayName: displayName,
+            components: [
+                MediaComponent(
+                    repo: repo,
+                    selection: FileSelection(recursive: true, keepSafetensors: [
+                        "model.safetensors", "vae.safetensors",
+                    ]),
+                    readyMarkers: [
+                        "config.json", "model.safetensors", "vae.safetensors",
+                        "vae_config.json", "qwen.tiktoken",
+                    ]
+                ),
+            ],
+            sizeEstimateGB: sizeGB
+        )
+    }
+
+    /// Stable Audio 3, Stability's own repo as published: `model_config.json`
+    /// (no `config.json`), `model.safetensors`, and T5Gemma in a subdir that
+    /// is also the server's completion marker. The thumbnail stays behind.
+    static func sound(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
+        MediaBundle(
+            id: "sound:\(repo)",
+            displayName: displayName,
+            components: [
+                MediaComponent(
+                    repo: repo,
+                    selection: FileSelection(recursive: true, excludeSubstrings: [".png"]),
+                    readyMarkers: [
+                        "model_config.json", "model.safetensors",
+                        "t5gemma-b-b-ul2/model.safetensors", "t5gemma-b-b-ul2/tokenizer.json",
+                    ]
+                ),
+            ],
+            sizeEstimateGB: sizeGB
+        )
+    }
+
     /// Mage-Flow (diffusers layout): one repo with weight subdirs
     /// (`transformer/`, `vae/`, `text_encoder/`, `scheduler/`) and NO root
     /// config.json — detection keys on `model_index.json`. Recursive download
@@ -482,8 +604,9 @@ extension MediaBundle {
         )
     }
 
-    /// Qwen-Image-2.1 (mlx-serve pack): the diffusers layout plus the root
-    /// `config.json` our converter writes LAST, which is what names the backend.
+    /// Qwen-Image-2.1: the diffusers layout. Our packs add a root `config.json`;
+    /// the official and mlx-community trees have only `model_index.json`, which
+    /// every pack carries and the server classifies them by.
     static func qwenImage(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
         MediaBundle(
             id: "qwenimage:\(repo)",
@@ -492,7 +615,24 @@ extension MediaBundle {
                 MediaComponent(
                     repo: repo,
                     selection: FileSelection(recursive: true),
-                    readyMarkers: ["config.json", "transformer", "vae", "text_encoder", "processor"]
+                    readyMarkers: ["model_index.json", "transformer", "vae", "text_encoder", "processor"]
+                ),
+            ],
+            sizeEstimateGB: sizeGB
+        )
+    }
+
+    /// MOSS-Image: the release's diffusers tree as published (model_index.json
+    /// names the pipeline; the tokenizer has its own subdir).
+    static func mossImage(repo: String, displayName: String, sizeGB: Double) -> MediaBundle {
+        MediaBundle(
+            id: "mossimage:\(repo)",
+            displayName: displayName,
+            components: [
+                MediaComponent(
+                    repo: repo,
+                    selection: FileSelection(recursive: true, excludeSubstrings: ["assets/"]),
+                    readyMarkers: ["model_index.json", "transformer", "vae", "text_encoder", "tokenizer", "scheduler"]
                 ),
             ],
             sizeEstimateGB: sizeGB
@@ -524,8 +664,10 @@ extension ImageModelPreset {
             return .krea(repo: repo, displayName: name, sizeGB: Double(approxDownloadGB))
         case .mageFlowTurbo, .mageFlowEditTurbo:
             return .mageFlow(repo: repo, displayName: name, sizeGB: Double(approxDownloadGB))
-        case .qwenImage21:
+        case .qwenImage21, .qwenImage21Turbo:
             return .qwenImage(repo: repo, displayName: name, sizeGB: Double(approxDownloadGB))
+        case .mossImage:
+            return .mossImage(repo: repo, displayName: name, sizeGB: Double(approxDownloadGB))
         case .flux2Klein9B, .flux2Klein9BBase:
             // The MLX conversions of klein 9B — distilled and base alike —
             // ship no root config.json.
@@ -563,7 +705,12 @@ extension VideoModelPreset {
 
 extension Model3DModelPreset {
     var bundle: MediaBundle {
-        .model3d(repo: repo, displayName: name, sizeGB: approxDownloadGB)
+        switch family {
+        case .hunyuan3d: return .model3d(repo: repo, displayName: name, sizeGB: approxDownloadGB)
+        case .trellis2: return .trellis2(repo: repo, displayName: name, sizeGB: approxDownloadGB)
+        case .pixal3d: return .pixal3d(repo: repo, displayName: name, sizeGB: approxDownloadGB)
+        case .idol: return .idol(repo: repo, displayName: name, sizeGB: approxDownloadGB)
+        }
     }
 }
 
@@ -572,21 +719,19 @@ extension MusicModelPreset {
         switch family {
         case .acestep: return .music(repo: repo, displayName: name, sizeGB: approxDownloadGB)
         case .minimaxMusic3: return .music3(repo: repo, displayName: name, sizeGB: approxDownloadGB)
+        case .yue2: return .yue2(repo: repo, displayName: name, sizeGB: approxDownloadGB)
         }
     }
 }
 
+extension SoundModelPreset {
+    var bundle: MediaBundle { .sound(repo: repo, displayName: name, sizeGB: approxDownloadGB) }
+}
+
 // MARK: - Media pane generic surface
 
-/// Common surface every media-gen preset (image/audio/video/music) exposes to
-/// the Model Browser's Media tab, so ONE generic row renders all four
-/// modalities instead of four near-duplicate views. `Model3DModelPreset`
-/// deliberately does NOT conform — the Media tab covers exactly the four
-/// modalities the user asked for; 3D stays its own thing for now.
-/// What every media preset — INCLUDING 3D — can say about its cost. Split out
-/// of `MediaModelPreset` so a Create pane's picker can rank all five catalogues
-/// (`MediaModelPicks`) without dragging 3D into the Model Browser's Media tab,
-/// which is what conforming it to the fuller protocol below would do.
+/// What every media preset can say about its cost: all a Create pane's picker
+/// (`MediaModelPicks`) needs to rank a catalogue.
 protocol MediaModelSizing: Identifiable where ID == String {
     var name: String { get }
     /// Peak unified-memory footprint, GB — already the full RAM-needed
@@ -605,6 +750,10 @@ extension MediaModelSizing {
     }
 }
 
+/// Common surface every media-gen preset exposes to the Model Browser's Media
+/// tab, so ONE generic row renders every modality instead of near-duplicate
+/// views. The tab lists each modality's whole catalogue except 3D's, where it
+/// lists `Model3DModelPreset.modelBrowserCatalog` alone.
 protocol MediaModelPreset: MediaModelSizing, Hashable {
     var bundle: MediaBundle { get }
     /// Plain-English explanation shown under the model in the Media pane —
@@ -616,5 +765,5 @@ extension ImageModelPreset: MediaModelPreset {}
 extension AudioModelPreset: MediaModelPreset {}
 extension VideoModelPreset: MediaModelPreset {}
 extension MusicModelPreset: MediaModelPreset {}
-// Sizing only — see `MediaModelSizing`: 3D stays out of the Media tab.
-extension Model3DModelPreset: MediaModelSizing {}
+extension SoundModelPreset: MediaModelPreset {}
+extension Model3DModelPreset: MediaModelPreset {}

@@ -349,7 +349,7 @@ final class LocalizationTests: XCTestCase {
     /// the same evidence as adding a key: a branch that resolves in the table.
     private static let labelProducers = [
         "actionLabel", "actionTitle", "buttonLabel", "caption",
-        "controller.partialTranscript", "defect?.explanation", "detail", "displayName",
+        "defect?.explanation", "detail", "displayName",
         "engineExplainer", "label", "lead", "modeLabel", "modelPickerLabel", "placeholder", "pretty",
         "run.summary ?? run.status.label", "shortMessage", "startupModelLabel", "statusLine", "title",
     ]
@@ -460,7 +460,7 @@ final class LocalizationTests: XCTestCase {
 
         // Headers are uppercased AFTER the lookup, so the key is the source
         // spelling; `TTFT` and `n` are notation and stay Latin.
-        let headers = ["Rung", "Prompt", "Prefill", "Decode", "Ceiling", "TTFT", "Ctx", "n"]
+        let headers = ["Rung", "Prompt", "Prefill", "Decode", "Max", "Max decode", "TTFT", "Ctx", "n"]
 
         // One dictionary per chip branch, including the ds4 / llama.cpp
         // engines and the two drafter spellings.
@@ -547,6 +547,19 @@ final class LocalizationTests: XCTestCase {
 
         for value in MusicPrompt.builtinStyles.map(\.title) + MusicPrompt.music3Styles.map(\.title) {
             assertResolves(value, "music starter", keys: keys)
+        }
+    }
+
+    /// The marketplace renders an input's `helpText` through `L10n.text`, so a
+    /// wording change must re-key every catalog that translates it.
+    func testMCPInputHelpTextResolvesInEveryCatalog() throws {
+        let ado = try XCTUnwrap(MCPCatalog.entry(for: "azure-devops"))
+        let help = try XCTUnwrap(ado.inputs.first { $0.id == "ado_pat" }?.helpText)
+        let resources = Self.catalogURL.deletingLastPathComponent().deletingLastPathComponent()
+        for lang in ["zh-Hans", "ko"] {
+            let data = try Data(contentsOf: resources.appendingPathComponent("\(lang).lproj/Localizable.strings"))
+            let entries = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: String])
+            XCTAssertNotNil(entries[help], "\(lang): the Azure DevOps PAT help text has no entry")
         }
     }
 
@@ -644,11 +657,9 @@ final class LocalizationTests: XCTestCase {
     func testVoiceAndChatProducerValuesResolveInTheCatalog() throws {
         let keys = Set(try catalog().map(\.key))
 
-        for issue: VoicePreflight.Issue in [.microphoneDenied, .speechDenied,
-                                            .dictationUnavailable(locale: "en-US")] {
+        for issue: VoicePreflight.Issue in [.microphoneDenied, .asrMissing] {
             assertResolves(VoicePreflight.shortMessage(for: issue), "voice short message", keys: keys)
-            assertResolves(VoicePreflight.detail(for: issue), "voice detail",
-                           values: [("en-US", "%@")], keys: keys)
+            assertResolves(VoicePreflight.detail(for: issue), "voice detail", keys: keys)
             assertResolves(VoicePreflight.actionLabel(for: issue), "voice action", keys: keys)
         }
 
@@ -664,6 +675,19 @@ final class LocalizationTests: XCTestCase {
             return XCTFail("\(pin) did not decide as unavailable: \(decision)")
         }
         assertResolves(reason, "unreachable model", values: [(pin, "%@")], keys: keys)
+    }
+
+    /// The Decisions pane's Clef copy. The choice example is one interpolated
+    /// literal, so its catalog key carries `%@`.
+    func testClefDecisionPaneCopyResolvesInTheCatalog() throws {
+        let keys = Set(try catalog().map(\.key))
+        assertResolves("Clef Decisions", "pane title", keys: keys)
+        assertResolves("Clef reads the state and all questions together, then scores their allowed options jointly. It returns probabilities for routing, triage, labeling and scoring.",
+                       "clef description", keys: keys)
+        assertResolves("Answers carry the chosen value and per-option `probabilities`; choice and score add a `confidence`.",
+                       "answer note", keys: keys)
+        assertResolves("**choice** picks one of your options.\n`%@`", "choice example", keys: keys)
+        assertResolves("Pick a decision model in Models → Downloaded and press Use.", "empty state", keys: keys)
     }
 
     private static func specs(_ text: String) -> [String] {

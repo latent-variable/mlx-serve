@@ -22,7 +22,8 @@ final class TaskNotifier: NSObject, UNUserNotificationCenterDelegate {
     private static let approveAction = "APPROVE"
     private static let denyAction = "DENY"
 
-    private var available: Bool { Bundle.main.bundleIdentifier != nil }
+    /// The notification center traps outside an app bundle (the xctest host has an id).
+    private var available: Bool { Bundle.main.bundleURL.pathExtension == "app" }
 
     func requestAuthorization() {
         guard available else { return }
@@ -69,6 +70,16 @@ final class TaskNotifier: NSObject, UNUserNotificationCenterDelegate {
         post(title: L10n.format("%@ needs approval", task.title),
              body: L10n.format("Wants to run “%@”. %@", tool, reason),
              category: Self.approvalCategory, task: task, run: run)
+    }
+
+    /// A model that took a while to load is ready (`LoadProgress.notifiesReady`).
+    func notifyModelReady(name: String) {
+        guard available else { return }
+        let content = UNMutableNotificationContent()
+        content.title = L10n.format("%@ is ready", name)
+        content.body = L10n.text("The model finished loading.")
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
     private func post(title: String, body: String, category: String, task: ScheduledTask, run: TaskRun) {

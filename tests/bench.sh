@@ -1,27 +1,19 @@
 #!/bin/bash
-# bench.sh — the performance bench. llmprobe measures; this drives mlx-serve.
-#
-# One `llmprobe --bench-only` run per model gives the decode/prefill/TTFT
-# medians AND the context ladder. The numbers go into benchmarks.md by hand —
-# there is no CSV, no chart pipeline and no engine matrix here any more.
+# bench.sh — THE performance bench: llmprobe measures, this drives mlx-serve (boot -> probe -> kill -> settle, one
+# model at a time; `llmprobe --bench-only`, decode/prefill/TTFT medians and the context ladder).
 #
 #   ./tests/bench.sh                                # every model
 #   ./tests/bench.sh --only qwen38-27b              # one row
-#   ./tests/bench.sh --url 127.0.0.1:1234 -m <id>   # a server someone else started
+#   ./tests/bench.sh --url 127.0.0.1:1234 -m <id>   # another engine you started yourself (never killed by this)
 #   ./tests/bench.sh --full                         # median of 3 per rung, to 64k
 #
-# Each cell is mlx-serve at its FASTEST: speculation is forced on where the
-# checkpoint carries an MTP head (older binaries left it off on MoE). The mode
-# that actually engaged is printed beside the number, from the server's own
-# log — a mode that silently stops engaging shows up as a bare cell.
-#
-# Comparing against another engine: start it yourself (LM Studio, oMLX, MTPLX,
-# llama-server, whatever), then point --url at it. Same protocol, same probe,
-# one less thing in this script to keep in sync.
-#
-# Requirements: node (npx), curl, mlx-serve built ReleaseFast (Debug is 2-4x
-# slower = a fake regression).
+# Each cell is mlx-serve at its FASTEST: --mtp where a head ships, a DFlash drafter that ships as its own repo attached
+# per row (`drafter_for`; a pack's own drafter/ loads without it). The engaged mode is read off `[spec-stats] mode=`
+# and printed beside the number, so a mode that stops engaging shows as a bare cell. Output: paste-ready rows for
+# benchmarks.md; reports + server logs in ~/claude-tmp/bench-<tag>/. Needs node (npx), curl and a ReleaseFast build.
+
 set -u
+source "$(dirname "$0")/lib/server.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -36,6 +28,7 @@ SETTLE="${SETTLE:-20}"
 BINARY="${BINARY:-$ROOT/zig-out/bin/mlx-serve}"
 LLMPROBE="${LLMPROBE:-npx -y llmprobe@latest}"
 PORT=11250
+RAN=()
 
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
@@ -71,6 +64,9 @@ TARGETS=(
     "qwen38-27b|ddalcu/Qwen3.8-27B-MLX-Serve-4bit"
     "qwen38-27b-iq|ddalcu/Qwen3.8-27B-MLX-Serve-iQ-MLX-3.8bpw"
     "qwen38-flash-next|ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
+    "qwen38-flash-next-iq|ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-4.7bpw"
+    "mimo-v26-flash|ddalcu/MiMo-V2.6-Flash-MLX-Serve-MXFP4-Q8"
+    "glm53-flash|TensorFold/GLM-5.3-Flash-MLX-oQ4-MTP"
 )
 
 # Only ever called on the path that STARTED a server: --url may be pointed at
@@ -87,6 +83,7 @@ probe() { # logical host model_id
     local depth=(--bench-only)
     [[ "$FULL" -eq 1 ]] && depth+=(--full)
     echo "── $1 ($2, $3) ──"
+    RAN+=("$1")
     # shellcheck disable=SC2086
     $LLMPROBE "$2" -m "$3" "${depth[@]}" --save "$OUT/$1.json" \
         || echo "  llmprobe failed for $1" >&2
@@ -98,6 +95,7 @@ probe() { # logical host model_id
 drafter_for() { # logical
     case "$1" in
         qwen38-27b) find_model z-lab/Qwen3.8-27B-DFlash2 ;;
+        *) return 1 ;;
     esac
 }
 
@@ -119,6 +117,7 @@ if [[ -n "$URL" ]]; then
     probe "$(echo "$URL_MODEL" | tr '/ ' '__')" "$URL" "$URL_MODEL"
 else
     [[ -x "$BINARY" ]] || { echo "no $BINARY — build ReleaseFast first" >&2; exit 1; }
+    [[ "$("$BINARY" --version 2>/dev/null | head -1)" != *"(Debug)"* ]] || { echo "$BINARY is a Debug build (2-4x slower) — build ReleaseFast first" >&2; exit 1; }
     echo "=== bench: mlx-serve, tag=$TAG, reports → $OUT ==="
     trap 'stop_server' EXIT
     stop_server
@@ -129,12 +128,10 @@ else
         path=$(find_fitting_model "${cands[@]}") || { echo "SKIP $logical (no checkpoint within $(max_model_gb) GB on this box)" >&2; continue; }
         spec_flags "$logical" "$path"
         echo; echo ">> $logical ${FLAGS[*]+${FLAGS[*]}}"
-        "$BINARY" --serve --model "$path" --port "$PORT" ${FLAGS[@]+"${FLAGS[@]}"} >"$OUT/$logical.log" 2>&1 &
+        # Scratch HOME: a saved model-settings.json outranks these flags (a drafter, a KV scheme).
+        HOME="$OUT/home" "$BINARY" --serve --model "$path" --port "$PORT" ${FLAGS[@]+"${FLAGS[@]}"} >"$OUT/$logical.log" 2>&1 &
         pid=$!
-        for _ in $(seq 1 300); do
-            curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
-            sleep 1
-        done
+        srv_wait_health "http://127.0.0.1:$PORT" 300 1 || true
         if curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
             probe "$logical" "localhost:$PORT" "$(basename "$path")"
         else
@@ -149,11 +146,14 @@ fi
 
 # ── The only artifact: rows to paste into benchmarks.md ──
 echo
-python3 - "$OUT" <<'PY'
+python3 - "$OUT" ${RAN[@]+"${RAN[@]}"} <<'PY'
 import json, re, sys
 from pathlib import Path
 
-for path in sorted(Path(sys.argv[1]).glob("*.json")):
+# Only this run's rows: an earlier run's reports in the same tag dir are stale.
+for path in sorted(Path(sys.argv[1]) / f"{name}.json" for name in sys.argv[2:]):
+    if not path.exists():
+        continue
     bench = (json.loads(path.read_text()) or {}).get("bench") or {}
     decode = (bench.get("decodeTokPerSec") or {}).get("median")
     prefill = (bench.get("prefillTokPerSec") or {}).get("median")
@@ -172,8 +172,9 @@ for path in sorted(Path(sys.argv[1]).glob("*.json")):
     if decode is None:
         print(f"| {path.stem} | · |  (no bench block)")
         continue
+    pf = "n/a" if prefill is None else f"{prefill:.0f}"
     print(f"| {path.stem} | {decode:.0f}{mode} |"
-          f"  (prefill {prefill:.0f}, {tps:.2f} tok/step)")
+          f"  (prefill {pf}, {tps:.2f} tok/step)")
 PY
 echo
 echo "=== reports $OUT"
