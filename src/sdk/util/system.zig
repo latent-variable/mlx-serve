@@ -140,16 +140,13 @@ pub fn computeAvailableBytes(total_mem: u64, free_pages: u64, speculative_pages:
     return @min(reclaimable *| page, outside);
 }
 
-/// What a model LOAD can count on: `computeAvailableBytes` plus half the idle anonymous pages, which
-/// macOS compresses (about 2:1) or swaps out to make room for a wiring. Inactive holds file-backed pages
-/// too and `external` bounds those, so `inactive - external` is a floor on the idle anonymous set. Same
-/// cap as the base figure. Only the load preflight uses it: the per-request gates keep the base figure.
-pub fn computeLoadAvailableBytes(total_mem: u64, free_pages: u64, speculative_pages: u64, external_pages: u64, purgeable_pages: u64, inactive_pages: u64, wire_pages: u64, compressor_pages: u64, page: u64) u64 {
-    const base = computeAvailableBytes(total_mem, free_pages, speculative_pages, external_pages, purgeable_pages, wire_pages, compressor_pages, page);
-    if (base == 0) return 0;
-    const idle_anon: u64 = inactive_pages -| external_pages;
-    const outside: u64 = total_mem -| (wire_pages +| compressor_pages) *| page;
-    return @min(base +| (idle_anon / 2) *| page, outside);
+/// What a model LOAD can count on: the RAM outside wired and compressor memory, less the OS reserve. macOS
+/// compresses or swaps any app's pages to make room for a wiring, so only wired memory (another loaded
+/// model, the kernel) and the compressor's own pages bind. Only the load preflight uses it: the
+/// per-request gates keep `computeAvailableBytes`. 0 on a failed query.
+pub fn computeLoadAvailableBytes(total_mem: u64, wire_pages: u64, compressor_pages: u64, page: u64, reserve: u64) u64 {
+    if (total_mem == 0) return 0;
+    return (total_mem -| (wire_pages +| compressor_pages) *| page) -| reserve;
 }
 
 extern "c" fn os_proc_available_memory() usize;
@@ -257,7 +254,7 @@ fn hostLoadAvailableMemBytes() u64 {
     var count: u32 = @sizeOf(VmStats64) / @sizeOf(i32);
     if (host_statistics64(mach_host_self(), 4, @ptrCast(&vm), &count) != 0) return 0;
 
-    return computeLoadAvailableBytes(total_mem, vm.free_count, vm.speculative_count, vm.external_page_count, vm.purgeable_count, vm.inactive_count, vm.wire_count, vm.compressor_page_count, page);
+    return computeLoadAvailableBytes(total_mem, vm.wire_count, vm.compressor_page_count, page, osReserveBytes(total_mem, false));
 }
 
 const MemoryStatusEx = extern struct {
@@ -371,24 +368,19 @@ test "computeAvailableBytes sums the reclaimable classes, capped by wired headro
     try std.testing.expectEqual(@as(u64, 7 * GB), computeAvailableBytes(16 * GB, 2 * ppg, 0, 1 * ppg, 4 * ppg, 3 * ppg, 1 * ppg, page));
 }
 
-test "computeLoadAvailableBytes adds half the idle anonymous pages, under the same cap" {
+test "computeLoadAvailableBytes is the RAM outside wired and compressor memory, less the OS reserve" {
     const GB: u64 = 1024 * 1024 * 1024;
     const page: u64 = 16384;
     const ppg: u64 = GB / page;
 
-    // 128 GB box: 30 free, 10 file-backed, 30 inactive (so at least 20 of it anonymous), 8 wired + 2 compressor.
-    // Base = 40; half of the 20 idle anonymous joins it.
-    try std.testing.expectEqual(@as(u64, 40 * GB), computeAvailableBytes(128 * GB, 30 * ppg, 0, 10 * ppg, 0, 8 * ppg, 2 * ppg, page));
-    try std.testing.expectEqual(@as(u64, 50 * GB), computeLoadAvailableBytes(128 * GB, 30 * ppg, 0, 10 * ppg, 0, 30 * ppg, 8 * ppg, 2 * ppg, page));
-
-    // Every inactive page file-backed: nothing to add, the base figure stands.
-    try std.testing.expectEqual(@as(u64, 40 * GB), computeLoadAvailableBytes(128 * GB, 30 * ppg, 0, 10 * ppg, 0, 6 * ppg, 8 * ppg, 2 * ppg, page));
-
-    // The cap holds: 16 GB box with 13 wired + 1 compressor has 2 GB outside, however much is idle.
-    try std.testing.expectEqual(@as(u64, 2 * GB), computeLoadAvailableBytes(16 * GB, 1 * ppg, 0, 1 * ppg, 0, 10 * ppg, 13 * ppg, 1 * ppg, page));
-
-    // A failed query reads 0, never the idle share alone.
-    try std.testing.expectEqual(@as(u64, 0), computeLoadAvailableBytes(0, 0, 0, 0, 0, 30 * ppg, 0, 0, page));
+    // 128 GB box, 8 wired + 2 compressor, 8 reserved: 110 GB, whatever the apps hold, since macOS moves them for a wiring.
+    try std.testing.expectEqual(@as(u64, 110 * GB), computeLoadAvailableBytes(128 * GB, 8 * ppg, 2 * ppg, page, 8 * GB));
+    // Another model wired at 70 GB leaves 40: wired memory is the one thing nothing moves.
+    try std.testing.expectEqual(@as(u64, 40 * GB), computeLoadAvailableBytes(128 * GB, 78 * ppg, 2 * ppg, page, 8 * GB));
+    // Past the RAM: 0, never a wrapped figure.
+    try std.testing.expectEqual(@as(u64, 0), computeLoadAvailableBytes(16 * GB, 13 * ppg, 2 * ppg, page, 2 * GB));
+    // A failed query reads 0.
+    try std.testing.expectEqual(@as(u64, 0), computeLoadAvailableBytes(0, 0, 0, page, 8 * GB));
 }
 
 pub fn getSysMemPct() u32 {
