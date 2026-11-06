@@ -630,23 +630,24 @@ test "a sidecar bills its loaded width, and only an in-dir one is dropped to fit
     try std.testing.expectEqual(PreflightVerdict.fits, preflightVerdict(20 * GB, 0, 25 * GB, true));
 }
 
-test "load preflight: a load that fits once idle apps are compressed is admitted; one that cannot fit is still refused" {
+test "load preflight: a load macOS can make room for is admitted; one beside another resident model is refused" {
     const system = @import("../../../sdk/util/system.zig");
     const GB: u64 = 1024 * 1024 * 1024;
     const page: u64 = 16384;
     const total: u64 = 128 * GB;
-    // vm_stat on a 128 GB M5 Max with browsers, editors and agent sessions idle, nothing loaded:
-    // free 4104361, speculative 130855, file-backed 735834, purgeable 83758, inactive 1663021,
-    // wired 451005, compressor 193872 pages. The 70.13 GB pack needs ~77.1 GB.
+    const reserve = system.osReserveBytes(total, false);
     const weights: u64 = @intFromFloat(70.13 * @as(f64, @floatFromInt(GB)));
-    const base = system.computeAvailableBytes(total, 4104361, 130855, 735834, 83758, 451005, 193872, page);
-    const load = system.computeLoadAvailableBytes(total, 4104361, 130855, 735834, 83758, 1663021, 451005, 193872, page);
-    try testing.expect(memInsufficientForLoad(weights, base)); // the 503 this fixes: ~73.1 GB read as available
-    try testing.expect(!memInsufficientForLoad(weights, load)); // ~80.2 GB: it loaded with ~28 GB to spare
-    // A pack the box cannot hold is still refused, idle apps or not.
-    try testing.expect(memInsufficientForLoad(100 * GB, load));
-    // The same box with those apps ACTIVE (nothing inactive) refuses the 70 GB pack as before.
-    try testing.expect(memInsufficientForLoad(weights, system.computeLoadAvailableBytes(total, 4104361, 130855, 735834, 83758, 0, 451005, 193872, page)));
+    const pages = struct {
+        fn of(gb: f64) u64 {
+            return @intFromFloat(gb * @as(f64, @floatFromInt(GB / page)));
+        }
+    }.of;
+    // vm_stat on a 128 GB M5 Max holding 36 GB of idle app memory: free 12.5, file-backed 19.4, wired 8.3,
+    // compressor 2.5 GB. The base figure reads ~31.9 GB; the 70.13 GB pack (needs ~77.1) loaded there in 95 s.
+    try testing.expect(memInsufficientForLoad(weights, system.computeAvailableBytes(total, pages(12.5), 0, pages(19.4), 0, pages(8.3), pages(2.5), page)));
+    try testing.expect(!memInsufficientForLoad(weights, system.computeLoadAvailableBytes(total, pages(8.3), pages(2.5), page, reserve)));
+    // The same pack already resident in another server (wired 77.6, compressor 9.6 GB) is refused.
+    try testing.expect(memInsufficientForLoad(weights, system.computeLoadAvailableBytes(total, pages(77.6), pages(9.6), page, reserve)));
 }
 
 test "memInsufficientForLoad: headroom + unknown-query guards" {

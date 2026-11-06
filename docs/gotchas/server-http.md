@@ -819,10 +819,13 @@ drops first) read as taken. Fix: purgeable joins the grantable sum in `computeAv
 Guard: `computeAvailableBytes sums the reclaimable classes…`, `testPurgeablePagesCountAsGrantable`.
 
 ### A 70 GB pack was refused on a 128 GB Mac with ~98 GB to give
-Defect: with browsers and editors idle, every cold load of Qwen3.8-Flash-Next 503'd (needs 77.1, "available" 73.2);
-loaded past the preflight, ~28 GB stayed free. Cause: idle anonymous pages, which macOS compresses or swaps for a
-wiring, read as taken. Fix: the load preflight alone adds half of `inactive - external` (`computeLoadAvailableBytes`).
-Guard: `load preflight: a load that fits once idle apps are compressed is admitted…`.
+Defect: with browsers and editors open, every cold load of Qwen3.8-Flash-Next 503'd (needs 77.1, "available" 73.2);
+loaded past the preflight, ~28 GB stayed free. Cause: the load read only free, file-backed and purgeable pages as
+available, but macOS compresses or swaps ANY app's pages to make room for a wiring: 21 of 21 live loads with 12 to
+36 GB of app memory held succeeded at a base figure as low as 31.9 GB. Crediting half the idle pages was tried first
+and still refused loads that fit. Fix: the load preflight takes the RAM outside wired + compressor, less the OS
+reserve (`computeLoadAvailableBytes`); another resident model is wired, so a load beside it is still refused.
+Guard: `load preflight: a load macOS can make room for is admitted…`.
 
 ### A client that hung up during a cold prefill left the GPU prefilling for a ghost
 Defect: Claude Code retrying a 40K-token prompt queued abandoned prefills while no client was connected. Cause: the
