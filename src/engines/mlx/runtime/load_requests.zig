@@ -106,6 +106,7 @@ pub fn runLoadRequest(sch: *Scheduler, req: *LoadRequest) void {
     doLoadOnInferenceThread(sch, req) catch |err| {
         // The load's own MLX error is reported here; latched, it would fail the next request.
         const cause = loadFailureCause(err, had_error);
+        if (cause == error.GpuTimeout) mlx.drainGpu();
         mlx.dropLatchedErrorUnless(had_error);
         return failLoadRequest(sch, req, cause);
     };

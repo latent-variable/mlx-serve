@@ -1363,6 +1363,14 @@ pub fn mlxErrorIsGpuTimeout(msg: []const u8) bool {
         std.mem.indexOf(u8, msg, "GPU Timeout Error") != null;
 }
 
+/// Waits out the GPU work still in flight: after a timeout the rest of a failed eval's command buffers keep
+/// failing, and their errors must latch before the caller drops them, not during the next load.
+pub fn drainGpu() void {
+    const s = gpuStream();
+    defer _ = mlx_stream_free(s);
+    _ = mlx_synchronize(s);
+}
+
 /// True when an error is latched and `pred` holds for its message; the latch stays.
 pub fn latchedErrorIs(comptime pred: fn ([]const u8) bool) bool {
     if (!latch().mlx_error_latched.load(.acquire)) return false;
