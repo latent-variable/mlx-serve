@@ -13,6 +13,7 @@ pub const Known = error{
     GenerationFailed,
     GenerationOutOfMemory,
     GpuContextLost,
+    GpuTimeout,
     InsufficientMemory,
     DistWorkerNotJoined,
     LoadFailed,
@@ -61,6 +62,8 @@ pub fn check(name: ?[]const u8) Known!void {
 
 test "err_name: a known name comes back as the same error; an unknown one keeps its name" {
     try std.testing.expectEqual(error.PrefillDoesNotFit, toError("PrefillDoesNotFit"));
+    // A load the GPU timed out on answers its own 503, not a generic 500.
+    try std.testing.expectEqual(error.GpuTimeout, toError("GpuTimeout"));
     try std.testing.expectEqual(error.EngineFailed, toError("InvalidQwen4Indexer"));
     try std.testing.expectEqualStrings("InvalidQwen4Indexer", last());
     try check(null);
