@@ -77,6 +77,7 @@ def records(dump_path):
 def key_of(r):
     names = ",".join(sorted(
         (t.get("function") or {}).get("name") or "" for t in r["tools"]))
+    # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1 -- not a security use: git blob id / dedupe key
     return hashlib.sha1((r["raw"] + "|" + names).encode()).hexdigest()
 
 

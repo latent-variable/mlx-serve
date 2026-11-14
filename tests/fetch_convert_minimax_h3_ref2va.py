@@ -193,6 +193,7 @@ def main():
             hf_download(COMFY_REPO, [path], src)
 
         log(f"converting {label}")
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args -- test/dev script; argv list without a shell, args are the operator's own CLI/local paths
         rc = subprocess.run([
             sys.executable, os.path.join(os.path.dirname(__file__),
                                          "convert_minimax_h3_weights.py"),

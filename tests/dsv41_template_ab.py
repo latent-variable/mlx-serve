@@ -103,6 +103,7 @@ def main():
     a = ap.parse_args()
     enc = load_encoder(os.path.expanduser(a.encoding))
     import jinja2
+    # nosemgrep: python.jinja2.security.audit.missing-autoescape-disabled.missing-autoescape-disabled -- renders LLM chat templates to text, escaping would corrupt the prompt; no browser output
     env = jinja2.Environment(trim_blocks=False, lstrip_blocks=False, extensions=["jinja2.ext.loopcontrols"])
     env.policies["json.dumps_kwargs"] = {"sort_keys": False, "ensure_ascii": False}
     env.globals["raise_exception"] = lambda msg: (_ for _ in ()).throw(RuntimeError(msg))

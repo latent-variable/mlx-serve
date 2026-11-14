@@ -74,6 +74,7 @@ with tempfile.TemporaryDirectory(prefix='mlx-generation-defaults-') as home:
     })
     log_path = pathlib.Path(home, 'server.log')
     with log_path.open('a') as log:
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args -- test/dev script; argv list without a shell, args are the operator's own CLI/local paths
         process = subprocess.Popen([
             str(binary), '--serve', '--host', '127.0.0.1', '--port', str(port),
             '--model', str(model), '--ctx-size', '8192', '--kv-quant', '8',
