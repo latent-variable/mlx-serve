@@ -1,0 +1,14 @@
+# Known vulnerabilities we have decided to carry, read by the dependency gate
+# (scripts/audit-deps.sh).
+# Every entry names WHY it does not reach us, and expires: when ignoreUntil passes,
+# the gate fails again and someone looks at it fresh. Fixing beats ignoring.
+#
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# ignoreUntil = 2027-01-15T00:00:00Z   # at most 90 days out
+# reason = "which package pulls it, why the vulnerable path is unreachable here, what removes it"
+
+[[IgnoredVulns]]
+id = "GHSA-gcqx-w48m-w2h4"
+ignoreUntil = 2027-02-01T00:00:00Z
+reason = "deepmerge 4.3.1 (prototype-pollution class), dev-only via @sveltejs/vite-plugin-svelte in app-web; used at build time on our own svelte config, never on untrusted input, and not shipped. No fixed version exists upstream; remove when vite-plugin-svelte drops it."

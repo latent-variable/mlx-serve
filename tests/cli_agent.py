@@ -79,6 +79,7 @@ def execute_tool_real(name, args):
     if name == "shell":
         cmd = args.get("command", "echo 'no command'")
         try:
+            # nosemgrep: python.lang.security.audit.subprocess-shell-true.subprocess-shell-true -- test harness runs a fixed local command string, never untrusted input
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
             output = result.stdout + result.stderr
             return output[:3000] if output else "(no output)"

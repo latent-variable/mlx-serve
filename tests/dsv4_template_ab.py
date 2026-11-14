@@ -144,6 +144,7 @@ def main():
 
     import jinja2
     src = open(os.path.abspath(TEMPLATE)).read()
+    # nosemgrep: python.jinja2.security.audit.missing-autoescape-disabled.missing-autoescape-disabled -- renders LLM chat templates to text, escaping would corrupt the prompt; no browser output
     env = jinja2.Environment(trim_blocks=False, lstrip_blocks=False)
     env.policies["json.dumps_kwargs"] = {"sort_keys": False}
     tpl = env.from_string(src)

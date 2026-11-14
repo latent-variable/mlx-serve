@@ -87,6 +87,7 @@ def judge(run, rep, args, rubric, task_prompt):
     for attempt in range(3):
         t0 = time.time()
         try:
+            # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args -- test/dev script; argv list without a shell, args are the operator's own CLI/local paths
             out = subprocess.run(cmd, cwd=run / "frames", env=env, stdin=subprocess.DEVNULL,
                                  capture_output=True, text=True, timeout=args.timeout_s)
             res = json.loads(out.stdout)

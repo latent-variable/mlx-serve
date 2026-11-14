@@ -143,6 +143,7 @@ def main():
                 f"Free space (e.g. remove the superseded preview mirror) and re-run — this is resumable.")
             return 1
         log(f"{g}: converting ({fg:.1f} GiB free)")
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args -- test/dev script; argv list without a shell, args are the operator's own CLI/local paths
         r = subprocess.run(converter_cmd(args.converter, src, out, groups=g, imatrix=args.imatrix))
         if r.returncode != 0:
             log(f"ABORT: converter failed on {g}")
@@ -161,6 +162,7 @@ def main():
     # per-path `quantization` dict, and the tokenizer/template files. Without
     # it the mirror is a pile of shards no loader can open.
     log("finalizing: index + config + tokenizer")
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args -- test/dev script; argv list without a shell, args are the operator's own CLI/local paths
     r = subprocess.run(converter_cmd(args.converter, src, out, imatrix=args.imatrix))
     if r.returncode != 0:
         log("ABORT: finalize pass failed")

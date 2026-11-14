@@ -112,6 +112,7 @@ def main():
         deadline = time.monotonic() + 240
         with log_path.open("w") as log:
             process = subprocess.Popen(
+                # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args -- test/dev script; argv list without a shell, args are the operator's own CLI/local paths
                 [str(BINARY), "--model", str(scratch), "--serve", "--host", "127.0.0.1", "--port", str(PORT),
                  "--no-pld", "--no-mtp", "--no-drafter", "--prefix-cache-entries", "0"],
                 cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, env={**os.environ, "HOME": str(home)},

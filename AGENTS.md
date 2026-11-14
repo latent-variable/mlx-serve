@@ -181,3 +181,5 @@ Ported kernels + vendored code are enumerated in `NOTICE` (the ONE place); `LICE
 ### App (Swift)
 
 All app-side rules: `app/CLAUDE.md`; stories: `docs/gotchas/app.md`. Crossovers: agent budgets derive from advertised `context_length`; the app ALWAYS emits memory-critical launch flags (`ServerOptions` defaults mirror Zig defaults — change both together); the two bundle binaries move together.
+
+- Security gate: `bash scripts/audit-deps.sh && bash scripts/audit-code.sh` (run by hand before merge; no single pre-merge script exists and the CI runners do not carry the scanners). Fix a finding first; carry one only with its reason (`osv-scanner.toml`, or a `nosemgrep` / `gitleaks:allow` comment at the line).

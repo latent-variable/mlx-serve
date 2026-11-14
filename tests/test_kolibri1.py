@@ -43,6 +43,7 @@ def chat(content, **extra):
 
 os.makedirs(os.path.dirname(LOG), exist_ok=True)
 server = subprocess.Popen(
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args -- test/dev script; argv list without a shell, args are the operator's own CLI/local paths
     [BIN, "--model", MODEL, "--serve", "--host", "127.0.0.1", "--port", str(PORT),
      "--ctx-size", "8192", "--prefill-chunk", "1024"],
     stdout=open(LOG, "w"), stderr=subprocess.STDOUT,

@@ -295,6 +295,7 @@ def main():
     args = parser.parse_args()
     torch.set_num_threads(8)
     raw_config = (args.source / "config.json").read_bytes()
+    # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1 -- not a security use: git blob id / dedupe key
     blob = hashlib.sha1(b"blob " + str(len(raw_config)).encode() + b"\0" + raw_config).hexdigest()
     if blob != SOURCE_CONFIG_GIT_BLOB:
         raise ValueError("Source config does not match the pinned NVIDIA revision")

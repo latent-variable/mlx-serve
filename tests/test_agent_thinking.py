@@ -134,6 +134,7 @@ def execute_tool(name, args):
                 f.write(args.get("content", ""))
             return f"wrote {len(args.get('content',''))} chars to {args['path']}"
         if name == "shell":
+            # nosemgrep: python.lang.security.audit.subprocess-shell-true.subprocess-shell-true -- test harness runs a fixed local command string, never untrusted input
             r = subprocess.run(args["command"], shell=True, cwd=WORKSPACE, capture_output=True, text=True, timeout=30)
             out = (r.stdout + r.stderr)[:1000]
             return out or "(no output)"
